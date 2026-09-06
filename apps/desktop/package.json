@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vue-tsc -b && vite build",
-    "typecheck": "vue-tsc -b"
+    "typecheck": "vue-tsc -b",
+    "test": "vitest run"
   },
   "dependencies": {
     "@lucide/vue": "^1.41.0",
@@ -15,8 +16,10 @@
   "devDependencies": {
     "@types/node": "^24.3.1",
     "@vitejs/plugin-vue": "^6.0.1",
+    "fake-indexeddb": "^6.2.5",
     "typescript": "^5.9.2",
     "vite": "^7.1.4",
+    "vitest": "^5.0.0",
     "vue-tsc": "^3.0.6"
   }
 }
