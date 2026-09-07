@@ -5,6 +5,7 @@ members = [
     "crates/chronicle-storage",
     "crates/chronicle-sync",
 ]
+exclude = ["apps/desktop/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"

@@ -2,3 +2,4 @@ node_modules/
 dist/
 chronicle-preview.png
 *.tsbuildinfo
+src-tauri/target/

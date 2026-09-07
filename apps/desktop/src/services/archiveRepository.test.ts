@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ArchiveRecord } from "../domain";
-import { ArchiveRepository } from "./archiveRepository";
+import { BrowserArchiveRepository } from "./archiveRepository";
 
 class MemoryFileHandle {
   readonly kind = "file" as const;
@@ -50,7 +50,7 @@ afterEach(async () => {
 
 describe("ArchiveRepository", () => {
   it("creates versioned snapshots and restores an earlier file", async () => {
-    const repository = new ArchiveRepository();
+    const repository = new BrowserArchiveRepository();
     const handle = new MemoryFileHandle("settings.json", "version one");
     const archive = archiveFor(handle);
     await repository.putArchive(archive);

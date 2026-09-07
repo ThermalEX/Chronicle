@@ -58,6 +58,7 @@ async function collectDirectory(
 }
 
 async function readSource(archive: ArchiveRecord): Promise<Array<{ path: string; file: File }>> {
+  if (!archive.handle) throw new Error("存档缺少本地文件句柄");
   if (archive.kind === "file") {
     const file = await (archive.handle as FileSystemFileHandle).getFile();
     return [{ path: file.name, file }];
@@ -94,7 +95,7 @@ async function removeContents(directory: FileSystemDirectoryHandle): Promise<voi
   for await (const [name] of directory.entries()) await directory.removeEntry(name, { recursive: true });
 }
 
-export class ArchiveRepository {
+export class BrowserArchiveRepository {
   async listArchives(): Promise<ArchiveRecord[]> {
     const database = await openDatabase();
     const transaction = database.transaction(ARCHIVES, "readonly");
@@ -156,6 +157,7 @@ export class ArchiveRepository {
     safety = false,
     onProgress?: (progress: SnapshotProgress) => void,
   ): Promise<SnapshotRecord> {
+    if (!archive.handle) throw new Error("存档缺少本地文件句柄");
     await ensurePermission(archive.handle, "read");
     const sourceFiles = await readSource(archive);
     const files: SnapshotFile[] = [];
@@ -207,18 +209,20 @@ export class ArchiveRepository {
   }
 
   async restoreSnapshot(archive: ArchiveRecord, snapshot: SnapshotRecord): Promise<void> {
+    if (!archive.handle) throw new Error("存档缺少本地文件句柄");
     await ensurePermission(archive.handle, "readwrite");
     await this.createSnapshot(archive, "恢复前安全快照", true);
     if (archive.kind === "file") {
       const file = snapshot.files[0];
-      if (!file) throw new Error("快照中没有可恢复的文件");
+      if (!file?.blob) throw new Error("快照中没有可恢复的文件");
       await writeFile(archive.handle as FileSystemFileHandle, file.blob);
       return;
     }
     const root = archive.handle as FileSystemDirectoryHandle;
     await removeContents(root);
-    for (const file of snapshot.files) await writeFile(await ensureFile(root, file.path), file.blob);
+    for (const file of snapshot.files) {
+      if (!file.blob) throw new Error(`快照文件缺少内容：${file.path}`);
+      await writeFile(await ensureFile(root, file.path), file.blob);
+    }
   }
 }
-
-export const archiveRepository = new ArchiveRepository();

@@ -6,7 +6,7 @@ export type ArchiveRecord = {
   sourcePath: string;
   category: string;
   kind: ArchiveKind;
-  handle: FileSystemFileHandle | FileSystemDirectoryHandle;
+  handle?: FileSystemFileHandle | FileSystemDirectoryHandle;
   createdAt: number;
   updatedAt: number;
   totalBytes: number;
@@ -15,7 +15,7 @@ export type ArchiveRecord = {
 
 export type SnapshotFile = {
   path: string;
-  blob: Blob;
+  blob?: Blob;
   size: number;
   lastModified: number;
   hash: string;

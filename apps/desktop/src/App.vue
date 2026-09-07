@@ -6,7 +6,7 @@ import {
 } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { ArchiveKind, ArchiveRecord, SnapshotProgress, SnapshotRecord } from "./domain";
-import { archiveRepository } from "./services/archiveRepository";
+import { archiveRepository, isTauriRuntime } from "./services/repository";
 
 const categoryDefinitions = [
   { name: "游戏", icon: ArchiveRestore },
@@ -97,7 +97,7 @@ async function refreshSnapshots(archiveId?: string) {
 
 async function addArchive(kind: ArchiveKind) {
   addMenuOpen.value = false;
-  if (!("showOpenFilePicker" in window) || !("showDirectoryPicker" in window)) {
+  if (!isTauriRuntime && (!("showOpenFilePicker" in window) || !("showDirectoryPicker" in window))) {
     showNotice("当前环境不支持本地文件系统访问，请使用 Edge 或桌面版 Chronicle", "error");
     return;
   }
@@ -199,7 +199,7 @@ onBeforeUnmount(() => {
         <button v-for="category in categories" :key="category.name" :class="{ active: selectedCategory === category.name }" @click="selectCategory(category.name)"><component :is="category.icon" :size="18" /><span>{{ category.name }}</span><small>{{ category.count }}</small></button>
       </nav>
       <div class="spacer"></div>
-      <section class="storage"><div><HardDrive :size="17" /><span>本地快照</span><b>{{ formatBytes(snapshots.reduce((sum, item) => sum + item.totalBytes, 0)) }}</b></div><small>数据保存在浏览器的 Chronicle 本地资料库</small></section>
+      <section class="storage"><div><HardDrive :size="17" /><span>本地快照</span><b>{{ formatBytes(snapshots.reduce((sum, item) => sum + item.totalBytes, 0)) }}</b></div><small>数据保存在 Chronicle 本地资料库</small></section>
       <button class="account"><span class="avatar">T</span><span><b>ThermalEX</b><small>本机设备</small></span><ChevronDown :size="16" /></button>
     </aside>
 

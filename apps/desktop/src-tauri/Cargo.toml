@@ -1,0 +1,28 @@
+[package]
+name = "chronicle-desktop"
+version = "0.1.0"
+description = "Chronicle desktop application"
+authors = ["ThermalEX <2210692765@qq.com>"]
+edition = "2024"
+rust-version = "1.97"
+
+[lib]
+name = "chronicle_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+chronicle-core = { path = "../../../crates/chronicle-core" }
+chronicle-storage = { path = "../../../crates/chronicle-storage" }
+serde = { version = "1.0.229", features = ["derive"] }
+tauri = { version = "2.11.5", features = [] }
+tauri-plugin-dialog = "2.7.3"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
