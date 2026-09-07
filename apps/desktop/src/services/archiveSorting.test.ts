@@ -2,17 +2,17 @@ import { describe, expect, it } from "vitest";
 import { compareArchiveNames } from "./archiveSorting";
 
 describe("compareArchiveNames", () => {
-  const names = ["配置", "Beta", "存档", "Alpha", "游戏"];
+  const names = ["配置", "Beta", "20-save", "存档", "Alpha", "3-save", "游戏"];
 
-  it("sorts Latin names A-Z before Chinese names in pinyin order", () => {
+  it("sorts numeric names before Latin and Chinese names", () => {
     expect([...names].sort((left, right) => compareArchiveNames(left, right))).toEqual([
-      "Alpha", "Beta", "存档", "配置", "游戏",
+      "3-save", "20-save", "Alpha", "Beta", "存档", "配置", "游戏",
     ]);
   });
 
-  it("sorts both groups descending while keeping Latin names first", () => {
+  it("keeps numeric names first while reversing order within every group", () => {
     expect([...names].sort((left, right) => compareArchiveNames(left, right, true))).toEqual([
-      "Beta", "Alpha", "游戏", "配置", "存档",
+      "20-save", "3-save", "Beta", "Alpha", "游戏", "配置", "存档",
     ]);
   });
 });
