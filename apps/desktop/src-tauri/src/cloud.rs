@@ -57,6 +57,12 @@ struct CatalogEntry {
     stored_bytes: u64,
     #[serde(default)]
     last_snapshot_at_ms: Option<u64>,
+    #[serde(default)]
+    sources: Vec<Value>,
+    #[serde(default)]
+    created_at_ms: u64,
+    #[serde(default)]
+    snapshots: Vec<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -228,18 +234,6 @@ fn snapshot_ids_from_timeline(timeline: &Value) -> Vec<String> {
         .collect()
 }
 
-fn sanitize_entry(mut entry: Value) -> Value {
-    if let Some(sources) = entry.get_mut("sources").and_then(Value::as_array_mut) {
-        for source in sources {
-            source.as_object_mut().map(|object| object.remove("path"));
-        }
-    }
-    entry
-        .as_object_mut()
-        .map(|object| object.remove("sync_mode"));
-    entry
-}
-
 fn save_sync_state(
     root: &Path,
     source_id: &str,
@@ -317,7 +311,7 @@ pub async fn cloud_preview(
 ) -> Result<CloudPreviewDto, String> {
     let (client, source, root) = configured_client(&state, &source_id)?;
     let library = ensure_remote_library(&client, &root).await?;
-    let catalog: Option<Catalog> = match client.get_json("data/catalog.json").await {
+    let catalog: Option<Catalog> = match client.get_json("catalog.json").await {
         Ok(value) => Some(value),
         Err(WebDavError::NotFound(_)) => None,
         Err(error) => return Err(error.to_string()),
@@ -369,7 +363,7 @@ pub async fn cloud_preview(
 }
 
 async fn ensure_remote_layout(client: &WebDavClient) -> Result<(), String> {
-    for path in ["", "config", "data", "data/entries"] {
+    for path in ["", "archives"] {
         client
             .ensure_collection(path)
             .await
@@ -379,22 +373,41 @@ async fn ensure_remote_layout(client: &WebDavClient) -> Result<(), String> {
 }
 
 async fn ensure_remote_library(client: &WebDavClient, root: &Path) -> Result<Value, String> {
-    match client.get_json("config/library.json").await {
+    match client.get_json("library.json").await {
         Ok(value) => Ok(value),
         Err(WebDavError::NotFound(_)) => {
             ensure_remote_layout(client).await?;
-            let library_path = root.join("config/library.json");
+            let library_path = root.join("library.json");
             let mut library = if library_path.is_file() {
                 read_json::<Value>(&library_path)?
             } else {
-                serde_json::json!({ "formatVersion": 1, "libraryId": Uuid::new_v4().to_string() })
+                serde_json::json!({ "formatVersion": 2, "libraryId": Uuid::new_v4().to_string() })
             };
             library["updatedAtMs"] = Value::from(unix_millis());
             write_json_atomic(&library_path, &library)?;
             client
-                .put_json("config/library.json", &library)
+                .put_json("library.json", &library)
                 .await
                 .map_err(|error| error.to_string())?;
+
+            match client.get_json::<Value>("catalog.json").await {
+                Ok(_) => {}
+                Err(WebDavError::NotFound(_)) => {
+                    client
+                        .put_json(
+                            "catalog.json",
+                            &serde_json::json!({
+                                "format_version": 4,
+                                "updated_at_ms": unix_millis(),
+                                "categories": [],
+                                "entries": []
+                            }),
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+                Err(error) => return Err(error.to_string()),
+            }
             Ok(library)
         }
         Err(error) => Err(error.to_string()),
@@ -471,8 +484,8 @@ async fn upload_catalog_and_library(
     root: &Path,
     entry_id: &str,
 ) -> Result<(), String> {
-    let local_catalog: Value = read_json(&root.join("data/catalog.json"))?;
-    let mut catalog: Value = match client.get_json("data/catalog.json").await {
+    let local_catalog: Value = read_json(&root.join("catalog.json"))?;
+    let mut catalog: Value = match client.get_json("catalog.json").await {
         Ok(value) => value,
         Err(WebDavError::NotFound(_)) => serde_json::json!({
             "format_version": local_catalog.get("format_version").cloned().unwrap_or(Value::from(3)),
@@ -485,19 +498,19 @@ async fn upload_catalog_and_library(
     merge_catalog_entry(&mut catalog, &local_catalog, entry_id)?;
     catalog["updated_at_ms"] = Value::from(unix_millis());
     client
-        .put_json("data/catalog.json", &catalog)
+        .put_json("catalog.json", &catalog)
         .await
         .map_err(|error| error.to_string())?;
-    let library_path = root.join("config/library.json");
+    let library_path = root.join("library.json");
     let mut library = if library_path.is_file() {
         read_json::<Value>(&library_path)?
     } else {
-        serde_json::json!({ "formatVersion": 1, "libraryId": Uuid::new_v4().to_string() })
+        serde_json::json!({ "formatVersion": 2, "libraryId": Uuid::new_v4().to_string() })
     };
     library["updatedAtMs"] = Value::from(unix_millis());
     write_json_atomic(&library_path, &library)?;
     client
-        .put_json("config/library.json", &library)
+        .put_json("library.json", &library)
         .await
         .map_err(|error| error.to_string())
 }
@@ -510,16 +523,16 @@ pub async fn cloud_overwrite_upload(
 ) -> Result<(), String> {
     let (client, _, root) = configured_client(&state, &source_id)?;
     ensure_remote_layout(&client).await?;
-    let catalog: Catalog = read_json(&root.join("data/catalog.json"))?;
+    let catalog: Catalog = read_json(&root.join("catalog.json"))?;
     let entry = catalog
         .entries
         .iter()
         .find(|entry| entry.id == entry_id)
         .ok_or_else(|| "本地存档不存在".to_owned())?;
     let folder = checked_folder(&entry.folder)?;
-    let local = root.join("data/entries").join(folder);
-    let remote_folder = format!("data/entries/{folder}");
-    let old_folder = format!("data/.chronicle-upload-old-{}", Uuid::new_v4());
+    let local = root.join("archives").join(folder);
+    let remote_folder = format!("archives/{folder}");
+    let old_folder = format!(".chronicle-upload-old-{}", Uuid::new_v4());
     let had_remote = match client.move_object(&remote_folder, &old_folder).await {
         Ok(()) => true,
         Err(WebDavError::NotFound(_)) => false,
@@ -576,7 +589,7 @@ pub async fn cloud_overwrite_upload(
             .await
             .map_err(|error| error.to_string())?;
     }
-    let timeline: Value = read_json(&local.join("timeline.json"))?;
+    let timeline = serde_json::to_value(&entry.snapshots).map_err(|error| error.to_string())?;
     save_sync_state(
         &root,
         &source_id,
@@ -595,7 +608,7 @@ pub async fn cloud_overwrite_download(
 ) -> Result<(), String> {
     let (client, _, root) = configured_client(&state, &source_id)?;
     let remote_catalog_value: Value = client
-        .get_json("data/catalog.json")
+        .get_json("catalog.json")
         .await
         .map_err(|error| error.to_string())?;
     let remote_catalog: Catalog =
@@ -607,53 +620,12 @@ pub async fn cloud_overwrite_download(
         .ok_or_else(|| "远端存档不存在".to_owned())?;
     let folder = checked_folder(&remote_entry.folder)?;
     let staging = root
-        .join("data/.tmp")
+        .join(".tmp")
         .join(format!("cloud-download-{}", Uuid::new_v4()));
     fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
-    let mut entry_value: Value = client
-        .get_json(&format!("data/entries/{folder}/entry.json"))
-        .await
-        .map_err(|error| error.to_string())?;
-    let timeline: Value = client
-        .get_json(&format!("data/entries/{folder}/timeline.json"))
-        .await
-        .map_err(|error| error.to_string())?;
-    let local_catalog_path = root.join("data/catalog.json");
+    let timeline = Value::Array(remote_entry.snapshots.clone());
+    let local_catalog_path = root.join("catalog.json");
     let mut local_catalog: Value = read_json(&local_catalog_path)?;
-    if let Some(local_summary) = local_catalog
-        .get("entries")
-        .and_then(Value::as_array)
-        .and_then(|entries| {
-            entries
-                .iter()
-                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(&entry_id))
-        })
-        && let Some(local_folder) = local_summary.get("folder").and_then(Value::as_str)
-        && let Ok(local_entry) = read_json::<Value>(
-            &root
-                .join("data/entries")
-                .join(local_folder)
-                .join("entry.json"),
-        )
-        && let (Some(remote_sources), Some(local_sources)) = (
-            entry_value.get_mut("sources").and_then(Value::as_array_mut),
-            local_entry.get("sources").and_then(Value::as_array),
-        )
-    {
-        for remote in remote_sources {
-            let id = remote.get("id").and_then(Value::as_str);
-            if let Some(path) = local_sources
-                .iter()
-                .find(|source| source.get("id").and_then(Value::as_str) == id)
-                .and_then(|source| source.get("path"))
-                .cloned()
-            {
-                remote["path"] = path;
-            }
-        }
-    }
-    write_json_atomic(&staging.join("entry.json"), &entry_value)?;
-    write_json_atomic(&staging.join("timeline.json"), &timeline)?;
     if let Some(snapshots) = timeline.as_array() {
         for snapshot in snapshots {
             let archive_name = snapshot
@@ -666,7 +638,7 @@ pub async fn cloud_overwrite_download(
                 .ok_or_else(|| "远端时间线缺少校验值".to_owned())?;
             let target = staging.join(archive_name);
             client
-                .download_file(&format!("data/entries/{folder}/{archive_name}"), &target)
+                .download_file(&format!("archives/{folder}/{archive_name}"), &target)
                 .await
                 .map_err(|error| error.to_string())?;
             if hash_file(&target)? != expected_hash {
@@ -675,9 +647,9 @@ pub async fn cloud_overwrite_download(
             }
         }
     }
-    let target = root.join("data/entries").join(folder);
+    let target = root.join("archives").join(folder);
     let backup = root
-        .join("data/.tmp")
+        .join(".tmp")
         .join(format!("cloud-old-{}", Uuid::new_v4()));
     if target.exists() {
         fs::rename(&target, &backup).map_err(|error| error.to_string())?;
@@ -723,19 +695,6 @@ pub async fn cloud_overwrite_download(
     Ok(())
 }
 
-async fn snapshot_ids(client: &WebDavClient, folder: &str) -> Result<Vec<String>, String> {
-    let timeline: Value = client
-        .get_json(&format!("data/entries/{folder}/timeline.json"))
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(timeline
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
-        .collect())
-}
-
 async fn merge_remote_snapshots(
     client: &WebDavClient,
     root: &Path,
@@ -744,13 +703,9 @@ async fn merge_remote_snapshots(
 ) -> Result<(), String> {
     let local_folder = checked_folder(&local_entry.folder)?;
     let remote_folder = checked_folder(&remote_entry.folder)?;
-    let entry_dir = root.join("data/entries").join(local_folder);
-    let timeline_path = entry_dir.join("timeline.json");
-    let mut local_timeline: Value = read_json(&timeline_path)?;
-    let remote_timeline: Value = client
-        .get_json(&format!("data/entries/{remote_folder}/timeline.json"))
-        .await
-        .map_err(|error| error.to_string())?;
+    let entry_dir = root.join("archives").join(local_folder);
+    let mut local_timeline = Value::Array(local_entry.snapshots.clone());
+    let remote_timeline = Value::Array(remote_entry.snapshots.clone());
     let local_ids = snapshot_ids_from_timeline(&local_timeline);
     let local_array = local_timeline
         .as_array_mut()
@@ -774,11 +729,11 @@ async fn merge_remote_snapshots(
             .and_then(Value::as_str)
             .ok_or_else(|| "远端时间线缺少校验值".to_owned())?;
         let temporary = root
-            .join("data/.tmp")
+            .join(".tmp")
             .join(format!("merge-{}", Uuid::new_v4()));
         client
             .download_file(
-                &format!("data/entries/{remote_folder}/{archive_name}"),
+                &format!("archives/{remote_folder}/{archive_name}"),
                 &temporary,
             )
             .await
@@ -805,8 +760,7 @@ async fn merge_remote_snapshots(
         .filter_map(|item| item.get("created_at_ms").and_then(Value::as_u64))
         .max()
         .unwrap_or_default();
-    write_json_atomic(&timeline_path, &local_timeline)?;
-    let mut catalog: Value = read_json(&root.join("data/catalog.json"))?;
+    let mut catalog: Value = read_json(&root.join("catalog.json"))?;
     if let Some(summary) = catalog
         .get_mut("entries")
         .and_then(Value::as_array_mut)
@@ -819,8 +773,9 @@ async fn merge_remote_snapshots(
         summary["snapshot_count"] = Value::from(snapshot_count);
         summary["stored_bytes"] = Value::from(stored_bytes);
         summary["last_snapshot_at_ms"] = Value::from(last_snapshot);
+        summary["snapshots"] = local_timeline;
     }
-    write_json_atomic(&root.join("data/catalog.json"), &catalog)
+    write_json_atomic(&root.join("catalog.json"), &catalog)
 }
 
 #[tauri::command(async)]
@@ -830,8 +785,8 @@ pub async fn cloud_sync_entry(
     entry_id: String,
 ) -> Result<SyncResultDto, String> {
     let (client, _, root) = configured_client(&state, &source_id)?;
-    let local: Catalog = read_json(&root.join("data/catalog.json"))?;
-    let remote: Option<Catalog> = match client.get_json("data/catalog.json").await {
+    let local: Catalog = read_json(&root.join("catalog.json"))?;
+    let remote: Option<Catalog> = match client.get_json("catalog.json").await {
         Ok(value) => Some(value),
         Err(WebDavError::NotFound(_)) => None,
         Err(error) => return Err(error.to_string()),
@@ -856,33 +811,24 @@ pub async fn cloud_sync_entry(
             })
         }
         (Some(local_entry), Some(remote_entry)) => {
-            let local_timeline: Value = read_json(
-                &root
-                    .join("data/entries")
-                    .join(checked_folder(&local_entry.folder)?)
-                    .join("timeline.json"),
-            )?;
+            let local_timeline = Value::Array(local_entry.snapshots.clone());
             let local_ids = local_timeline
                 .as_array()
                 .into_iter()
                 .flatten()
                 .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
                 .collect::<Vec<_>>();
-            let remote_ids = snapshot_ids(&client, checked_folder(&remote_entry.folder)?).await?;
-            let local_metadata = sanitize_entry(read_json(
-                &root
-                    .join("data/entries")
-                    .join(checked_folder(&local_entry.folder)?)
-                    .join("entry.json"),
-            )?);
-            let remote_metadata: Value = client
-                .get_json(&format!(
-                    "data/entries/{}/entry.json",
-                    checked_folder(&remote_entry.folder)?
-                ))
-                .await
-                .map_err(|error| error.to_string())?;
-            if local_metadata != sanitize_entry(remote_metadata) {
+            let remote_timeline = Value::Array(remote_entry.snapshots.clone());
+            let remote_ids = snapshot_ids_from_timeline(&remote_timeline);
+            let mut local_metadata = serde_json::to_value(local_entry).map_err(|error| error.to_string())?;
+            let mut remote_metadata = serde_json::to_value(remote_entry).map_err(|error| error.to_string())?;
+            for metadata in [&mut local_metadata, &mut remote_metadata] {
+                metadata["snapshots"] = Value::Array(Vec::new());
+                metadata["snapshot_count"] = Value::from(0);
+                metadata["stored_bytes"] = Value::from(0);
+                metadata["last_snapshot_at_ms"] = Value::Null;
+            }
+            if local_metadata != remote_metadata {
                 return Ok(SyncResultDto {
                     status: "conflict".into(),
                     message: "本地和远端的存档设置不同，请选择覆盖方向".into(),
@@ -929,7 +875,7 @@ pub async fn cloud_delete_entries(
 ) -> Result<(), String> {
     let (client, _, _) = configured_client(&state, &source_id)?;
     let mut catalog_value: Value = client
-        .get_json("data/catalog.json")
+        .get_json("catalog.json")
         .await
         .map_err(|error| error.to_string())?;
     let catalog: Catalog =
@@ -942,8 +888,8 @@ pub async fn cloud_delete_entries(
         .filter(|entry| entry_ids.contains(&entry.id))
     {
         let folder = checked_folder(&entry.folder)?;
-        let source = format!("data/entries/{folder}");
-        let temporary = format!("data/.chronicle-delete-{deletion_id}-{folder}");
+        let source = format!("archives/{folder}");
+        let temporary = format!(".chronicle-delete-{deletion_id}-{folder}");
         if let Err(error) = client.move_object(&source, &temporary).await {
             for (old, staged) in moved.iter().rev() {
                 let _ = client.move_object(staged, old).await;
@@ -963,7 +909,7 @@ pub async fn cloud_delete_entries(
                 .is_some_and(|id| entry_ids.iter().any(|candidate| candidate == id))
         });
     }
-    if let Err(error) = client.put_json("data/catalog.json", &catalog_value).await {
+    if let Err(error) = client.put_json("catalog.json", &catalog_value).await {
         for (old, staged) in moved.iter().rev() {
             let _ = client.move_object(staged, old).await;
         }
@@ -990,7 +936,7 @@ pub async fn cloud_set_entry_sync_mode(
     }
     let (client, _, _) = configured_client(&state, &source_id)?;
     let mut catalog: Value = client
-        .get_json("data/catalog.json")
+        .get_json("catalog.json")
         .await
         .map_err(|error| error.to_string())?;
     let entry = catalog
@@ -1004,7 +950,7 @@ pub async fn cloud_set_entry_sync_mode(
         .ok_or_else(|| "远端存档不存在".to_owned())?;
     entry["sync_mode"] = Value::String(sync_mode.clone());
     client
-        .put_json("data/catalog.json", &catalog)
+        .put_json("catalog.json", &catalog)
         .await
         .map_err(|error| error.to_string())?;
     let parsed_mode = if sync_mode == "automatic" {

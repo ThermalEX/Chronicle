@@ -20,7 +20,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-const FORMAT_VERSION: u32 = 3;
+const FORMAT_VERSION: u32 = 4;
 const SETTINGS_VERSION: u32 = 2;
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
@@ -92,6 +92,12 @@ struct CatalogEntry {
     snapshot_count: usize,
     stored_bytes: u64,
     last_snapshot_at_ms: Option<u64>,
+    #[serde(default)]
+    sources: Vec<EntrySource>,
+    #[serde(default)]
+    created_at_ms: u64,
+    #[serde(default)]
+    snapshots: Vec<Snapshot>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -290,16 +296,6 @@ impl LocalRepository {
         let directory = self.entries_dir().join(&folder);
         fs::create_dir_all(&directory)?;
         self.save_bindings_for_entry(&entry.id, &entry.sources)?;
-        write_json_atomic(
-            &directory.join("entry.json"),
-            &shared_entry(&entry),
-            &self.temp_dir(),
-        )?;
-        write_json_atomic(
-            &directory.join("timeline.json"),
-            &Vec::<Snapshot>::new(),
-            &self.temp_dir(),
-        )?;
         let mut catalog = self.read_catalog()?;
         catalog.entries.push(CatalogEntry {
             id: entry.id.clone(),
@@ -313,6 +309,9 @@ impl LocalRepository {
             snapshot_count: 0,
             stored_bytes: 0,
             last_snapshot_at_ms: None,
+            sources: shared_entry(&entry).sources,
+            created_at_ms: entry.created_at_ms,
+            snapshots: Vec::new(),
         });
         self.write_catalog(&mut catalog)?;
         Ok(entry)
@@ -359,19 +358,12 @@ impl LocalRepository {
         if source_paths.is_empty() {
             return Err(StorageError::EmptySources);
         }
-        let directory = self.entry_dir(entry_id)?;
         let mut entry = self.get_entry(entry_id)?;
         entry.sources = resolve_entry_sources_by_position(source_paths, &entry.sources)?;
         name.clone_into(&mut entry.name);
         entry.storage_policy = storage_policy;
         entry.sync_mode = sync_mode;
         self.save_bindings_for_entry(&entry.id, &entry.sources)?;
-        write_json_atomic(
-            &directory.join("entry.json"),
-            &shared_entry(&entry),
-            &self.temp_dir(),
-        )?;
-
         let mut catalog = self.read_catalog()?;
         let summary = catalog
             .entries
@@ -382,6 +374,7 @@ impl LocalRepository {
         summary.storage_policy = storage_policy;
         summary.sync_mode = sync_mode;
         summary.source_count = entry.sources.len();
+        summary.sources = shared_entry(&entry).sources;
         self.write_catalog(&mut catalog)?;
         Ok(entry)
     }
@@ -391,14 +384,8 @@ impl LocalRepository {
     /// # Errors
     /// Returns an error when the entry does not exist or its metadata cannot be persisted.
     pub fn set_entry_sync_mode(&self, entry_id: &str, sync_mode: SyncMode) -> Result<Entry> {
-        let directory = self.entry_dir(entry_id)?;
         let mut entry = self.get_entry(entry_id)?;
         entry.sync_mode = sync_mode;
-        write_json_atomic(
-            &directory.join("entry.json"),
-            &shared_entry(&entry),
-            &self.temp_dir(),
-        )?;
 
         let mut catalog = self.read_catalog()?;
         let summary = catalog
@@ -738,7 +725,22 @@ impl LocalRepository {
     /// # Errors
     /// Returns an error when the entry does not exist or is invalid.
     pub fn get_entry(&self, entry_id: &str) -> Result<Entry> {
-        let mut entry: Entry = read_json(&self.entry_dir(entry_id)?.join("entry.json"))?;
+        let summary = self
+            .read_catalog()?
+            .entries
+            .into_iter()
+            .find(|item| item.id == entry_id)
+            .ok_or_else(|| StorageError::EntryNotFound(entry_id.into()))?;
+        let mut entry = Entry {
+            id: summary.id,
+            name: summary.name,
+            sources: summary.sources,
+            category_id: summary.category_id,
+            tags: summary.tags,
+            storage_policy: summary.storage_policy,
+            sync_mode: summary.sync_mode,
+            created_at_ms: summary.created_at_ms,
+        };
         let bindings = self.read_bindings()?;
         if let Some(bound) = bindings.entries.get(entry_id) {
             for source in &mut entry.sources {
@@ -850,14 +852,6 @@ impl LocalRepository {
         {
             return Err(StorageError::ParentCategoryNotFound(category.clone()));
         }
-        let entry_directory = self.entry_dir(entry_id)?;
-        let mut entry: Entry = read_json(&entry_directory.join("entry.json"))?;
-        entry.category_id.clone_from(&category_id);
-        write_json_atomic(
-            &entry_directory.join("entry.json"),
-            &entry,
-            &self.temp_dir(),
-        )?;
         let summary = catalog
             .entries
             .iter_mut()
@@ -882,14 +876,6 @@ impl LocalRepository {
             }
         }
         let mut catalog = self.read_catalog()?;
-        let entry_directory = self.entry_dir(entry_id)?;
-        let mut entry: Entry = read_json(&entry_directory.join("entry.json"))?;
-        entry.tags.clone_from(&normalized);
-        write_json_atomic(
-            &entry_directory.join("entry.json"),
-            &entry,
-            &self.temp_dir(),
-        )?;
         let summary = catalog
             .entries
             .iter_mut()
@@ -904,8 +890,13 @@ impl LocalRepository {
     /// # Errors
     /// Returns an error when timeline metadata cannot be read.
     pub fn list_snapshots(&self, entry_id: &str) -> Result<Vec<Snapshot>> {
-        let mut snapshots: Vec<Snapshot> =
-            read_json(&self.entry_dir(entry_id)?.join("timeline.json"))?;
+        let mut snapshots = self
+            .read_catalog()?
+            .entries
+            .into_iter()
+            .find(|entry| entry.id == entry_id)
+            .ok_or_else(|| StorageError::EntryNotFound(entry_id.into()))?
+            .snapshots;
         snapshots.sort_by_key(|snapshot| Reverse(snapshot.created_at_ms));
         Ok(snapshots)
     }
@@ -916,9 +907,8 @@ impl LocalRepository {
     /// Returns an error when the snapshot does not exist.
     pub fn get_snapshot(&self, snapshot_id: &str) -> Result<Snapshot> {
         for entry in self.read_catalog()?.entries {
-            let timeline: Vec<Snapshot> =
-                read_json(&self.entries_dir().join(entry.folder).join("timeline.json"))?;
-            if let Some(snapshot) = timeline
+            if let Some(snapshot) = entry
+                .snapshots
                 .into_iter()
                 .find(|snapshot| snapshot.id == snapshot_id)
             {
@@ -979,11 +969,6 @@ impl LocalRepository {
         };
         timeline.push(snapshot.clone());
         timeline.sort_by_key(|item| item.created_at_ms);
-        write_json_atomic(
-            &entry_dir.join("timeline.json"),
-            &timeline,
-            &self.temp_dir(),
-        )?;
         self.refresh_catalog_entry(entry_id, &timeline)?;
         Ok(snapshot)
     }
@@ -1094,7 +1079,7 @@ impl LocalRepository {
             write_json_atomic(
                 &self.library_path(),
                 &serde_json::json!({
-                    "formatVersion": 1,
+                    "formatVersion": 2,
                     "libraryId": Uuid::new_v4().to_string(),
                     "updatedAtMs": unix_millis(SystemTime::now())
                 }),
@@ -1118,19 +1103,16 @@ impl LocalRepository {
         self.config_dir().join("device.json")
     }
     fn library_path(&self) -> PathBuf {
-        self.config_dir().join("library.json")
-    }
-    fn data_dir(&self) -> PathBuf {
-        self.root.join("data")
+        self.root.join("library.json")
     }
     fn catalog_path(&self) -> PathBuf {
-        self.data_dir().join("catalog.json")
+        self.root.join("catalog.json")
     }
     fn entries_dir(&self) -> PathBuf {
-        self.data_dir().join("entries")
+        self.root.join("archives")
     }
     fn temp_dir(&self) -> PathBuf {
-        self.data_dir().join(".tmp")
+        self.root.join(".tmp")
     }
     fn read_catalog(&self) -> Result<Catalog> {
         read_json(&self.catalog_path())
@@ -1157,6 +1139,7 @@ impl LocalRepository {
         summary.snapshot_count = timeline.len();
         summary.stored_bytes = timeline.iter().map(|snapshot| snapshot.size_bytes).sum();
         summary.last_snapshot_at_ms = timeline.last().map(|snapshot| snapshot.created_at_ms);
+        summary.snapshots = timeline.to_vec();
         self.write_catalog(&mut catalog)
     }
 
@@ -1190,10 +1173,17 @@ impl LocalRepository {
         let mut catalog = self.read_catalog()?;
         let mut bindings = self.read_bindings()?;
         let mut bindings_changed = false;
-        for summary in &catalog.entries {
-            let path = self.entries_dir().join(&summary.folder).join("entry.json");
-            let mut entry: Entry = read_json(&path)?;
-            if entry.sources.iter().any(|source| !source.path.is_empty()) {
+        let legacy_entries = self.root.join("data").join("entries");
+        for summary in &mut catalog.entries {
+            let legacy = legacy_entries.join(&summary.folder);
+            if summary.sources.is_empty() && legacy.join("entry.json").is_file() {
+                let entry: Entry = read_json(&legacy.join("entry.json"))?;
+                summary.sources = shared_entry(&entry).sources;
+                summary.created_at_ms = entry.created_at_ms;
+                summary.category_id = entry.category_id;
+                summary.tags = entry.tags;
+                summary.storage_policy = entry.storage_policy;
+                summary.sync_mode = entry.sync_mode;
                 let saved = bindings.entries.entry(entry.id.clone()).or_default();
                 for source in &entry.sources {
                     if !source.path.is_empty()
@@ -1202,12 +1192,30 @@ impl LocalRepository {
                         saved.push(source.clone());
                     }
                 }
-                entry
-                    .sources
-                    .iter_mut()
-                    .for_each(|source| source.path.clear());
-                write_json_atomic(&path, &entry, &self.temp_dir())?;
                 bindings_changed = true;
+            }
+            if summary.snapshots.is_empty() && legacy.join("timeline.json").is_file() {
+                summary.snapshots = read_json(&legacy.join("timeline.json"))?;
+                summary.snapshot_count = summary.snapshots.len();
+                summary.stored_bytes = summary
+                    .snapshots
+                    .iter()
+                    .map(|snapshot| snapshot.size_bytes)
+                    .sum();
+                summary.last_snapshot_at_ms = summary
+                    .snapshots
+                    .last()
+                    .map(|snapshot| snapshot.created_at_ms);
+            }
+            let destination = self.entries_dir().join(&summary.folder);
+            if legacy.is_dir() && !destination.exists() {
+                fs::create_dir_all(&destination)?;
+                for snapshot in &summary.snapshots {
+                    let source = legacy.join(&snapshot.archive_name);
+                    if source.is_file() {
+                        fs::copy(source, destination.join(&snapshot.archive_name))?;
+                    }
+                }
             }
         }
         if bindings_changed {
@@ -1654,7 +1662,7 @@ mod tests {
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("7z"))
         );
         assert_eq!(first.files.len(), 2);
-        let entry_folder = fs::read_dir(repository_root.join("data/entries"))
+        let entry_folder = fs::read_dir(repository_root.join("archives"))
             .unwrap()
             .next()
             .unwrap()
@@ -1669,19 +1677,17 @@ mod tests {
         assert!(repository_root.join("config/settings.json").is_file());
         assert!(repository_root.join("config/device.json").is_file());
         assert!(repository_root.join("config/bindings.json").is_file());
-        assert!(repository_root.join("config/library.json").is_file());
-        assert!(repository_root.join("data/catalog.json").is_file());
-        assert!(entry_folder.join("entry.json").is_file());
+        assert!(repository_root.join("library.json").is_file());
+        assert!(repository_root.join("catalog.json").is_file());
         let shared_entry: serde_json::Value =
-            super::read_json(&entry_folder.join("entry.json")).unwrap();
+            super::read_json(&repository_root.join("catalog.json")).unwrap();
         assert!(
-            shared_entry["sources"]
+            shared_entry["entries"][0]["sources"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .all(|source| source.get("path").is_none())
         );
-        assert!(entry_folder.join("timeline.json").is_file());
         fs::write(folder.join("nested/note.txt"), b"changed").unwrap();
         fs::write(&file, b"version two").unwrap();
         let second = repository
