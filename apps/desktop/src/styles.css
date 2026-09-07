@@ -18,10 +18,10 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 1024px; min-height: 720px; overflow: hidden; }
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 button { color: inherit; border: 0; cursor: pointer; }
 button:disabled { cursor: wait; opacity: .62; }
-button:focus-visible, input:focus-visible { outline: 2px solid #0d9488; outline-offset: 2px; }
+button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid #0d9488; outline-offset: 2px; }
 
 .app-shell {
   display: grid;

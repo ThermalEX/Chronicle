@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ArchiveRecord } from "../domain";
 import { BrowserArchiveRepository } from "./archiveRepository";
 
@@ -41,6 +41,7 @@ function archiveFor(handle: MemoryFileHandle): ArchiveRecord {
 }
 
 afterEach(async () => {
+  vi.unstubAllGlobals();
   await new Promise<void>((resolve, reject) => {
     const request = indexedDB.deleteDatabase("chronicle-local");
     request.onsuccess = () => resolve();
@@ -49,6 +50,19 @@ afterEach(async () => {
 });
 
 describe("ArchiveRepository", () => {
+  it("stores a handle returned by the picker without requesting permission again", async () => {
+    const repository = new BrowserArchiveRepository();
+    const handle = new MemoryFileHandle("settings.json", "version one");
+    const permissionQuery = vi.spyOn(handle, "queryPermission");
+    vi.stubGlobal("window", { showOpenFilePicker: vi.fn().mockResolvedValue([handle]) });
+
+    const archive = await repository.addArchive("file", "配置");
+
+    expect(archive?.name).toBe("settings.json");
+    expect(archive?.category).toBe("配置");
+    expect(permissionQuery).not.toHaveBeenCalled();
+  });
+
   it("creates versioned snapshots and restores an earlier file", async () => {
     const repository = new BrowserArchiveRepository();
     const handle = new MemoryFileHandle("settings.json", "version one");

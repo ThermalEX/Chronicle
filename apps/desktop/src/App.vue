@@ -5,8 +5,11 @@ import {
   Search, Settings2, SlidersHorizontal, Tag, UploadCloud, X,
 } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import CloudSettingsDialog from "./components/CloudSettingsDialog.vue";
+import SettingsDialog from "./components/SettingsDialog.vue";
 import type { ArchiveKind, ArchiveRecord, SnapshotProgress, SnapshotRecord } from "./domain";
 import { archiveRepository, isTauriRuntime } from "./services/repository";
+import { appSettings, shortcutMatches } from "./services/settings";
 
 const categoryDefinitions = [
   { name: "游戏", icon: ArchiveRestore },
@@ -25,6 +28,8 @@ const searchTerm = ref("");
 const searchInput = ref<HTMLInputElement>();
 const loading = ref(true);
 const addMenuOpen = ref(false);
+const settingsOpen = ref(false);
+const cloudSettingsOpen = ref(false);
 const snapshotProgress = ref<SnapshotProgress>();
 const busyAction = ref<"snapshot" | "restore">();
 const notice = ref<{ type: "success" | "error" | "info"; message: string }>();
@@ -102,11 +107,15 @@ async function addArchive(kind: ArchiveKind) {
     return;
   }
   try {
-    const archive = await archiveRepository.addArchive(kind);
+    const archive = await archiveRepository.addArchive(kind, appSettings.defaultCategory);
     if (!archive) return;
     await refreshArchives(archive.id);
     await refreshSnapshots(archive.id);
-    showNotice(`已添加${kind === "file" ? "文件" : "文件夹"}“${archive.name}”`);
+    if (appSettings.createInitialSnapshot) {
+      await createSnapshot("初始版本");
+    } else {
+      showNotice(`已添加${kind === "file" ? "文件" : "文件夹"}“${archive.name}”`);
+    }
   } catch (error) {
     showNotice(readableError(error), "error");
   }
@@ -158,11 +167,29 @@ function selectCategory(name: string) {
 }
 
 function handleShortcut(event: KeyboardEvent) {
-  if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === "k") {
+  if (event.key === "Escape") {
+    addMenuOpen.value = false;
+    settingsOpen.value = false;
+    cloudSettingsOpen.value = false;
+    return;
+  }
+  if (settingsOpen.value || cloudSettingsOpen.value) return;
+  const target = event.target as HTMLElement | null;
+  const editing = target?.matches("input, textarea, select, [contenteditable='true']");
+  if (shortcutMatches(event, appSettings.settingsShortcut)) {
+    event.preventDefault();
+    settingsOpen.value = true;
+    return;
+  }
+  if (editing) return;
+  if (shortcutMatches(event, appSettings.searchShortcut)) {
     event.preventDefault();
     void nextTick(() => searchInput.value?.focus());
   }
-  if (event.key === "Escape") addMenuOpen.value = false;
+  if (shortcutMatches(event, appSettings.snapshotShortcut)) {
+    event.preventDefault();
+    void createSnapshot();
+  }
 }
 
 watch(selectedArchiveId, (archiveId) => { void refreshSnapshots(archiveId); });
@@ -183,7 +210,7 @@ onBeforeUnmount(() => {
     <header class="titlebar">
       <div class="brand"><span class="brand-mark"><Clock3 :size="18" /></span><span>Chronicle</span></div>
       <div class="sync-state"><i></i>本地资料库可用</div>
-      <div class="toolbar"><button aria-label="同步设置" @click="showNotice('WebDAV 将在下一个里程碑接入', 'info')"><CloudCog :size="18" /></button><button aria-label="应用设置" @click="showNotice('设置模块正在建设中', 'info')"><Settings2 :size="18" /></button></div>
+      <div class="toolbar"><button aria-label="云端设置" @click="cloudSettingsOpen = true"><CloudCog :size="18" /></button><button aria-label="应用设置" @click="settingsOpen = true"><Settings2 :size="18" /></button></div>
     </header>
 
     <aside class="sidebar">
@@ -220,7 +247,7 @@ onBeforeUnmount(() => {
       <section v-if="selectedArchive" class="detail-panel" aria-labelledby="detail-title">
         <header class="detail-header">
           <div class="identity"><span class="detail-icon"><Folder v-if="selectedArchive.kind === 'folder'" /><File v-else /></span><div><div class="title-line"><h2 id="detail-title">{{ selectedArchive.name }}</h2><span class="tag"><Tag :size="12" />{{ selectedArchive.category }}</span></div><p>{{ selectedArchive.sourcePath }}</p></div></div>
-          <div class="actions"><button class="secondary" @click="showNotice('WebDAV 将在下一个里程碑接入', 'info')"><UploadCloud :size="17" />同步</button><button class="accent" :disabled="busyAction !== undefined" @click="createSnapshot()"><Plus :size="17" />{{ busyAction === 'snapshot' ? '创建中' : '创建备份' }}</button><button class="icon-button" aria-label="更多操作"><MoreHorizontal :size="19" /></button></div>
+          <div class="actions"><button class="secondary" @click="cloudSettingsOpen = true"><UploadCloud :size="17" />同步</button><button class="accent" :disabled="busyAction !== undefined" @click="createSnapshot()"><Plus :size="17" />{{ busyAction === 'snapshot' ? '创建中' : '创建备份' }}</button><button class="icon-button" aria-label="更多操作"><MoreHorizontal :size="19" /></button></div>
         </header>
 
         <div v-if="snapshotProgress" class="operation-progress" aria-live="polite"><span><b>正在读取文件</b><small>{{ snapshotProgress.currentPath || '正在完成校验' }}</small></span><strong>{{ progressPercent }}%</strong><progress :value="snapshotProgress.current" :max="snapshotProgress.total || 1"></progress></div>
@@ -250,5 +277,7 @@ onBeforeUnmount(() => {
     </main>
 
     <div v-if="notice" class="toast" :class="notice.type" role="status"><span>{{ notice.message }}</span><button aria-label="关闭通知" @click="notice = undefined"><X :size="15" /></button></div>
+    <SettingsDialog v-if="settingsOpen" @close="settingsOpen = false" @saved="showNotice('设置已保存')" />
+    <CloudSettingsDialog v-if="cloudSettingsOpen" @close="cloudSettingsOpen = false" @saved="showNotice('云端设置已保存')" />
   </div>
 </template>

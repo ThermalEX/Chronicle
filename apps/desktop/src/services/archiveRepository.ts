@@ -110,13 +110,12 @@ export class BrowserArchiveRepository {
     try {
       handle = kind === "file"
         ? (await window.showOpenFilePicker({ multiple: false }))[0]
-        : await window.showDirectoryPicker({ mode: "readwrite" });
+        : await window.showDirectoryPicker({ mode: "read" });
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return undefined;
       throw error;
     }
     if (!handle) return undefined;
-    await ensurePermission(handle, "read");
     const now = Date.now();
     const archive: ArchiveRecord = {
       id: crypto.randomUUID(),

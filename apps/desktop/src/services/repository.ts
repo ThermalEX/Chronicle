@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri as detectTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { ArchiveKind, ArchiveRecord, SnapshotProgress, SnapshotRecord } from "../domain";
 import { BrowserArchiveRepository } from "./archiveRepository";
@@ -57,7 +57,7 @@ class TauriArchiveRepository implements ArchiveRepository {
   }
 }
 
-export const isTauriRuntime = "__TAURI_INTERNALS__" in window;
+export const isTauriRuntime = detectTauri();
 export const archiveRepository: ArchiveRepository = isTauriRuntime
   ? new TauriArchiveRepository()
   : new BrowserArchiveRepository();
