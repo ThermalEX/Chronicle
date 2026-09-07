@@ -135,6 +135,10 @@ export class BrowserArchiveRepository {
     throw new Error("浏览器模式没有可打开的资料库文件夹");
   }
 
+  async openRecycleBin(): Promise<void> {
+    throw new Error("浏览器模式没有可打开的回收站文件夹");
+  }
+
   async listRecycleItems(): Promise<RecycleItem[]> {
     const database = await openDatabase();
     const transaction = database.transaction(TRASH, "readonly");

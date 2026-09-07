@@ -254,6 +254,30 @@ pub fn open_repository_folder(state: State<'_, AppState>) -> Result<(), String> 
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command(async)]
+pub fn open_recycle_bin(
+    state: State<'_, AppState>,
+    recycle_bin_path: Option<String>,
+) -> Result<(), String> {
+    let repository = state.repository.lock().map_err(|_| state_error())?;
+    let path = recycle_bin_path
+        .filter(|value| !value.trim().is_empty())
+        .map_or_else(|| repository.root().join("recycle"), PathBuf::from);
+    drop(repository);
+    std::fs::create_dir_all(&path).map_err(|error| error.to_string())?;
+    #[cfg(target_os = "windows")]
+    let mut command = Command::new("explorer");
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(target_os = "linux")]
+    let mut command = Command::new("xdg-open");
+    command
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 fn snapshot_file_dto(file: SnapshotFile) -> SnapshotFileDto {
     SnapshotFileDto {
         path: file.relative_path,

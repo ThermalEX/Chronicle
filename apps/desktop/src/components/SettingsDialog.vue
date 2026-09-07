@@ -2,7 +2,7 @@
 import { FolderOpen, HardDrive, Info, Keyboard, RotateCcw, Settings2, Trash2, Undo2, X } from "@lucide/vue";
 import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { onMounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 import { appSettings, resetAppSettings, saveAppSettings, type AppSettings, type BackupSchedule, type CloseBehavior } from "../services/settings";
 import { archiveRepository } from "../services/repository";
 import type { RecycleItem } from "../domain";
@@ -17,7 +17,10 @@ const saving = ref(false);
 const recycleItems = ref<RecycleItem[]>([]);
 const recycleBusy = ref(false);
 const recycleError = ref("");
+const recycleLocationError = ref("");
+const repositoryPath = ref("");
 const confirmAction = ref<{ title: string; message: string; run: () => Promise<void> }>();
+const recycleLocation = computed(() => draft.recycleBinPath || (repositoryPath.value ? `${repositoryPath.value}\\recycle` : "Chronicle\\recycle"));
 const closeBehaviorOptions: ThemedSelectOption[] = [
   { value: "ask", label: "每次询问" },
   { value: "tray", label: "最小化到托盘" },
@@ -114,7 +117,20 @@ async function chooseRecycleBinPath(): Promise<void> {
   if (typeof selected === "string") draft.recycleBinPath = selected;
 }
 
-onMounted(() => { closeButton.value?.focus(); void loadRecycleItems(); });
+async function openRecycleBin(): Promise<void> {
+  recycleLocationError.value = "";
+  try {
+    await archiveRepository.openRecycleBin(draft.recycleBinPath || undefined);
+  } catch (error) {
+    recycleLocationError.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+onMounted(() => {
+  closeButton.value?.focus();
+  void loadRecycleItems();
+  void archiveRepository.getRepositoryInfo().then((info) => { repositoryPath.value = info.path; });
+});
 </script>
 
 <template>
@@ -150,7 +166,8 @@ onMounted(() => { closeButton.value?.focus(); void loadRecycleItems(); });
               <label class="setting-row select-row"><span><b>自动备份频率</b><small>仅在 Chronicle 运行时执行</small></span><ThemedSelect :model-value="draft.backupSchedule" :options="backupScheduleOptions" label="自动备份频率" @update:model-value="updateBackupSchedule" /></label>
               <div class="setting-row"><span><b>每个存档保留版本</b><small>默认保留全部版本；设置上限后清理最旧的普通备份</small></span><div class="retention-control"><label><input :checked="draft.retentionCount === null" type="checkbox" role="switch" @change="toggleRetentionLimit" /><span>无限制</span></label><input v-if="draft.retentionCount !== null" v-model.number="draft.retentionCount" aria-label="版本保留数量" class="number-input" type="number" min="1" max="999" /></div></div>
               <label class="setting-row"><span><b>启用回收站</b><small>删除的存档先移入回收站；关闭后直接永久删除</small></span><input v-model="draft.recycleBinEnabled" type="checkbox" role="switch" /></label>
-              <div class="setting-row recycle-path"><span><b>回收站位置</b><small>留空时使用 Chronicle 本地资料库中的 recycle 文件夹</small></span><div><input v-model.trim="draft.recycleBinPath" type="text" placeholder="默认位置" :disabled="!draft.recycleBinEnabled" /><button aria-label="选择回收站文件夹" :disabled="!draft.recycleBinEnabled || !isTauri()" @click="chooseRecycleBinPath"><FolderOpen :size="15" /></button></div></div>
+              <div class="setting-row recycle-path"><span><b>回收站位置</b><small>点击路径可在资源管理器中打开；右侧按钮用于选择新的位置</small></span><div><button class="recycle-location" type="button" :title="recycleLocation" :disabled="!isTauri()" @click="openRecycleBin">{{ recycleLocation }}</button><button aria-label="选择回收站文件夹" :disabled="!isTauri()" @click="chooseRecycleBinPath"><FolderOpen :size="15" /></button></div></div>
+              <p v-if="recycleLocationError" class="recycle-location-error" role="alert">{{ recycleLocationError }}</p>
             </div>
             <div class="path-card"><HardDrive :size="18" /><span><b>本地资料库</b><small>由 Chronicle 桌面应用数据目录管理</small></span><em>可用</em></div>
           </section>
@@ -241,5 +258,6 @@ footer button { min-height: 36px; padding: 0 13px; border-radius: 7px; font-size
 .recycle-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }.recycle-heading h3 { margin: 0; }.empty-button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 10px; color: #a52e28; background: #fff0ef; border-radius: 7px; font-size: 10px; font-weight: 650; }.empty-button:disabled { color: var(--text-3); background: #f1f3f2; cursor: default; opacity: .65; }
 .recycle-list { overflow: hidden; border: 1px solid var(--border); border-radius: 10px; }.recycle-list article { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: 66px; padding: 9px 12px; }.recycle-list article + article { border-top: 1px solid var(--border); }.recycle-icon { display: grid; place-items: center; width: 32px; height: 32px; color: #a52e28; background: #fff0ef; border-radius: 7px; }.recycle-list article > span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 4px; }.recycle-list b { font-size: 11px; }.recycle-list small { overflow: hidden; color: var(--text-3); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.recycle-list article > div { display: flex; gap: 6px; }.recycle-list button { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 0 8px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 6px; font-size: 9px; }.recycle-list button.danger { color: #a52e28; background: #fff0ef; }.recycle-list button:disabled { cursor: default; opacity: .55; }
 .recycle-empty { display: grid; place-items: center; min-height: 210px; gap: 7px; color: var(--text-3); background: #f8faf9; border: 1px dashed var(--border-2); border-radius: 10px; font-size: 10px; }.recycle-empty b { color: var(--text-2); font-size: 12px; }.recycle-error { padding: 10px 12px; color: #a52e28; background: #fff0ef; border-radius: 7px; font-size: 10px; }
+.recycle-path > div { display: flex; align-items: center; min-width: 0; gap: 7px; }.recycle-location { overflow: hidden; min-width: 220px; max-width: 290px; height: 34px; padding: 0 10px; color: var(--text-2); background: #f8faf9; border: 1px solid var(--border-2); border-radius: 6px; font-size: 10px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }.recycle-location:hover:not(:disabled) { color: var(--primary-dark); border-color: #8bbdb4; background: #fff; }.recycle-path > div > button:last-child { display: grid; place-items: center; width: 34px; height: 34px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 6px; }.recycle-path > div > button:last-child:hover:not(:disabled) { background: #d2e5e0; }.recycle-path button:disabled { color: var(--text-3); cursor: default; opacity: .55; }.recycle-location-error { margin: -3px 16px 10px; color: #a52e28; font-size: 9px; }
 @media (max-width: 1100px) { .settings-dialog { width: calc(100vw - 40px); height: calc(100vh - 40px); }.dialog-backdrop { padding: 20px; } }
 </style>
