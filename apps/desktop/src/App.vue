@@ -66,6 +66,7 @@ const creatingCategory = ref(false);
 const createCategoryError = ref<string>();
 const settingsOpen = ref(false);
 const cloudSettingsOpen = ref(false);
+const syncingArchive = ref(false);
 const snapshotProgress = ref<SnapshotProgress>();
 const busyAction = ref<"snapshot" | "restore">();
 const savingTags = ref(false);
@@ -389,6 +390,35 @@ async function createSnapshot(title = "手动备份") {
   }
 }
 
+async function syncSelectedArchive() {
+  const archive = selectedArchive.value;
+  if (!archive || syncingArchive.value) return;
+  if (!isTauriRuntime) {
+    showNotice("云同步仅在 Chronicle 桌面端可用", "error");
+    return;
+  }
+  if (archive.storagePolicy !== "local_and_remote") {
+    showNotice("当前存档仅使用本地存储，请先在编辑存档中启用云端保存", "info");
+    return;
+  }
+  if (!cloudSettings.enabled || !cloudSettings.activeSourceId) {
+    cloudSettingsOpen.value = true;
+    showNotice("请先添加并启用一个云同步源", "info");
+    return;
+  }
+  syncingArchive.value = true;
+  try {
+    const result = await cloudRepository.sync(cloudSettings.activeSourceId, archive.id);
+    await refreshArchives(archive.id);
+    await refreshSnapshots(archive.id);
+    showNotice(result.message, result.status === "conflict" ? "info" : "success");
+  } catch (error) {
+    showNotice(readableError(error), "error");
+  } finally {
+    syncingArchive.value = false;
+  }
+}
+
 async function restoreSnapshot() {
   const archive = selectedArchive.value;
   const snapshot = selectedSnapshot.value;
@@ -687,7 +717,7 @@ onBeforeUnmount(() => {
       <section v-if="selectedArchive" class="detail-panel" aria-labelledby="detail-title">
         <header class="detail-header">
           <div class="identity"><span class="detail-icon"><Folder v-if="selectedArchive.kind === 'folder'" /><File v-else-if="selectedArchive.kind === 'file'" /><FolderArchive v-else /></span><div class="title-line"><h2 id="detail-title">{{ selectedArchive.name }}</h2></div></div>
-          <div class="actions"><button class="secondary" @click="cloudSettingsOpen = true"><UploadCloud :size="17" />同步</button><button class="accent" :disabled="busyAction !== undefined" @click="createSnapshot()"><Plus :size="17" />{{ busyAction === 'snapshot' ? '创建中' : '创建备份' }}</button><div class="more-control"><button class="icon-button" aria-label="更多操作" :aria-expanded="archiveMenuOpen" @click="archiveMenuOpen = !archiveMenuOpen"><MoreHorizontal :size="19" /></button><div v-if="archiveMenuOpen" class="archive-actions-menu"><button @click="openEditArchive"><Pencil :size="15" />编辑存档</button><button class="danger" @click="selectedArchive && deleteArchive(selectedArchive)"><Trash2 :size="15" />删除存档</button></div></div></div>
+          <div class="actions"><button class="secondary" :disabled="syncingArchive" @click="syncSelectedArchive"><UploadCloud :size="17" />{{ syncingArchive ? '同步中' : '同步' }}</button><button class="accent" :disabled="busyAction !== undefined" @click="createSnapshot()"><Plus :size="17" />{{ busyAction === 'snapshot' ? '创建中' : '创建备份' }}</button><div class="more-control"><button class="icon-button" aria-label="更多操作" :aria-expanded="archiveMenuOpen" @click="archiveMenuOpen = !archiveMenuOpen"><MoreHorizontal :size="19" /></button><div v-if="archiveMenuOpen" class="archive-actions-menu"><button @click="openEditArchive"><Pencil :size="15" />编辑存档</button><button class="danger" @click="selectedArchive && deleteArchive(selectedArchive)"><Trash2 :size="15" />删除存档</button></div></div></div>
         </header>
 
         <ArchiveMetadata :archive="selectedArchive" :saving-tags="savingTags" @add-tag="addArchiveTag" @remove-tag="removeArchiveTag" />
