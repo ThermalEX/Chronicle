@@ -1,11 +1,25 @@
 import { invoke, isTauri as detectTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { ArchiveKind, ArchiveRecord, SnapshotProgress, SnapshotRecord } from "../domain";
+import type {
+  ArchiveRecord,
+  ArchiveSource,
+  CategoryRecord,
+  CreateArchiveInput,
+  SnapshotProgress,
+  SnapshotRecord,
+  SourceKind,
+} from "../domain";
 import { BrowserArchiveRepository } from "./archiveRepository";
 
 export interface ArchiveRepository {
   listArchives(): Promise<ArchiveRecord[]>;
-  addArchive(kind: ArchiveKind, category?: string): Promise<ArchiveRecord | undefined>;
+  pickSources(kind: SourceKind): Promise<ArchiveSource[]>;
+  createArchive(input: CreateArchiveInput): Promise<ArchiveRecord>;
+  listCategories(): Promise<CategoryRecord[]>;
+  createCategory(name: string, parentId?: string): Promise<CategoryRecord>;
+  moveCategory(categoryId: string, parentId?: string): Promise<void>;
+  setArchiveCategory(archiveId: string, categoryId?: string): Promise<void>;
+  setArchiveTags(archiveId: string, tags: string[]): Promise<void>;
   listSnapshots(archiveId: string): Promise<SnapshotRecord[]>;
   createSnapshot(
     archive: ArchiveRecord,
@@ -21,15 +35,49 @@ class TauriArchiveRepository implements ArchiveRepository {
     return invoke("list_entries");
   }
 
-  async addArchive(kind: ArchiveKind, category = "未分类"): Promise<ArchiveRecord | undefined> {
-    const sourcePath = await open({
+  async pickSources(kind: SourceKind): Promise<ArchiveSource[]> {
+    const selected = await open({
       directory: kind === "folder",
-      multiple: false,
+      multiple: true,
       recursive: kind === "folder",
-      title: kind === "folder" ? "选择要管理的文件夹" : "选择要管理的文件",
+      title: kind === "folder" ? "选择存档文件夹" : "选择存档文件",
     });
-    if (!sourcePath) return undefined;
-    return invoke("add_entry", { sourcePath, categoryId: category });
+    const paths = typeof selected === "string" ? [selected] : selected ?? [];
+    return paths.map((path) => ({
+      id: crypto.randomUUID(),
+      name: path.split(/[\\/]/).at(-1) || path,
+      path,
+      kind,
+    }));
+  }
+
+  createArchive(input: CreateArchiveInput): Promise<ArchiveRecord> {
+    return invoke("add_entry", {
+      name: input.name,
+      sourcePaths: input.sources.map((source) => source.path),
+      categoryId: null,
+      storagePolicy: input.storagePolicy,
+    });
+  }
+
+  listCategories(): Promise<CategoryRecord[]> {
+    return invoke("list_categories");
+  }
+
+  createCategory(name: string, parentId?: string): Promise<CategoryRecord> {
+    return invoke("create_category", { name, parentId: parentId ?? null });
+  }
+
+  moveCategory(categoryId: string, parentId?: string): Promise<void> {
+    return invoke("move_category", { categoryId, parentId: parentId ?? null });
+  }
+
+  setArchiveCategory(archiveId: string, categoryId?: string): Promise<void> {
+    return invoke("set_entry_category", { entryId: archiveId, categoryId: categoryId ?? null });
+  }
+
+  setArchiveTags(archiveId: string, tags: string[]): Promise<void> {
+    return invoke("set_entry_tags", { entryId: archiveId, tags });
   }
 
   listSnapshots(archiveId: string): Promise<SnapshotRecord[]> {

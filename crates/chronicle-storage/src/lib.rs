@@ -15,9 +15,8 @@ pub struct StoredObject {
     pub size_bytes: u64,
 }
 
-/// Builds a stable object key for a snapshot.
+/// Builds the relative path for a snapshot archive.
 #[must_use]
 pub fn object_key(snapshot: &Snapshot) -> String {
-    let prefix = snapshot.object_hash.get(..2).unwrap_or("00");
-    format!("objects/{prefix}/{}", snapshot.object_hash)
+    snapshot.archive_name.clone()
 }

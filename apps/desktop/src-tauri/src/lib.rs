@@ -14,7 +14,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let repository_root = app.path().app_local_data_dir()?.join("repository");
+            let repository_root = app.path().app_local_data_dir()?.join("Chronicle");
             let repository = LocalRepository::open(repository_root)
                 .map_err(|error| io::Error::other(error.to_string()))?;
             app.manage(AppState {
@@ -29,6 +29,13 @@ pub fn run() {
             commands::create_snapshot,
             commands::verify_snapshot,
             commands::restore_snapshot,
+            commands::load_settings,
+            commands::save_settings,
+            commands::set_entry_category,
+            commands::set_entry_tags,
+            commands::list_categories,
+            commands::create_category,
+            commands::move_category,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Chronicle");

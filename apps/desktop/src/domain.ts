@@ -1,12 +1,38 @@
-export type ArchiveKind = "file" | "folder";
+export type SourceKind = "file" | "folder";
+export type ArchiveKind = SourceKind | "collection";
+export type StoragePolicy = "local" | "local_and_remote";
+
+export type CategoryRecord = {
+  id: string;
+  name: string;
+  parentId?: string | null;
+};
+
+export type ArchiveSource = {
+  id: string;
+  name: string;
+  path: string;
+  kind: SourceKind;
+  handle?: FileSystemFileHandle | FileSystemDirectoryHandle;
+};
+
+export type CreateArchiveInput = {
+  name: string;
+  sources: ArchiveSource[];
+  storagePolicy: StoragePolicy;
+  createInitialSnapshot: boolean;
+};
 
 export type ArchiveRecord = {
   id: string;
   name: string;
   sourcePath: string;
+  sources: ArchiveSource[];
   category: string;
+  categoryId?: string;
+  tags: string[];
   kind: ArchiveKind;
-  handle?: FileSystemFileHandle | FileSystemDirectoryHandle;
+  storagePolicy: StoragePolicy;
   createdAt: number;
   updatedAt: number;
   totalBytes: number;

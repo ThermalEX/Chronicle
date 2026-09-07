@@ -1,9 +1,19 @@
-import type { ArchiveKind, ArchiveRecord, SnapshotFile, SnapshotProgress, SnapshotRecord } from "../domain";
+import type {
+  ArchiveRecord,
+  ArchiveSource,
+  CategoryRecord,
+  CreateArchiveInput,
+  SnapshotFile,
+  SnapshotProgress,
+  SnapshotRecord,
+  SourceKind,
+} from "../domain";
 
 const DATABASE_NAME = "chronicle-local";
-const DATABASE_VERSION = 1;
+const DATABASE_VERSION = 2;
 const ARCHIVES = "archives";
 const SNAPSHOTS = "snapshots";
+const CATEGORIES = "categories";
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -31,6 +41,9 @@ async function openDatabase(): Promise<IDBDatabase> {
       const store = database.createObjectStore(SNAPSHOTS, { keyPath: "id" });
       store.createIndex("archiveId", "archiveId");
     }
+    if (!database.objectStoreNames.contains(CATEGORIES)) {
+      database.createObjectStore(CATEGORIES, { keyPath: "id" });
+    }
   };
   return requestResult(request);
 }
@@ -57,13 +70,20 @@ async function collectDirectory(
   return files.sort((left, right) => left.path.localeCompare(right.path));
 }
 
-async function readSource(archive: ArchiveRecord): Promise<Array<{ path: string; file: File }>> {
-  if (!archive.handle) throw new Error("存档缺少本地文件句柄");
-  if (archive.kind === "file") {
-    const file = await (archive.handle as FileSystemFileHandle).getFile();
-    return [{ path: file.name, file }];
+async function readSources(archive: ArchiveRecord): Promise<Array<{ path: string; file: File }>> {
+  const files: Array<{ path: string; file: File }> = [];
+  for (const source of archive.sources) {
+    if (!source.handle) throw new Error(`“${source.name}”缺少本地文件句柄`);
+    await ensurePermission(source.handle, "read");
+    if (source.kind === "file") {
+      const file = await (source.handle as FileSystemFileHandle).getFile();
+      files.push({ path: `${source.id}/${file.name}`, file });
+    } else {
+      const children = await collectDirectory(source.handle as FileSystemDirectoryHandle);
+      files.push(...children.map((item) => ({ ...item, path: `${source.id}/${item.path}` })));
+    }
   }
-  return collectDirectory(archive.handle as FileSystemDirectoryHandle);
+  return files.sort((left, right) => left.path.localeCompare(right.path));
 }
 
 async function ensurePermission(handle: FileSystemHandle, mode: "read" | "readwrite"): Promise<void> {
@@ -102,34 +122,101 @@ export class BrowserArchiveRepository {
     const records = await requestResult(transaction.objectStore(ARCHIVES).getAll() as IDBRequest<ArchiveRecord[]>);
     await transactionDone(transaction);
     database.close();
-    return records.sort((left, right) => right.updatedAt - left.updatedAt);
+    return records
+      .map((archive) => ({ ...archive, tags: archive.tags ?? [] }))
+      .sort((left, right) => right.updatedAt - left.updatedAt);
   }
 
-  async addArchive(kind: ArchiveKind, category = "未分类"): Promise<ArchiveRecord | undefined> {
-    let handle: FileSystemFileHandle | FileSystemDirectoryHandle;
+  async pickSources(kind: SourceKind): Promise<ArchiveSource[]> {
     try {
-      handle = kind === "file"
-        ? (await window.showOpenFilePicker({ multiple: false }))[0]
-        : await window.showDirectoryPicker({ mode: "read" });
+      const handles = kind === "file"
+        ? await window.showOpenFilePicker({ multiple: true })
+        : [await window.showDirectoryPicker({ mode: "read" })];
+      return handles.map((handle) => ({
+        id: crypto.randomUUID(),
+        name: handle.name,
+        path: handle.name,
+        kind,
+        handle,
+      }));
     } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return undefined;
+      if (error instanceof DOMException && error.name === "AbortError") return [];
       throw error;
     }
-    if (!handle) return undefined;
+  }
+
+  async createArchive(input: CreateArchiveInput): Promise<ArchiveRecord> {
     const now = Date.now();
     const archive: ArchiveRecord = {
       id: crypto.randomUUID(),
-      name: handle.name,
-      sourcePath: handle.name,
-      category,
-      kind,
-      handle,
+      name: input.name.trim(),
+      sourcePath: input.sources.map((source) => source.path).join(" · "),
+      sources: input.sources,
+      category: "未分类",
+      categoryId: undefined,
+      tags: [],
+      kind: input.sources.length === 1 ? input.sources[0].kind : "collection",
+      storagePolicy: input.storagePolicy,
       createdAt: now,
       updatedAt: now,
       totalBytes: 0,
     };
     await this.putArchive(archive);
     return archive;
+  }
+
+  async listCategories(): Promise<CategoryRecord[]> {
+    const database = await openDatabase();
+    const transaction = database.transaction(CATEGORIES, "readonly");
+    const records = await requestResult(transaction.objectStore(CATEGORIES).getAll() as IDBRequest<CategoryRecord[]>);
+    await transactionDone(transaction);
+    database.close();
+    return records;
+  }
+
+  async createCategory(name: string, parentId?: string): Promise<CategoryRecord> {
+    const category = { id: crypto.randomUUID(), name: name.trim(), parentId };
+    const database = await openDatabase();
+    const transaction = database.transaction(CATEGORIES, "readwrite");
+    transaction.objectStore(CATEGORIES).put(category);
+    await transactionDone(transaction);
+    database.close();
+    return category;
+  }
+
+  async moveCategory(categoryId: string, parentId?: string): Promise<void> {
+    const categories = await this.listCategories();
+    const category = categories.find((item) => item.id === categoryId);
+    if (!category || (parentId && !categories.some((item) => item.id === parentId))) throw new Error("分类不存在");
+    let ancestor: string | null | undefined = parentId;
+    while (ancestor) {
+      if (ancestor === categoryId) throw new Error("不能把分类移入自身或自己的子分类");
+      ancestor = categories.find((item) => item.id === ancestor)?.parentId;
+    }
+    const database = await openDatabase();
+    const transaction = database.transaction(CATEGORIES, "readwrite");
+    transaction.objectStore(CATEGORIES).put({ ...category, parentId });
+    await transactionDone(transaction);
+    database.close();
+  }
+
+  async setArchiveCategory(archiveId: string, categoryId?: string): Promise<void> {
+    const archives = await this.listArchives();
+    const archive = archives.find((item) => item.id === archiveId);
+    if (!archive) throw new Error("存档不存在");
+    const category = categoryId ? (await this.listCategories()).find((item) => item.id === categoryId) : undefined;
+    if (categoryId && !category) throw new Error("分类不存在");
+    await this.putArchive({ ...archive, category: category?.name ?? "未分类", categoryId, updatedAt: Date.now() });
+  }
+
+  async setArchiveTags(archiveId: string, tags: string[]): Promise<void> {
+    const archives = await this.listArchives();
+    const archive = archives.find((item) => item.id === archiveId);
+    if (!archive) throw new Error("存档不存在");
+    const normalized = tags
+      .map((tag) => tag.trim())
+      .filter((tag, index, items) => tag && items.findIndex((item) => item.toLocaleLowerCase() === tag.toLocaleLowerCase()) === index);
+    await this.putArchive({ ...archive, tags: normalized, updatedAt: Date.now() });
   }
 
   async putArchive(archive: ArchiveRecord): Promise<void> {
@@ -156,9 +243,7 @@ export class BrowserArchiveRepository {
     safety = false,
     onProgress?: (progress: SnapshotProgress) => void,
   ): Promise<SnapshotRecord> {
-    if (!archive.handle) throw new Error("存档缺少本地文件句柄");
-    await ensurePermission(archive.handle, "read");
-    const sourceFiles = await readSource(archive);
+    const sourceFiles = await readSources(archive);
     const files: SnapshotFile[] = [];
     for (const [index, item] of sourceFiles.entries()) {
       onProgress?.({ current: index, total: sourceFiles.length, currentPath: item.path });
@@ -208,20 +293,24 @@ export class BrowserArchiveRepository {
   }
 
   async restoreSnapshot(archive: ArchiveRecord, snapshot: SnapshotRecord): Promise<void> {
-    if (!archive.handle) throw new Error("存档缺少本地文件句柄");
-    await ensurePermission(archive.handle, "readwrite");
     await this.createSnapshot(archive, "恢复前安全快照", true);
-    if (archive.kind === "file") {
-      const file = snapshot.files[0];
-      if (!file?.blob) throw new Error("快照中没有可恢复的文件");
-      await writeFile(archive.handle as FileSystemFileHandle, file.blob);
-      return;
-    }
-    const root = archive.handle as FileSystemDirectoryHandle;
-    await removeContents(root);
-    for (const file of snapshot.files) {
-      if (!file.blob) throw new Error(`快照文件缺少内容：${file.path}`);
-      await writeFile(await ensureFile(root, file.path), file.blob);
+    for (const source of archive.sources) {
+      if (!source.handle) throw new Error(`“${source.name}”缺少本地文件句柄`);
+      await ensurePermission(source.handle, "readwrite");
+      const prefix = `${source.id}/`;
+      const files = snapshot.files.filter((file) => file.path.startsWith(prefix));
+      if (source.kind === "file") {
+        const file = files.find((item) => item.path === `${prefix}${source.name}`);
+        if (!file?.blob) throw new Error(`快照中缺少“${source.name}”`);
+        await writeFile(source.handle as FileSystemFileHandle, file.blob);
+        continue;
+      }
+      const root = source.handle as FileSystemDirectoryHandle;
+      await removeContents(root);
+      for (const file of files) {
+        if (!file.blob) throw new Error(`快照文件缺少内容：${file.path}`);
+        await writeFile(await ensureFile(root, file.path.slice(prefix.length)), file.blob);
+      }
     }
   }
 }

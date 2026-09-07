@@ -13,18 +13,32 @@ describe("desktop repository adapter", () => {
   });
 
   it("uses the native dialog and Rust command in a Tauri runtime", async () => {
-    open.mockResolvedValue("C:\\Users\\ThermalEX\\Documents\\Example");
+    open.mockResolvedValue(["C:\\Users\\ThermalEX\\Documents\\Example", "C:\\Users\\ThermalEX\\settings.json"]);
     invoke.mockResolvedValue({ id: "entry-1", name: "Example" });
     const { archiveRepository, isTauriRuntime } = await import("./repository");
 
-    const entry = await archiveRepository.addArchive("folder", "工作");
+    const sources = await archiveRepository.pickSources("folder");
+    const entry = await archiveRepository.createArchive({
+      name: "Example",
+      sources,
+      storagePolicy: "local_and_remote",
+      createInitialSnapshot: true,
+    });
 
     expect(isTauriRuntime).toBe(true);
-    expect(open).toHaveBeenCalledWith(expect.objectContaining({ directory: true, multiple: false }));
+    expect(open).toHaveBeenCalledWith(expect.objectContaining({ directory: true, multiple: true }));
     expect(invoke).toHaveBeenCalledWith("add_entry", {
-      sourcePath: "C:\\Users\\ThermalEX\\Documents\\Example",
-      categoryId: "工作",
+      name: "Example",
+      sourcePaths: ["C:\\Users\\ThermalEX\\Documents\\Example", "C:\\Users\\ThermalEX\\settings.json"],
+      categoryId: null,
+      storagePolicy: "local_and_remote",
     });
     expect(entry).toEqual({ id: "entry-1", name: "Example" });
+
+    await archiveRepository.setArchiveTags("entry-1", ["工作", "重要"]);
+    expect(invoke).toHaveBeenLastCalledWith("set_entry_tags", {
+      entryId: "entry-1",
+      tags: ["工作", "重要"],
+    });
   });
 });

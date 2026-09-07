@@ -10,4 +10,4 @@
 *.db
 *.db-shm
 *.db-wal
-
+/apps/desktop/src-tauri/gen/

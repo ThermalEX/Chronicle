@@ -27,13 +27,22 @@ class MemoryFileHandle {
 }
 
 function archiveFor(handle: MemoryFileHandle): ArchiveRecord {
+  const sourceId = crypto.randomUUID();
   return {
     id: crypto.randomUUID(),
     name: handle.name,
     sourcePath: handle.name,
+    sources: [{
+      id: sourceId,
+      name: handle.name,
+      path: handle.name,
+      kind: "file",
+      handle: handle as unknown as FileSystemFileHandle,
+    }],
     category: "未分类",
+    tags: [],
     kind: "file",
-    handle: handle as unknown as FileSystemFileHandle,
+    storagePolicy: "local",
     createdAt: 1,
     updatedAt: 1,
     totalBytes: 0,
@@ -56,11 +65,21 @@ describe("ArchiveRepository", () => {
     const permissionQuery = vi.spyOn(handle, "queryPermission");
     vi.stubGlobal("window", { showOpenFilePicker: vi.fn().mockResolvedValue([handle]) });
 
-    const archive = await repository.addArchive("file", "配置");
+    const sources = await repository.pickSources("file");
+    const archive = await repository.createArchive({
+      name: "设置",
+      sources,
+      storagePolicy: "local",
+      createInitialSnapshot: false,
+    });
 
-    expect(archive?.name).toBe("settings.json");
-    expect(archive?.category).toBe("配置");
+    expect(archive.name).toBe("设置");
+    expect(archive.category).toBe("未分类");
     expect(permissionQuery).not.toHaveBeenCalled();
+
+    await repository.setArchiveTags(archive.id, ["重要", "配置", "重要"]);
+    const [updated] = await repository.listArchives();
+    expect(updated.tags).toEqual(["重要", "配置"]);
   });
 
   it("creates versioned snapshots and restores an earlier file", async () => {

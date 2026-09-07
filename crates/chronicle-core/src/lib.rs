@@ -12,19 +12,56 @@ pub enum EntryKind {
     Directory,
 }
 
-/// A locally configured file or directory.
+/// One local file or directory included in an entry.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EntrySource {
+    /// Stable source identifier used as the archive namespace.
+    pub id: String,
+    /// User-facing source name.
+    pub name: String,
+    /// Source path on this device.
+    pub path: String,
+    /// Source type.
+    pub kind: EntryKind,
+}
+
+/// Where an entry's snapshots should be replicated.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoragePolicy {
+    /// Keep snapshots in the local repository only.
+    Local,
+    /// Keep snapshots locally and mirror them to the configured remote.
+    LocalAndRemote,
+}
+
+/// A repository category that may be nested below another category.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Category {
+    /// Stable category identifier.
+    pub id: String,
+    /// User-facing category name.
+    pub name: String,
+    /// Parent category identifier, or `None` for a root category.
+    pub parent_id: Option<String>,
+}
+
+/// A named archive containing one or more local sources.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Entry {
     /// Stable identifier independent of the source path.
     pub id: String,
     /// User-facing name.
     pub name: String,
-    /// Source path on this device.
-    pub source_path: String,
-    /// Source type.
-    pub kind: EntryKind,
+    /// Files and directories captured together in each snapshot.
+    pub sources: Vec<EntrySource>,
     /// Optional local category identifier.
     pub category_id: Option<String>,
+    /// User-defined labels used for filtering and discovery.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Snapshot replication policy.
+    pub storage_policy: StoragePolicy,
     /// Time the entry was registered, expressed as Unix milliseconds.
     pub created_at_ms: u64,
 }
@@ -68,6 +105,8 @@ pub struct Snapshot {
     pub title: String,
     /// Creation time expressed as Unix milliseconds.
     pub created_at_ms: u64,
+    /// Chronologically sortable 7z filename inside the entry directory.
+    pub archive_name: String,
     /// Hash of the immutable stored object.
     pub object_hash: String,
     /// Stored object size in bytes.
