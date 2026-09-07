@@ -2,7 +2,7 @@
 import { FolderOpen, HardDrive, Info, Keyboard, RotateCcw, Settings2, Trash2, Undo2, X } from "@lucide/vue";
 import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { appSettings, resetAppSettings, saveAppSettings, type AppSettings, type BackupSchedule, type CloseBehavior } from "../services/settings";
 import { archiveRepository } from "../services/repository";
 import type { RecycleItem } from "../domain";
@@ -21,6 +21,8 @@ const recycleLocationError = ref("");
 const repositoryPath = ref("");
 const confirmAction = ref<{ title: string; message: string; run: () => Promise<void> }>();
 const recycleLocation = computed(() => draft.recycleBinPath || (repositoryPath.value ? `${repositoryPath.value}\\recycle` : "Chronicle\\recycle"));
+let recycleLocationObserver: ResizeObserver | undefined;
+let recycleLocationButton: HTMLButtonElement | undefined;
 const closeBehaviorOptions: ThemedSelectOption[] = [
   { value: "ask", label: "每次询问" },
   { value: "tray", label: "最小化到托盘" },
@@ -126,11 +128,29 @@ async function openRecycleBin(): Promise<void> {
   }
 }
 
+function updateRecycleLocationOverflow(): void {
+  const button = recycleLocationButton;
+  if (!button) return;
+  const distance = Math.max(0, button.scrollWidth - button.clientWidth);
+  const overflows = distance > 1;
+  button.classList.toggle("scrolling", overflows);
+  button.style.setProperty("--recycle-scroll-distance", `-${distance}px`);
+}
+
 onMounted(() => {
   closeButton.value?.focus();
   void loadRecycleItems();
   void archiveRepository.getRepositoryInfo().then((info) => { repositoryPath.value = info.path; });
+  void nextTick(() => {
+    recycleLocationButton = document.querySelector<HTMLButtonElement>(".settings-dialog .recycle-location") ?? undefined;
+    updateRecycleLocationOverflow();
+    recycleLocationObserver = new ResizeObserver(updateRecycleLocationOverflow);
+    if (recycleLocationButton) recycleLocationObserver.observe(recycleLocationButton);
+  });
 });
+
+watch(recycleLocation, () => { void nextTick(updateRecycleLocationOverflow); });
+onBeforeUnmount(() => recycleLocationObserver?.disconnect());
 </script>
 
 <template>
@@ -259,5 +279,5 @@ footer button { min-height: 36px; padding: 0 13px; border-radius: 7px; font-size
 .recycle-list { overflow: hidden; border: 1px solid var(--border); border-radius: 10px; }.recycle-list article { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: 66px; padding: 9px 12px; }.recycle-list article + article { border-top: 1px solid var(--border); }.recycle-icon { display: grid; place-items: center; width: 32px; height: 32px; color: #a52e28; background: #fff0ef; border-radius: 7px; }.recycle-list article > span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 4px; }.recycle-list b { font-size: 11px; }.recycle-list small { overflow: hidden; color: var(--text-3); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.recycle-list article > div { display: flex; gap: 6px; }.recycle-list button { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 0 8px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 6px; font-size: 9px; }.recycle-list button.danger { color: #a52e28; background: #fff0ef; }.recycle-list button:disabled { cursor: default; opacity: .55; }
 .recycle-empty { display: grid; place-items: center; min-height: 210px; gap: 7px; color: var(--text-3); background: #f8faf9; border: 1px dashed var(--border-2); border-radius: 10px; font-size: 10px; }.recycle-empty b { color: var(--text-2); font-size: 12px; }.recycle-error { padding: 10px 12px; color: #a52e28; background: #fff0ef; border-radius: 7px; font-size: 10px; }
 .recycle-path > div { display: flex; align-items: center; min-width: 0; gap: 7px; }.recycle-location { overflow: hidden; min-width: 220px; max-width: 290px; height: 34px; padding: 0 10px; color: var(--text-2); background: #f8faf9; border: 1px solid var(--border-2); border-radius: 6px; font-size: 10px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }.recycle-location:hover:not(:disabled) { color: var(--primary-dark); border-color: #8bbdb4; background: #fff; }.recycle-path > div > button:last-child { display: grid; place-items: center; width: 34px; height: 34px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 6px; }.recycle-path > div > button:last-child:hover:not(:disabled) { background: #d2e5e0; }.recycle-path button:disabled { color: var(--text-3); cursor: default; opacity: .55; }.recycle-location-error { margin: -3px 16px 10px; color: #a52e28; font-size: 9px; }
-@media (max-width: 1100px) { .settings-dialog { width: calc(100vw - 40px); height: calc(100vh - 40px); }.dialog-backdrop { padding: 20px; } }
+.recycle-location.scrolling { text-overflow: clip; animation: recycle-location-pan 8s ease-in-out infinite; }.recycle-location.scrolling:hover, .recycle-location.scrolling:focus-visible { animation-play-state: paused; }@keyframes recycle-location-pan { 0%, 20% { text-indent: 0; } 52%, 72% { text-indent: var(--recycle-scroll-distance); } 100% { text-indent: 0; } }@media (prefers-reduced-motion: reduce) { .recycle-location.scrolling { animation: none; text-overflow: ellipsis; } }@media (max-width: 1100px) { .settings-dialog { width: calc(100vw - 40px); height: calc(100vh - 40px); }.dialog-backdrop { padding: 20px; } }
 </style>
