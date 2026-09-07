@@ -385,8 +385,89 @@ async fn ensure_remote_layout(client: &WebDavClient) -> Result<(), String> {
     Ok(())
 }
 
-async fn upload_catalog_and_library(client: &WebDavClient, root: &Path) -> Result<(), String> {
-    let catalog: Value = read_json(&root.join("data/catalog.json"))?;
+fn merge_catalog_entry(
+    remote_catalog: &mut Value,
+    local_catalog: &Value,
+    entry_id: &str,
+) -> Result<(), String> {
+    let entry = local_catalog
+        .get("entries")
+        .and_then(Value::as_array)
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(entry_id))
+        })
+        .cloned()
+        .ok_or_else(|| "本地存档不存在".to_owned())?;
+    if !remote_catalog.is_object() {
+        *remote_catalog = serde_json::json!({});
+    }
+    let remote = remote_catalog
+        .as_object_mut()
+        .ok_or_else(|| "远端清单格式无效".to_owned())?;
+    let entries = remote
+        .entry("entries")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| "远端存档清单格式无效".to_owned())?;
+    entries.retain(|existing| existing.get("id").and_then(Value::as_str) != Some(entry_id));
+    entries.push(entry.clone());
+
+    let mut required_categories = Vec::new();
+    let local_categories = local_catalog
+        .get("categories")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut parent = entry
+        .get("category_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    while let Some(category_id) = parent {
+        let Some(category) = local_categories
+            .iter()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(&category_id))
+        else {
+            break;
+        };
+        required_categories.push(category.clone());
+        parent = category
+            .get("parent_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+    }
+    let categories = remote
+        .entry("categories")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| "远端分类清单格式无效".to_owned())?;
+    for category in required_categories {
+        let id = category.get("id").and_then(Value::as_str);
+        categories.retain(|existing| existing.get("id").and_then(Value::as_str) != id);
+        categories.push(category);
+    }
+    Ok(())
+}
+
+async fn upload_catalog_and_library(
+    client: &WebDavClient,
+    root: &Path,
+    entry_id: &str,
+) -> Result<(), String> {
+    let local_catalog: Value = read_json(&root.join("data/catalog.json"))?;
+    let mut catalog: Value = match client.get_json("data/catalog.json").await {
+        Ok(value) => value,
+        Err(WebDavError::NotFound(_)) => serde_json::json!({
+            "format_version": local_catalog.get("format_version").cloned().unwrap_or(Value::from(3)),
+            "updated_at_ms": unix_millis(),
+            "categories": [],
+            "entries": [],
+        }),
+        Err(error) => return Err(error.to_string()),
+    };
+    merge_catalog_entry(&mut catalog, &local_catalog, entry_id)?;
+    catalog["updated_at_ms"] = Value::from(unix_millis());
     client
         .put_json("data/catalog.json", &catalog)
         .await
@@ -463,7 +544,7 @@ pub async fn cloud_overwrite_upload(
                     .map_err(|error| error.to_string())?;
             }
         }
-        upload_catalog_and_library(&client, &root).await
+        upload_catalog_and_library(&client, &root, &entry_id).await
     }
     .await;
     if let Err(error) = upload_result {
@@ -922,4 +1003,38 @@ pub async fn cloud_set_entry_sync_mode(
         .set_entry_sync_mode(&entry_id, parsed_mode)
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::merge_catalog_entry;
+
+    #[test]
+    fn scoped_catalog_upload_does_not_add_unsynced_local_entries() {
+        let mut remote = json!({
+            "entries": [{ "id": "remote", "name": "Other device" }],
+            "categories": [],
+        });
+        let local = json!({
+            "entries": [
+                { "id": "selected", "name": "Selected", "category_id": "child" },
+                { "id": "local-only", "name": "Not synced", "category_id": null }
+            ],
+            "categories": [
+                { "id": "parent", "name": "Parent", "parent_id": null },
+                { "id": "child", "name": "Child", "parent_id": "parent" }
+            ]
+        });
+
+        merge_catalog_entry(&mut remote, &local, "selected").unwrap();
+
+        let entries = remote["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|entry| entry["id"] == "remote"));
+        assert!(entries.iter().any(|entry| entry["id"] == "selected"));
+        assert!(!entries.iter().any(|entry| entry["id"] == "local-only"));
+        assert_eq!(remote["categories"].as_array().unwrap().len(), 2);
+    }
 }
