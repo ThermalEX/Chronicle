@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { File, Folder, HardDrive, Plus, Trash2, UploadCloud, X } from "@lucide/vue";
 import { onMounted, ref, watch } from "vue";
-import type { ArchiveSource, CreateArchiveInput, SourceKind, StoragePolicy } from "../domain";
+import type { ArchiveSource, ArchiveSyncMode, CreateArchiveInput, SourceKind, StoragePolicy } from "../domain";
 
 const props = defineProps<{
   sources: ArchiveSource[];
@@ -9,6 +9,9 @@ const props = defineProps<{
   picking?: SourceKind;
   submitting?: boolean;
   error?: string;
+  editName?: string;
+  editStoragePolicy?: StoragePolicy;
+  editSyncMode?: ArchiveSyncMode;
 }>();
 const emit = defineEmits<{
   close: [];
@@ -17,8 +20,9 @@ const emit = defineEmits<{
   submit: [input: CreateArchiveInput];
 }>();
 
-const name = ref("");
-const storagePolicy = ref<StoragePolicy>("local");
+const name = ref(props.editName ?? "");
+const storagePolicy = ref<StoragePolicy>(props.editStoragePolicy ?? "local");
+const syncMode = ref<ArchiveSyncMode>(props.editSyncMode ?? "manual");
 const createInitialSnapshot = ref(props.defaultInitialSnapshot);
 const nameInput = ref<HTMLInputElement>();
 const attempted = ref(false);
@@ -35,6 +39,7 @@ function submit(): void {
     sources: props.sources,
     storagePolicy: storagePolicy.value,
     createInitialSnapshot: createInitialSnapshot.value,
+    syncMode: syncMode.value,
   });
 }
 
@@ -45,7 +50,7 @@ onMounted(() => nameInput.value?.focus());
   <div class="dialog-backdrop" @click.self="emit('close')">
     <form class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-title" @submit.prevent="submit">
       <header>
-        <div><p>新建存档</p><h2 id="create-title">添加到 Chronicle</h2></div>
+        <div><p>{{ editName ? '编辑存档' : '新建存档' }}</p><h2 id="create-title">{{ editName ? '修改存档设置' : '添加到 Chronicle' }}</h2></div>
         <button type="button" aria-label="关闭新建存档" @click="emit('close')"><X :size="18" /></button>
       </header>
 
@@ -78,11 +83,13 @@ onMounted(() => nameInput.value?.focus());
             <label :class="{ selected: storagePolicy === 'local_and_remote' }"><input v-model="storagePolicy" type="radio" value="local_and_remote" /><UploadCloud :size="16" /><span><b>本地与云端</b><small>云端接入后自动加入同步</small></span></label>
           </div></div>
 
-        <label class="initial-toggle"><span><b>创建后立即备份</b><small>生成第一个可恢复的 7z 时间节点</small></span><input v-model="createInitialSnapshot" type="checkbox" role="switch" /></label>
+        <label v-if="storagePolicy === 'local_and_remote'" class="field sync-mode-field"><span>同步方案</span><select v-model="syncMode"><option value="manual">手动同步</option><option value="automatic">本地变更后自动上传</option></select><small>自动模式不会在启动时下载远端内容。</small></label>
+
+        <label v-if="!editName" class="initial-toggle"><span><b>创建后立即备份</b><small>生成第一个可恢复的 7z 时间节点</small></span><input v-model="createInitialSnapshot" type="checkbox" role="switch" /></label>
         <p v-if="error" class="submit-error" role="alert">{{ error }}</p>
       </main>
 
-      <footer><span>{{ sources.length }} 个来源</span><div><button type="button" class="cancel" :disabled="submitting" @click="emit('close')">取消</button><button class="submit" type="submit" :disabled="submitting"><Plus :size="16" />{{ submitting ? '正在创建' : '创建存档' }}</button></div></footer>
+      <footer><span>{{ sources.length }} 个来源</span><div><button type="button" class="cancel" :disabled="submitting" @click="emit('close')">取消</button><button class="submit" type="submit" :disabled="submitting"><Plus :size="16" />{{ submitting ? (editName ? '正在保存' : '正在创建') : (editName ? '保存修改' : '创建存档') }}</button></div></footer>
     </form>
   </div>
 </template>
@@ -104,6 +111,7 @@ fieldset { margin: 20px 0; padding: 15px; border: 1px solid var(--border); borde
 .initial-toggle input { position: relative; width: 38px; height: 22px; flex: none; appearance: none; background: #cbd5d1; border-radius: 20px; cursor: pointer; } .initial-toggle input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; background: #fff; border-radius: 50%; box-shadow: 0 1px 3px #102b2738; transition: transform .16s; } .initial-toggle input:checked { background: var(--primary); } .initial-toggle input:checked::after { transform: translateX(16px); }
 .field-error, .submit-error { color: #a52e28; font-size: 9px; } .submit-error { margin: 13px 0 0; padding: 10px 12px; background: #fff0ef; border-radius: 7px; }
 footer { border-top: 1px solid var(--border); color: var(--text-3); font-size: 9px; } footer > div { display: flex; gap: 8px; } footer button { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 13px; border-radius: 7px; font-size: 10px; font-weight: 650; } .cancel { background: transparent; } .submit { color: #fff; background: var(--primary); } .submit:hover { background: var(--primary-dark); }
-button:disabled { opacity: .55; cursor: wait; }
+button:disabled { opacity: .55; cursor: default; }
+.sync-mode-field { margin-top: 16px; }.sync-mode-field small { color: var(--text-3); font-size: 9px; }
 @media (max-width: 760px) { .storage-options { grid-template-columns: 1fr; } .create-dialog { width: calc(100vw - 28px); max-height: calc(100vh - 28px); } .dialog-backdrop { padding: 14px; } }
 </style>

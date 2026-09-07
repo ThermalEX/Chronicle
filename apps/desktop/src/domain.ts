@@ -1,6 +1,7 @@
 export type SourceKind = "file" | "folder";
 export type ArchiveKind = SourceKind | "collection";
 export type StoragePolicy = "local" | "local_and_remote";
+export type ArchiveSyncMode = "manual" | "automatic";
 
 export type CategoryRecord = {
   id: string;
@@ -19,8 +20,10 @@ export type ArchiveSource = {
 export type CreateArchiveInput = {
   name: string;
   sources: ArchiveSource[];
+  categoryId?: string;
   storagePolicy: StoragePolicy;
   createInitialSnapshot: boolean;
+  syncMode: ArchiveSyncMode;
 };
 
 export type ArchiveRecord = {
@@ -33,6 +36,7 @@ export type ArchiveRecord = {
   tags: string[];
   kind: ArchiveKind;
   storagePolicy: StoragePolicy;
+  syncMode: ArchiveSyncMode;
   createdAt: number;
   updatedAt: number;
   totalBytes: number;
@@ -57,10 +61,26 @@ export type SnapshotRecord = {
   files: SnapshotFile[];
   changes: { added: number; modified: number; deleted: number };
   safety: boolean;
+  deviceId?: string;
+  deviceName?: string;
 };
 
 export type SnapshotProgress = {
   current: number;
   total: number;
   currentPath: string;
+};
+
+export type RepositoryInfo = {
+  path: string;
+  totalBytes: number;
+};
+
+export type RecycleItem = {
+  id: string;
+  kind: "archive" | "category";
+  displayName: string;
+  deletedAt: number;
+  sizeBytes: number;
+  entryCount: number;
 };

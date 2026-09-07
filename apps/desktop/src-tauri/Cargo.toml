@@ -16,6 +16,11 @@ tauri-build = { version = "2.6.3", features = [] }
 [dependencies]
 chronicle-core = { path = "../../../crates/chronicle-core" }
 chronicle-storage = { path = "../../../crates/chronicle-storage" }
+chronicle-sync = { path = "../../../crates/chronicle-sync" }
+keyring = { version = "3.6.3", features = ["windows-native"] }
+sha2 = "0.10.9"
+uuid = { version = "1.18.1", features = ["v4"] }
+walkdir = "2.5.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tauri = { version = "2.11.5", features = [] }

@@ -22,6 +22,7 @@ describe("desktop repository adapter", () => {
       name: "Example",
       sources,
       storagePolicy: "local_and_remote",
+      syncMode: "manual",
       createInitialSnapshot: true,
     });
 
@@ -32,6 +33,7 @@ describe("desktop repository adapter", () => {
       sourcePaths: ["C:\\Users\\ThermalEX\\Documents\\Example", "C:\\Users\\ThermalEX\\settings.json"],
       categoryId: null,
       storagePolicy: "local_and_remote",
+      syncMode: "manual",
     });
     expect(entry).toEqual({ id: "entry-1", name: "Example" });
 
@@ -40,5 +42,11 @@ describe("desktop repository adapter", () => {
       entryId: "entry-1",
       tags: ["工作", "重要"],
     });
+
+    invoke.mockResolvedValue([{ id: "trash-1", kind: "archive" }]);
+    await archiveRepository.listRecycleItems();
+    expect(invoke).toHaveBeenLastCalledWith("list_recycle_items");
+    await archiveRepository.restoreRecycleItem("trash-1");
+    expect(invoke).toHaveBeenLastCalledWith("restore_recycle_item", { itemId: "trash-1" });
   });
 });

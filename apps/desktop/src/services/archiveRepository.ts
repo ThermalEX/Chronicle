@@ -6,14 +6,17 @@ import type {
   SnapshotFile,
   SnapshotProgress,
   SnapshotRecord,
+  RepositoryInfo,
+  RecycleItem,
   SourceKind,
 } from "../domain";
 
 const DATABASE_NAME = "chronicle-local";
-const DATABASE_VERSION = 2;
+const DATABASE_VERSION = 3;
 const ARCHIVES = "archives";
 const SNAPSHOTS = "snapshots";
 const CATEGORIES = "categories";
+const TRASH = "trash";
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -43,6 +46,9 @@ async function openDatabase(): Promise<IDBDatabase> {
     }
     if (!database.objectStoreNames.contains(CATEGORIES)) {
       database.createObjectStore(CATEGORIES, { keyPath: "id" });
+    }
+    if (!database.objectStoreNames.contains(TRASH)) {
+      database.createObjectStore(TRASH, { keyPath: "id" });
     }
   };
   return requestResult(request);
@@ -116,6 +122,73 @@ async function removeContents(directory: FileSystemDirectoryHandle): Promise<voi
 }
 
 export class BrowserArchiveRepository {
+  async getRepositoryInfo(): Promise<RepositoryInfo> {
+    const database = await openDatabase();
+    const transaction = database.transaction(SNAPSHOTS, "readonly");
+    const snapshots = await requestResult(transaction.objectStore(SNAPSHOTS).getAll() as IDBRequest<SnapshotRecord[]>);
+    await transactionDone(transaction);
+    database.close();
+    return { path: "浏览器本地数据库", totalBytes: snapshots.reduce((total, snapshot) => total + snapshot.totalBytes, 0) };
+  }
+
+  async openRepositoryFolder(): Promise<void> {
+    throw new Error("浏览器模式没有可打开的资料库文件夹");
+  }
+
+  async listRecycleItems(): Promise<RecycleItem[]> {
+    const database = await openDatabase();
+    const transaction = database.transaction(TRASH, "readonly");
+    const records = await requestResult(transaction.objectStore(TRASH).getAll() as IDBRequest<Array<Record<string, unknown>>>);
+    await transactionDone(transaction);
+    database.close();
+    return records.map((record) => {
+      const archives = (record.archives as ArchiveRecord[] | undefined) ?? (record.archive ? [record.archive as ArchiveRecord] : []);
+      const snapshots = (record.snapshots as SnapshotRecord[] | undefined) ?? [];
+      return {
+        id: record.id as string,
+        kind: record.kind as "archive" | "category",
+        displayName: record.kind === "archive" ? archives[0]?.name ?? "存档" : ((record.categories as CategoryRecord[] | undefined)?.[0]?.name ?? "分类"),
+        deletedAt: record.deletedAt as number,
+        sizeBytes: snapshots.reduce((total, snapshot) => total + snapshot.totalBytes, 0),
+        entryCount: archives.length,
+      };
+    }).sort((left, right) => right.deletedAt - left.deletedAt);
+  }
+
+  async restoreRecycleItem(itemId: string): Promise<void> {
+    const database = await openDatabase();
+    const read = database.transaction(TRASH, "readonly");
+    const record = await requestResult(read.objectStore(TRASH).get(itemId));
+    await transactionDone(read);
+    if (!record) { database.close(); throw new Error("回收站项目不存在"); }
+    const archives = (record.archives as ArchiveRecord[] | undefined) ?? (record.archive ? [record.archive as ArchiveRecord] : []);
+    const categories = (record.categories as CategoryRecord[] | undefined) ?? [];
+    const snapshots = (record.snapshots as SnapshotRecord[] | undefined) ?? [];
+    const transaction = database.transaction([ARCHIVES, SNAPSHOTS, CATEGORIES, TRASH], "readwrite");
+    for (const category of categories) transaction.objectStore(CATEGORIES).add(category);
+    for (const archive of archives) transaction.objectStore(ARCHIVES).add(archive);
+    for (const snapshot of snapshots) transaction.objectStore(SNAPSHOTS).add(snapshot);
+    transaction.objectStore(TRASH).delete(itemId);
+    await transactionDone(transaction);
+    database.close();
+  }
+
+  async permanentlyDeleteRecycleItem(itemId: string): Promise<void> {
+    const database = await openDatabase();
+    const transaction = database.transaction(TRASH, "readwrite");
+    transaction.objectStore(TRASH).delete(itemId);
+    await transactionDone(transaction);
+    database.close();
+  }
+
+  async emptyRecycleBin(): Promise<void> {
+    const database = await openDatabase();
+    const transaction = database.transaction(TRASH, "readwrite");
+    transaction.objectStore(TRASH).clear();
+    await transactionDone(transaction);
+    database.close();
+  }
+
   async listArchives(): Promise<ArchiveRecord[]> {
     const database = await openDatabase();
     const transaction = database.transaction(ARCHIVES, "readonly");
@@ -123,7 +196,7 @@ export class BrowserArchiveRepository {
     await transactionDone(transaction);
     database.close();
     return records
-      .map((archive) => ({ ...archive, tags: archive.tags ?? [] }))
+      .map((archive) => ({ ...archive, tags: archive.tags ?? [], syncMode: archive.syncMode ?? "manual" }))
       .sort((left, right) => right.updatedAt - left.updatedAt);
   }
 
@@ -147,22 +220,81 @@ export class BrowserArchiveRepository {
 
   async createArchive(input: CreateArchiveInput): Promise<ArchiveRecord> {
     const now = Date.now();
+    const category = input.categoryId ? (await this.listCategories()).find((item) => item.id === input.categoryId) : undefined;
+    if (input.categoryId && !category) throw new Error("分类不存在");
     const archive: ArchiveRecord = {
       id: crypto.randomUUID(),
       name: input.name.trim(),
       sourcePath: input.sources.map((source) => source.path).join(" · "),
       sources: input.sources,
-      category: "未分类",
-      categoryId: undefined,
+      category: category?.name ?? "未分类",
+      categoryId: input.categoryId,
       tags: [],
       kind: input.sources.length === 1 ? input.sources[0].kind : "collection",
       storagePolicy: input.storagePolicy,
+      syncMode: input.syncMode,
       createdAt: now,
       updatedAt: now,
       totalBytes: 0,
     };
     await this.putArchive(archive);
     return archive;
+  }
+
+  async updateArchive(archiveId: string, input: CreateArchiveInput): Promise<ArchiveRecord> {
+    const archive = (await this.listArchives()).find((item) => item.id === archiveId);
+    if (!archive) throw new Error("存档不存在");
+    const updated: ArchiveRecord = {
+      ...archive,
+      name: input.name.trim(),
+      sourcePath: input.sources.map((source) => source.path).join(" · "),
+      sources: input.sources,
+      kind: input.sources.length === 1 ? input.sources[0].kind : "collection",
+      storagePolicy: input.storagePolicy,
+      syncMode: input.syncMode,
+      updatedAt: Date.now(),
+    };
+    await this.putArchive(updated);
+    return updated;
+  }
+
+  async deleteArchive(archiveId: string, recycleBinEnabled: boolean): Promise<void> {
+    const archive = (await this.listArchives()).find((item) => item.id === archiveId);
+    if (!archive) throw new Error("存档不存在");
+    const snapshots = await this.listSnapshots(archiveId);
+    const database = await openDatabase();
+    const transaction = database.transaction([ARCHIVES, SNAPSHOTS, TRASH], "readwrite");
+    if (recycleBinEnabled) transaction.objectStore(TRASH).put({ id: crypto.randomUUID(), kind: "archive", deletedAt: Date.now(), archive, snapshots });
+    transaction.objectStore(ARCHIVES).delete(archiveId);
+    for (const snapshot of snapshots) transaction.objectStore(SNAPSHOTS).delete(snapshot.id);
+    await transactionDone(transaction);
+    database.close();
+  }
+
+  async deleteCategory(categoryId: string, recycleBinEnabled: boolean): Promise<void> {
+    const categories = await this.listCategories();
+    if (!categories.some((item) => item.id === categoryId)) throw new Error("分类不存在");
+    const ids = new Set([categoryId]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const category of categories) {
+        if (category.parentId && ids.has(category.parentId) && !ids.has(category.id)) {
+          ids.add(category.id);
+          changed = true;
+        }
+      }
+    }
+    const archives = (await this.listArchives()).filter((archive) => archive.categoryId && ids.has(archive.categoryId));
+    const snapshots = (await Promise.all(archives.map((archive) => this.listSnapshots(archive.id)))).flat();
+    const database = await openDatabase();
+    const transaction = database.transaction([ARCHIVES, SNAPSHOTS, CATEGORIES, TRASH], "readwrite");
+    if (recycleBinEnabled) transaction.objectStore(TRASH).put({ id: crypto.randomUUID(), kind: "category", deletedAt: Date.now(), categories: categories.filter((item) => ids.has(item.id)), archives, snapshots });
+    for (const category of categories) if (ids.has(category.id)) transaction.objectStore(CATEGORIES).delete(category.id);
+    for (const archive of archives) transaction.objectStore(ARCHIVES).delete(archive.id);
+    for (const snapshot of snapshots) transaction.objectStore(SNAPSHOTS).delete(snapshot.id);
+    await transactionDone(transaction);
+    database.close();
   }
 
   async listCategories(): Promise<CategoryRecord[]> {
@@ -277,6 +409,8 @@ export class BrowserArchiveRepository {
       files,
       changes,
       safety,
+      deviceId: "browser",
+      deviceName: "浏览器设备",
     };
     const database = await openDatabase();
     const transaction = database.transaction(SNAPSHOTS, "readwrite");

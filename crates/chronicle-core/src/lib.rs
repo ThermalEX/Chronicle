@@ -20,6 +20,7 @@ pub struct EntrySource {
     /// User-facing source name.
     pub name: String,
     /// Source path on this device.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub path: String,
     /// Source type.
     pub kind: EntryKind,
@@ -33,6 +34,17 @@ pub enum StoragePolicy {
     Local,
     /// Keep snapshots locally and mirror them to the configured remote.
     LocalAndRemote,
+}
+
+/// Whether local changes should be queued for remote upload.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncMode {
+    /// Synchronize only when the user requests it.
+    #[default]
+    Manual,
+    /// Queue an upload after a local metadata or snapshot change.
+    Automatic,
 }
 
 /// A repository category that may be nested below another category.
@@ -62,6 +74,9 @@ pub struct Entry {
     pub tags: Vec<String>,
     /// Snapshot replication policy.
     pub storage_policy: StoragePolicy,
+    /// Per-entry cloud synchronization behavior.
+    #[serde(default)]
+    pub sync_mode: SyncMode,
     /// Time the entry was registered, expressed as Unix milliseconds.
     pub created_at_ms: u64,
 }
@@ -101,6 +116,9 @@ pub struct Snapshot {
     pub parent_id: Option<String>,
     /// Device that created the snapshot.
     pub device_id: String,
+    /// Display name of the device that created the snapshot.
+    #[serde(default)]
+    pub device_name: String,
     /// User-facing snapshot name.
     pub title: String,
     /// Creation time expressed as Unix milliseconds.

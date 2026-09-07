@@ -43,6 +43,7 @@ function archiveFor(handle: MemoryFileHandle): ArchiveRecord {
     tags: [],
     kind: "file",
     storagePolicy: "local",
+    syncMode: "manual",
     createdAt: 1,
     updatedAt: 1,
     totalBytes: 0,
@@ -70,6 +71,7 @@ describe("ArchiveRepository", () => {
       name: "设置",
       sources,
       storagePolicy: "local",
+      syncMode: "manual",
       createInitialSnapshot: false,
     });
 

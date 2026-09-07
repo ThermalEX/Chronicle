@@ -1,0 +1,166 @@
+<script setup lang="ts">
+import { CheckCircle2, CloudCog, Download, FileJson, Plus, RefreshCw, Server, Trash2, Upload, X } from "@lucide/vue";
+import { computed, onMounted, reactive, ref } from "vue";
+import type { ArchiveSyncMode } from "../domain";
+import { cloudRepository, type CloudPreview, type RemoteItem } from "../services/cloud";
+import { cloudSettings, saveCloudSettings, type CloudSettings, type CloudSource } from "../services/settings";
+import ConfirmDialog from "./ConfirmDialog.vue";
+
+const emit = defineEmits<{ close: []; saved: [] }>();
+const tab = ref<"repository" | "sources">("repository");
+const draft = reactive<CloudSettings>({ ...cloudSettings, sources: cloudSettings.sources.map((source) => ({ ...source })) });
+const passwords = reactive<Record<string, string>>({});
+const closeButton = ref<HTMLButtonElement>();
+const preview = ref<CloudPreview>();
+const selected = ref<string[]>([]);
+const busy = ref("");
+const feedback = ref("");
+const error = ref("");
+const confirmAction = ref<{ title: string; message: string; run: () => Promise<void> }>();
+const activeSource = computed(() => draft.sources.find((source) => source.id === draft.activeSourceId));
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+
+function addSource(): void {
+  const id = crypto.randomUUID();
+  draft.sources.push({ id, name: `WebDAV ${draft.sources.length + 1}`, provider: "webdav", endpoint: "", username: "", remotePath: "/Chronicle", credentialRef: `chronicle-webdav:${id}` });
+  draft.activeSourceId = id;
+  draft.enabled = true;
+  tab.value = "sources";
+}
+
+async function persist(): Promise<void> {
+  draft.enabled = Boolean(draft.activeSourceId && draft.sources.length);
+  await saveCloudSettings({ ...draft, sources: draft.sources.map((source) => ({ ...source })) });
+  for (const source of draft.sources) if (passwords[source.id]) await cloudRepository.saveCredential(source, passwords[source.id]);
+  emit("saved");
+}
+
+async function loadPreview(): Promise<void> {
+  if (!activeSource.value) return;
+  busy.value = "preview"; error.value = ""; feedback.value = "";
+  try { await persist(); preview.value = await cloudRepository.preview(activeSource.value.id); selected.value = []; }
+  catch (reason) { error.value = reason instanceof Error ? reason.message : String(reason); }
+  finally { busy.value = ""; }
+}
+
+async function testSource(source: CloudSource): Promise<void> {
+  busy.value = `test:${source.id}`; error.value = ""; feedback.value = "";
+  try { await cloudRepository.test(source, passwords[source.id] ?? ""); feedback.value = `“${source.name}”连接与读写测试通过`; }
+  catch (reason) { error.value = reason instanceof Error ? reason.message : String(reason); }
+  finally { busy.value = ""; }
+}
+
+function removeSource(source: CloudSource): void {
+  confirmAction.value = { title: "删除同步源", message: `删除“${source.name}”的本机配置，远端文件不会被删除。`, run: async () => {
+    draft.sources = draft.sources.filter((item) => item.id !== source.id);
+    if (draft.activeSourceId === source.id) draft.activeSourceId = draft.sources[0]?.id ?? null;
+    await persist(); preview.value = undefined;
+  } };
+}
+
+async function runItemAction(item: RemoteItem, action: "sync" | "upload" | "download"): Promise<void> {
+  if (!activeSource.value || item.protected) return;
+  busy.value = `${action}:${item.id}`; error.value = ""; feedback.value = "";
+  try {
+    if (action === "sync") feedback.value = (await cloudRepository.sync(activeSource.value.id, item.id)).message;
+    if (action === "upload") { await cloudRepository.upload(activeSource.value.id, item.id); feedback.value = "已用本地存档覆盖远端"; }
+    if (action === "download") { await cloudRepository.download(activeSource.value.id, item.id); feedback.value = "已用远端存档覆盖本地仓库，来源文件未改动"; }
+    await loadPreview();
+  } catch (reason) { error.value = reason instanceof Error ? reason.message : String(reason); }
+  finally { busy.value = ""; }
+}
+
+function confirmOverwrite(item: RemoteItem, direction: "upload" | "download"): void {
+  confirmAction.value = {
+    title: direction === "upload" ? "覆盖上传" : "覆盖下载",
+    message: direction === "upload" ? `远端“${item.name}”将被本地仓库完整替换。` : `本地仓库中的“${item.name}”将被远端版本完整替换，原始来源文件不会改动。`,
+    run: () => runItemAction(item, direction),
+  };
+}
+
+function confirmDelete(ids: string[]): void {
+  const deletable = ids.filter((id) => preview.value?.items.some((item) => item.id === id && !item.protected));
+  if (!deletable.length || !activeSource.value) return;
+  confirmAction.value = { title: "删除云端存档", message: `${deletable.length} 个云端存档及其全部时间节点将永久删除。`, run: async () => {
+    await cloudRepository.delete(activeSource.value!.id, deletable); await loadPreview();
+  } };
+}
+
+async function changeSyncMode(item: RemoteItem, event: Event): Promise<void> {
+  if (!activeSource.value) return;
+  const mode = (event.target as HTMLSelectElement).value as ArchiveSyncMode;
+  busy.value = `mode:${item.id}`;
+  try { await cloudRepository.setSyncMode(activeSource.value.id, item.id, mode); item.syncMode = mode; feedback.value = "同步方案已保存"; }
+  catch (reason) { error.value = reason instanceof Error ? reason.message : String(reason); }
+  finally { busy.value = ""; }
+}
+
+async function runConfirmed(): Promise<void> {
+  const action = confirmAction.value; confirmAction.value = undefined;
+  if (!action) return;
+  busy.value = "confirmed";
+  try { await action.run(); }
+  catch (reason) { error.value = reason instanceof Error ? reason.message : String(reason); }
+  finally { busy.value = ""; }
+}
+
+async function saveAndClose(): Promise<void> {
+  busy.value = "save";
+  try { await persist(); emit("close"); }
+  catch (reason) { error.value = reason instanceof Error ? reason.message : String(reason); }
+  finally { busy.value = ""; }
+}
+
+onMounted(() => { closeButton.value?.focus(); if (activeSource.value) void loadPreview(); });
+</script>
+
+<template>
+  <div class="dialog-backdrop" @click.self="emit('close')">
+    <section class="cloud-center" role="dialog" aria-modal="true" aria-labelledby="cloud-title">
+      <header><div class="heading-icon"><CloudCog :size="21" /></div><div><p>同步服务</p><h2 id="cloud-title">云端设置</h2></div><button ref="closeButton" aria-label="关闭云端设置" @click="emit('close')"><X :size="18" /></button></header>
+      <nav aria-label="云端设置页面"><button :class="{ active: tab === 'repository' }" @click="tab = 'repository'; activeSource && loadPreview()">云端仓库</button><button :class="{ active: tab === 'sources' }" @click="tab = 'sources'">同步源</button></nav>
+      <main>
+        <p v-if="error" class="message error" role="alert">{{ error }}</p><p v-if="feedback" class="message success"><CheckCircle2 :size="15" />{{ feedback }}</p>
+        <section v-if="tab === 'repository'" class="repository-page">
+          <div v-if="!activeSource" class="empty"><CloudCog :size="30" /><h3>尚未配置云同步源</h3><p>添加 WebDAV 后即可查看和管理远端 Chronicle 仓库。</p><button @click="tab = 'sources'; addSource()"><Plus :size="16" />添加同步源</button></div>
+          <template v-else>
+            <div class="repository-toolbar"><span><b>{{ preview?.sourceName ?? activeSource.name }}</b><small>{{ preview?.libraryId ? `仓库 ${preview.libraryId}` : '尚未创建远端仓库' }}</small></span><div><button :disabled="Boolean(busy)" @click="loadPreview"><RefreshCw :size="15" />刷新</button><button class="danger" :disabled="!selected.length || Boolean(busy)" @click="confirmDelete(selected)"><Trash2 :size="15" />删除所选</button></div></div>
+            <div v-if="busy === 'preview' && !preview" class="loading">正在读取远端清单…</div>
+            <div v-else class="remote-list">
+              <article v-for="item in preview?.items ?? []" :key="item.id" :class="{ protected: item.protected }">
+                <input v-if="!item.protected" v-model="selected" type="checkbox" :value="item.id" :aria-label="`选择 ${item.name}`" /><span v-else class="config-mark"><FileJson :size="16" /></span>
+                <span class="remote-copy"><b>{{ item.name }}</b><small>{{ item.protected ? '受保护的仓库配置' : `${item.snapshotCount} 个时间节点 · ${formatBytes(item.sizeBytes)}` }}</small></span>
+                <select v-if="!item.protected" :value="item.syncMode" :disabled="Boolean(busy)" :aria-label="`${item.name} 同步方案`" @change="changeSyncMode(item, $event)"><option value="manual">手动同步</option><option value="automatic">自动上传</option></select>
+                <div class="item-actions"><button v-if="!item.protected" :disabled="Boolean(busy)" @click="runItemAction(item, 'sync')"><RefreshCw :size="14" />同步</button><button v-if="!item.protected" :disabled="Boolean(busy)" @click="confirmOverwrite(item, 'download')"><Download :size="14" />覆盖下载</button><button v-if="!item.protected" :disabled="Boolean(busy)" @click="confirmOverwrite(item, 'upload')"><Upload :size="14" />覆盖上传</button><span v-else>不可删除</span></div>
+              </article>
+              <div v-if="preview && preview.items.length <= 2" class="list-empty">远端暂无存档，可从本地存档执行覆盖上传。</div>
+            </div>
+          </template>
+        </section>
+
+        <section v-else class="sources-page">
+          <div class="source-toolbar"><label><span>当前同步源</span><select v-model="draft.activeSourceId"><option :value="null">未选择</option><option v-for="source in draft.sources" :key="source.id" :value="source.id">{{ source.name }}</option></select></label><button @click="addSource"><Plus :size="15" />添加 WebDAV</button><button disabled title="后续版本开放">GitHub（预留）</button></div>
+          <div v-if="!draft.sources.length" class="empty compact"><Server :size="28" /><h3>没有同步源</h3><p>Chronicle 支持保存多个云端配置，同时只启用其中一个。</p></div>
+          <article v-for="source in draft.sources" v-else :key="source.id" class="source-card" :class="{ active: source.id === draft.activeSourceId }">
+            <div class="source-title"><span><Server :size="17" /><b>{{ source.name }}</b><small v-if="source.id === draft.activeSourceId">当前使用</small></span><button class="icon-danger" :aria-label="`删除 ${source.name}`" @click="removeSource(source)"><Trash2 :size="15" /></button></div>
+            <div class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>服务器地址</span><input v-model.trim="source.endpoint" type="url" placeholder="https://dav.example.com/remote.php/dav/files/user" /></label><label><span>用户名</span><input v-model.trim="source.username" type="text" autocomplete="username" /></label><label><span>密码</span><input v-model="passwords[source.id]" type="password" autocomplete="current-password" placeholder="留空表示使用已保存密码" /></label><label class="wide"><span>远端目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div>
+            <button class="test-button" :disabled="Boolean(busy) || !source.endpoint || !source.username" @click="testSource(source)">{{ busy === `test:${source.id}` ? '测试中…' : '测试连接与读写' }}</button>
+          </article>
+          <fieldset><legend>请求控制</legend><label><span>元数据并发</span><input v-model.number="draft.maxConcurrentMetadataReads" type="number" min="1" max="4" /></label><label><span>传输并发</span><input v-model.number="draft.maxConcurrentTransfers" type="number" min="1" max="4" /></label><label><span>请求间隔（毫秒）</span><input v-model.number="draft.requestDelayMs" type="number" min="0" max="5000" step="50" /></label><label><span>重试次数</span><input v-model.number="draft.retryLimit" type="number" min="1" max="10" /></label></fieldset>
+        </section>
+      </main>
+      <footer><button class="cancel" :disabled="Boolean(busy)" @click="emit('close')">取消</button><button class="save" :disabled="Boolean(busy)" @click="saveAndClose">{{ busy === 'save' ? '保存中…' : '保存云端设置' }}</button></footer>
+    </section>
+    <ConfirmDialog v-if="confirmAction" :title="confirmAction.title" :message="confirmAction.message" confirm-label="确定" danger @cancel="confirmAction = undefined" @confirm="runConfirmed" />
+  </div>
+</template>
+
+<style scoped>
+.dialog-backdrop{position:fixed;z-index:45;inset:0;display:grid;place-items:center;padding:28px;background:#1024218a;backdrop-filter:blur(3px)}.cloud-center{display:grid;grid-template-rows:72px 44px minmax(0,1fr) 64px;width:min(940px,calc(100vw - 56px));height:min(720px,calc(100vh - 56px));overflow:hidden;background:var(--surface);border:1px solid var(--border-2);border-radius:13px;box-shadow:0 24px 80px #0d24205c}.cloud-center>header{display:grid;grid-template-columns:42px 1fr 38px;align-items:center;gap:11px;padding:0 22px;border-bottom:1px solid var(--border)}.heading-icon{display:grid;place-items:center;width:38px;height:38px;color:var(--primary);background:var(--primary-soft);border-radius:9px}header p,header h2{margin:0}header p{color:var(--text-3);font-size:9px;font-weight:700;letter-spacing:.08em}header h2{margin-top:3px;font-size:18px}header button{display:grid;place-items:center;width:38px;height:38px;background:transparent;border-radius:7px}header button:hover{background:var(--hover)}nav{display:flex;gap:4px;padding:5px 22px 0;border-bottom:1px solid var(--border)}nav button{padding:0 14px;color:var(--text-3);background:transparent;border-bottom:2px solid transparent;font-size:11px;font-weight:650}nav button.active{color:var(--primary-dark);border-color:var(--primary)}main{overflow-y:auto;padding:20px 24px 28px}.message{display:flex;align-items:center;gap:7px;margin:0 0 12px;padding:9px 11px;border-radius:7px;font-size:10px}.message.error{color:#a52e28;background:#fff0ef}.message.success{color:var(--primary-dark);background:var(--primary-soft)}.empty{display:grid;place-items:center;min-height:390px;color:var(--text-3);text-align:center}.empty.compact{min-height:190px}.empty h3{margin:12px 0 0;color:var(--text);font-size:15px}.empty p{margin:7px 0 16px;font-size:10px}.empty button,.source-toolbar>button,.repository-toolbar button,.test-button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:34px;padding:0 10px;color:var(--primary-dark);background:var(--primary-soft);border-radius:7px;font-size:10px;font-weight:650}.repository-toolbar{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:12px}.repository-toolbar>span{display:flex;flex-direction:column;gap:3px}.repository-toolbar b{font-size:13px}.repository-toolbar small{color:var(--text-3);font-size:9px}.repository-toolbar>div{display:flex;gap:7px}.repository-toolbar button.danger{color:#a52e28;background:#fff0ef}.remote-list{overflow:hidden;border:1px solid var(--border);border-radius:9px}.remote-list article{display:grid;grid-template-columns:28px minmax(150px,1fr) 118px auto;align-items:center;gap:10px;min-height:66px;padding:8px 11px}.remote-list article+article{border-top:1px solid var(--border)}.remote-list article.protected{background:#f7f9f8}.config-mark{display:grid;place-items:center;color:var(--text-3)}.remote-copy{display:flex;min-width:0;flex-direction:column;gap:4px}.remote-copy b{overflow:hidden;font-size:11px;text-overflow:ellipsis;white-space:nowrap}.remote-copy small{color:var(--text-3);font-size:9px}.remote-list select,.source-toolbar select,.fields input,fieldset input{height:34px;padding:0 9px;color:#263431;background:#f8faf9;border:1px solid var(--border-2);border-radius:6px;font-size:10px}.item-actions{display:flex;gap:5px}.item-actions button{display:inline-flex;align-items:center;gap:4px;min-height:31px;padding:0 7px;color:var(--text-2);background:#f2f6f4;border-radius:6px;font-size:9px}.item-actions span{color:var(--text-3);font-size:9px}.list-empty,.loading{display:grid;place-items:center;min-height:150px;color:var(--text-3);font-size:10px}.source-toolbar{display:flex;align-items:end;gap:8px;margin-bottom:14px}.source-toolbar label{display:flex;min-width:240px;flex-direction:column;gap:5px}.source-toolbar label span,.fields label span,fieldset label span{color:var(--text-2);font-size:9px;font-weight:650}.source-toolbar button:disabled{color:var(--text-3);background:#f1f3f2;cursor:default}.source-card{margin-bottom:12px;padding:14px;border:1px solid var(--border);border-radius:9px}.source-card.active{border-color:#9fcfc5;box-shadow:0 0 0 2px #0d8b7d14}.source-title{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}.source-title>span{display:flex;align-items:center;gap:7px}.source-title b{font-size:11px}.source-title small{padding:3px 6px;color:var(--primary-dark);background:var(--primary-soft);border-radius:10px;font-size:8px}.icon-danger{display:grid;place-items:center;width:32px;height:32px;color:#a52e28;background:transparent;border-radius:6px}.icon-danger:hover{background:#fff0ef}.fields{display:grid;grid-template-columns:1fr 1.5fr 1fr 1fr;gap:10px}.fields label{display:flex;flex-direction:column;gap:5px}.fields label.wide{grid-column:1/-1}.test-button{margin-top:12px}.sources-page fieldset{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:16px;padding:14px;border:1px solid var(--border);border-radius:9px}.sources-page legend{padding:0 6px;color:var(--text-2);font-size:10px;font-weight:700}.sources-page fieldset label{display:flex;flex-direction:column;gap:5px}.cloud-center>footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:0 22px;border-top:1px solid var(--border)}footer button{min-height:36px;padding:0 13px;border-radius:7px;font-size:10px;font-weight:650}.cancel{background:transparent}.cancel:hover{background:var(--hover)}.save{color:#fff;background:var(--primary)}button:disabled{cursor:default;opacity:.55}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--primary);outline-offset:2px}@media(max-width:900px){.fields{grid-template-columns:1fr 1fr}.sources-page fieldset{grid-template-columns:1fr 1fr}.remote-list article{grid-template-columns:28px minmax(120px,1fr) 110px}.item-actions{grid-column:2/-1}.cloud-center{width:calc(100vw - 28px);height:calc(100vh - 28px)}.dialog-backdrop{padding:14px}}
+</style>

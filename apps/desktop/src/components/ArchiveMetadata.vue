@@ -80,6 +80,7 @@ header span { color: var(--text-3); font-size: 9px; }
 .tag-input input { min-width: 0; height: 28px; padding: 0 3px; color: #263431; background: transparent; border: 0; outline: 0; font-size: 10px; }
 .tag-input button { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; color: var(--primary); background: transparent; border-radius: 5px; }
 .tag-input button:hover:not(:disabled) { background: var(--primary-soft); }
+.tag-input button:disabled { color: #a8b2ae; cursor: default; opacity: 1; }
 button:disabled { cursor: wait; opacity: .5; }
 @media (max-width: 1180px) { .archive-metadata { grid-template-columns: 1fr; gap: 10px; } .source-list { max-height: 80px; } }
 </style>

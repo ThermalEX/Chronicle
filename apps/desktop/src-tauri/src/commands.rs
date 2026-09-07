@@ -1,8 +1,13 @@
+#![allow(clippy::needless_pass_by_value)]
+
 use chronicle_core::{
     Category, ChangeSummary, Entry, EntryKind, EntrySource, Snapshot, SnapshotFile, StoragePolicy,
+    SyncMode,
 };
 use serde::Serialize;
 use serde_json::Value;
+use std::path::PathBuf;
+use std::process::Command;
 use tauri::State;
 
 use crate::AppState;
@@ -19,6 +24,7 @@ pub struct EntryDto {
     tags: Vec<String>,
     kind: &'static str,
     storage_policy: &'static str,
+    sync_mode: &'static str,
     created_at: u64,
     updated_at: u64,
     total_bytes: u64,
@@ -31,6 +37,24 @@ pub struct CategoryDto {
     id: String,
     name: String,
     parent_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryInfoDto {
+    path: String,
+    total_bytes: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecycleItemDto {
+    id: String,
+    kind: String,
+    display_name: String,
+    deleted_at: u64,
+    size_bytes: u64,
+    entry_count: usize,
 }
 
 #[derive(Serialize)]
@@ -63,6 +87,8 @@ pub struct SnapshotDto {
     files: Vec<SnapshotFileDto>,
     changes: ChangeSummary,
     safety: bool,
+    device_id: String,
+    device_name: String,
 }
 
 fn entry_dto(entry: Entry, latest: Option<&Snapshot>, category_name: Option<String>) -> EntryDto {
@@ -93,6 +119,10 @@ fn entry_dto(entry: Entry, latest: Option<&Snapshot>, category_name: Option<Stri
             StoragePolicy::Local => "local",
             StoragePolicy::LocalAndRemote => "local_and_remote",
         },
+        sync_mode: match entry.sync_mode {
+            SyncMode::Manual => "manual",
+            SyncMode::Automatic => "automatic",
+        },
         created_at: entry.created_at_ms,
         updated_at: latest.map_or(entry.created_at_ms, |snapshot| snapshot.created_at_ms),
         total_bytes: latest.map_or(0, |snapshot| {
@@ -122,6 +152,108 @@ fn entry_source_dto(source: EntrySource) -> EntrySourceDto {
     }
 }
 
+#[tauri::command(async)]
+pub fn repository_info(state: State<'_, AppState>) -> Result<RepositoryInfoDto, String> {
+    let repository = state.repository.lock().map_err(|_| state_error())?;
+    let recycle = settings_recycle_root(&repository);
+    Ok(RepositoryInfoDto {
+        path: repository.root().to_string_lossy().into_owned(),
+        total_bytes: repository
+            .total_stored_bytes_with_recycle(recycle.as_deref())
+            .map_err(|error| error.to_string())?,
+    })
+}
+
+fn settings_recycle_root(repository: &chronicle_storage::LocalRepository) -> Option<PathBuf> {
+    let settings = repository.load_settings().ok()?;
+    let enabled = settings
+        .pointer("/app/recycleBinEnabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    recycle_root(
+        repository,
+        enabled,
+        settings
+            .pointer("/app/recycleBinPath")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    )
+}
+
+#[tauri::command(async)]
+pub fn list_recycle_items(state: State<'_, AppState>) -> Result<Vec<RecycleItemDto>, String> {
+    let repository = state.repository.lock().map_err(|_| state_error())?;
+    let root =
+        settings_recycle_root(&repository).unwrap_or_else(|| repository.root().join("recycle"));
+    repository
+        .list_recycle_items(&root)
+        .map(|items| {
+            items
+                .into_iter()
+                .map(|item| RecycleItemDto {
+                    id: item.id,
+                    kind: item.kind,
+                    display_name: item.display_name,
+                    deleted_at: item.deleted_at_ms,
+                    size_bytes: item.size_bytes,
+                    entry_count: item.entry_count,
+                })
+                .collect()
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
+pub fn restore_recycle_item(state: State<'_, AppState>, item_id: String) -> Result<(), String> {
+    let repository = state.repository.lock().map_err(|_| state_error())?;
+    let root =
+        settings_recycle_root(&repository).unwrap_or_else(|| repository.root().join("recycle"));
+    repository
+        .restore_recycle_item(&root, &item_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
+pub fn permanently_delete_recycle_item(
+    state: State<'_, AppState>,
+    item_id: String,
+) -> Result<(), String> {
+    let repository = state.repository.lock().map_err(|_| state_error())?;
+    let root =
+        settings_recycle_root(&repository).unwrap_or_else(|| repository.root().join("recycle"));
+    repository
+        .permanently_delete_recycle_item(&root, &item_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
+pub fn empty_recycle_bin(state: State<'_, AppState>) -> Result<(), String> {
+    let repository = state.repository.lock().map_err(|_| state_error())?;
+    let root =
+        settings_recycle_root(&repository).unwrap_or_else(|| repository.root().join("recycle"));
+    repository
+        .empty_recycle_bin(&root)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
+pub fn open_repository_folder(state: State<'_, AppState>) -> Result<(), String> {
+    let repository = state.repository.lock().map_err(|_| state_error())?;
+    let path = repository.root().to_path_buf();
+    drop(repository);
+    #[cfg(target_os = "windows")]
+    let mut command = Command::new("explorer");
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(target_os = "linux")]
+    let mut command = Command::new("xdg-open");
+    command
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 fn snapshot_file_dto(file: SnapshotFile) -> SnapshotFileDto {
     SnapshotFileDto {
         path: file.relative_path,
@@ -142,6 +274,8 @@ fn snapshot_dto(snapshot: Snapshot) -> SnapshotDto {
         files: snapshot.files.into_iter().map(snapshot_file_dto).collect(),
         changes: snapshot.changes,
         safety: snapshot.safety,
+        device_id: snapshot.device_id,
+        device_name: snapshot.device_name,
     }
 }
 
@@ -183,23 +317,97 @@ pub fn add_entry(
     source_paths: Vec<String>,
     category_id: Option<String>,
     storage_policy: String,
+    sync_mode: String,
 ) -> Result<EntryDto, String> {
     let storage_policy = match storage_policy.as_str() {
         "local" => StoragePolicy::Local,
         "local_and_remote" => StoragePolicy::LocalAndRemote,
         _ => return Err("不支持的保存方式".into()),
     };
+    let sync_mode = parse_sync_mode(&sync_mode)?;
     let repository = state.repository.lock().map_err(|_| state_error())?;
     repository
-        .add_entry_sources(&name, &source_paths, category_id, storage_policy)
+        .add_entry_sources_with_sync(&name, &source_paths, category_id, storage_policy, sync_mode)
         .map(|entry| entry_dto(entry, None, None))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
+pub fn update_entry(
+    state: State<'_, AppState>,
+    entry_id: String,
+    name: String,
+    source_paths: Vec<String>,
+    storage_policy: String,
+    sync_mode: String,
+) -> Result<EntryDto, String> {
+    let storage_policy = match storage_policy.as_str() {
+        "local" => StoragePolicy::Local,
+        "local_and_remote" => StoragePolicy::LocalAndRemote,
+        _ => return Err("不支持的保存方式".into()),
+    };
+    let sync_mode = parse_sync_mode(&sync_mode)?;
+    let repository = state.repository.lock().map_err(|_| state_error())?;
+    repository
+        .update_entry_with_sync(&entry_id, &name, &source_paths, storage_policy, sync_mode)
+        .map(|entry| entry_dto(entry, None, None))
+        .map_err(|error| error.to_string())
+}
+
+fn parse_sync_mode(value: &str) -> Result<SyncMode, String> {
+    match value {
+        "manual" => Ok(SyncMode::Manual),
+        "automatic" => Ok(SyncMode::Automatic),
+        _ => Err("不支持的同步方式".into()),
+    }
+}
+
+fn recycle_root(
+    repository: &chronicle_storage::LocalRepository,
+    enabled: bool,
+    configured_path: Option<String>,
+) -> Option<PathBuf> {
+    enabled.then(|| {
+        configured_path
+            .filter(|path| !path.trim().is_empty())
+            .map_or_else(|| repository.root().join("recycle"), PathBuf::from)
+    })
+}
+
+#[tauri::command(async)]
+pub fn delete_entry(
+    state: State<'_, AppState>,
+    entry_id: String,
+    recycle_bin_enabled: bool,
+    recycle_bin_path: Option<String>,
+) -> Result<(), String> {
+    let repository = state.repository.lock().map_err(|_| state_error())?;
+    let recycle = recycle_root(&repository, recycle_bin_enabled, recycle_bin_path);
+    repository
+        .delete_entry(&entry_id, recycle.as_deref())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
+pub fn delete_category(
+    state: State<'_, AppState>,
+    category_id: String,
+    recycle_bin_enabled: bool,
+    recycle_bin_path: Option<String>,
+) -> Result<(), String> {
+    let repository = state.repository.lock().map_err(|_| state_error())?;
+    let recycle = recycle_root(&repository, recycle_bin_enabled, recycle_bin_path);
+    repository
+        .delete_category(&category_id, recycle.as_deref())
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command(async)]
 pub fn load_settings(state: State<'_, AppState>) -> Result<Value, String> {
     let repository = state.repository.lock().map_err(|_| state_error())?;
-    repository.load_settings().map_err(|error| error.to_string())
+    repository
+        .load_settings()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command(async)]
@@ -288,8 +496,11 @@ pub fn create_snapshot(
     safety: bool,
 ) -> Result<SnapshotDto, String> {
     let repository = state.repository.lock().map_err(|_| state_error())?;
+    let (device_id, _) = repository
+        .device_identity()
+        .map_err(|error| error.to_string())?;
     repository
-        .create_snapshot(&entry_id, title, "local", safety)
+        .create_snapshot(&entry_id, title, device_id, safety)
         .map(snapshot_dto)
         .map_err(|error| error.to_string())
 }

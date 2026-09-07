@@ -5,7 +5,7 @@ import { cloudSettings, saveCloudSettings, type CloudSettings } from "../service
 
 const emit = defineEmits<{ close: []; saved: [] }>();
 const closeButton = ref<HTMLButtonElement>();
-const draft = reactive<CloudSettings>({ ...cloudSettings });
+const draft = reactive<any>({ ...cloudSettings });
 const password = ref("");
 const saving = ref(false);
 

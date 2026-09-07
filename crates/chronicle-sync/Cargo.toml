@@ -5,6 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.47.1", features = ["fs", "time"] }
+uuid = { version = "1.18.1", features = ["v4"] }
+thiserror = "2.0.16"
 chronicle-core = { path = "../chronicle-core" }
 
 [lints]

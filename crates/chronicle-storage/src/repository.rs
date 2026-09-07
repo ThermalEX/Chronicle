@@ -9,6 +9,7 @@ use std::{
 
 use chronicle_core::{
     Category, ChangeSummary, Entry, EntryKind, EntrySource, Snapshot, SnapshotFile, StoragePolicy,
+    SyncMode,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -19,8 +20,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-const FORMAT_VERSION: u32 = 2;
-const SETTINGS_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 3;
+const SETTINGS_VERSION: u32 = 2;
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
 #[derive(Debug, Error)]
@@ -43,7 +44,7 @@ pub enum StorageError {
     EmptySources,
     #[error("archive name cannot be empty")]
     EmptyName,
-    #[error("settings must use formatVersion 1 and contain app and cloud objects")]
+    #[error("settings must use formatVersion 2 and contain app and cloud objects")]
     InvalidSettings,
     #[error("category name cannot be empty")]
     EmptyCategoryName,
@@ -53,6 +54,8 @@ pub enum StorageError {
     DuplicateCategory,
     #[error("a category cannot be moved into itself or one of its descendants")]
     InvalidCategoryMove,
+    #[error("recycle item cannot be restored: {0}")]
+    RestoreConflict(String),
     #[error("entry not found: {0}")]
     EntryNotFound(String),
     #[error("snapshot not found: {0}")]
@@ -83,10 +86,54 @@ struct CatalogEntry {
     #[serde(default)]
     tags: Vec<String>,
     storage_policy: StoragePolicy,
+    #[serde(default)]
+    sync_mode: SyncMode,
     source_count: usize,
     snapshot_count: usize,
     stored_bytes: u64,
     last_snapshot_at_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct BindingsDocument {
+    format_version: u32,
+    #[serde(default)]
+    entries: HashMap<String, Vec<EntrySource>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct DeviceDocument {
+    format_version: u32,
+    id: String,
+    name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RecycleManifest {
+    format_version: u32,
+    id: String,
+    kind: String,
+    display_name: String,
+    deleted_at_ms: u64,
+    categories: Vec<Category>,
+    entries: Vec<CatalogEntry>,
+}
+
+/// Summary of one recoverable deletion batch.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RecycleItem {
+    /// Stable batch identifier.
+    pub id: String,
+    /// `entry` or `category`.
+    pub kind: String,
+    /// User-facing deleted item name.
+    pub display_name: String,
+    /// Deletion time as Unix milliseconds.
+    pub deleted_at_ms: u64,
+    /// Total stored bytes in the recycle bundle.
+    pub size_bytes: u64,
+    /// Number of entries contained in this bundle.
+    pub entry_count: usize,
 }
 
 /// Filesystem-backed Chronicle repository using JSON metadata and 7z timelines.
@@ -109,6 +156,35 @@ impl LocalRepository {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Returns the total number of bytes currently stored in the repository.
+    ///
+    /// # Errors
+    /// Returns an error when repository files cannot be inspected.
+    pub fn total_stored_bytes(&self) -> Result<u64> {
+        let mut total = 0_u64;
+        for item in WalkDir::new(&self.root) {
+            let item = item?;
+            if item.file_type().is_file() {
+                total = total.saturating_add(item.metadata()?.len());
+            }
+        }
+        Ok(total)
+    }
+
+    /// Returns repository bytes plus an external recycle directory without double counting.
+    ///
+    /// # Errors
+    /// Returns an error when either directory cannot be inspected.
+    pub fn total_stored_bytes_with_recycle(&self, recycle_root: Option<&Path>) -> Result<u64> {
+        let total = self.total_stored_bytes()?;
+        match recycle_root {
+            Some(path) if !path.starts_with(&self.root) && path.exists() => {
+                Ok(total.saturating_add(directory_size(path)?))
+            }
+            _ => Ok(total),
+        }
     }
 
     /// Reads the versioned application settings document.
@@ -170,6 +246,27 @@ impl LocalRepository {
         category_id: Option<String>,
         storage_policy: StoragePolicy,
     ) -> Result<Entry> {
+        self.add_entry_sources_with_sync(
+            name,
+            source_paths,
+            category_id,
+            storage_policy,
+            SyncMode::Manual,
+        )
+    }
+
+    /// Registers an entry and its synchronization mode.
+    ///
+    /// # Errors
+    /// Returns an error for invalid sources or failed repository writes.
+    pub fn add_entry_sources_with_sync(
+        &self,
+        name: &str,
+        source_paths: &[String],
+        category_id: Option<String>,
+        storage_policy: StoragePolicy,
+        sync_mode: SyncMode,
+    ) -> Result<Entry> {
         let name = name.trim();
         if name.is_empty() {
             return Err(StorageError::EmptyName);
@@ -177,30 +274,7 @@ impl LocalRepository {
         if source_paths.is_empty() {
             return Err(StorageError::EmptySources);
         }
-        let mut sources = Vec::with_capacity(source_paths.len());
-        for source_path in source_paths {
-            let path = Path::new(source_path);
-            if !path.exists() {
-                return Err(StorageError::MissingSource(path.to_path_buf()));
-            }
-            let path = path.canonicalize()?;
-            let metadata = path.metadata()?;
-            let source_name = path
-                .file_name()
-                .ok_or_else(|| StorageError::MissingName(path.clone()))?
-                .to_string_lossy()
-                .into_owned();
-            sources.push(EntrySource {
-                id: Uuid::new_v4().to_string(),
-                name: source_name,
-                path: path_string(&path)?,
-                kind: if metadata.is_dir() {
-                    EntryKind::Directory
-                } else {
-                    EntryKind::File
-                },
-            });
-        }
+        let sources = resolve_entry_sources(source_paths, &[])?;
         let id = Uuid::new_v4().to_string();
         let folder = format!("{}__{id}", safe_folder_name(name));
         let entry = Entry {
@@ -210,11 +284,17 @@ impl LocalRepository {
             category_id,
             tags: Vec::new(),
             storage_policy,
+            sync_mode,
             created_at_ms: unix_millis(SystemTime::now()),
         };
         let directory = self.entries_dir().join(&folder);
         fs::create_dir_all(&directory)?;
-        write_json_atomic(&directory.join("entry.json"), &entry, &self.temp_dir())?;
+        self.save_bindings_for_entry(&entry.id, &entry.sources)?;
+        write_json_atomic(
+            &directory.join("entry.json"),
+            &shared_entry(&entry),
+            &self.temp_dir(),
+        )?;
         write_json_atomic(
             &directory.join("timeline.json"),
             &Vec::<Snapshot>::new(),
@@ -228,6 +308,7 @@ impl LocalRepository {
             category_id: entry.category_id.clone(),
             tags: entry.tags.clone(),
             storage_policy,
+            sync_mode,
             source_count: entry.sources.len(),
             snapshot_count: 0,
             stored_bytes: 0,
@@ -235,6 +316,406 @@ impl LocalRepository {
         });
         self.write_catalog(&mut catalog)?;
         Ok(entry)
+    }
+
+    /// Updates an entry's display name, sources, and storage policy.
+    ///
+    /// Existing source identifiers are preserved when their canonical paths are unchanged.
+    ///
+    /// # Errors
+    /// Returns an error for invalid values, missing sources, or metadata write failures.
+    pub fn update_entry(
+        &self,
+        entry_id: &str,
+        name: &str,
+        source_paths: &[String],
+        storage_policy: StoragePolicy,
+    ) -> Result<Entry> {
+        self.update_entry_with_sync(
+            entry_id,
+            name,
+            source_paths,
+            storage_policy,
+            SyncMode::Manual,
+        )
+    }
+
+    /// Updates an entry including its synchronization mode.
+    ///
+    /// # Errors
+    /// Returns an error for invalid sources, a missing entry, or failed writes.
+    pub fn update_entry_with_sync(
+        &self,
+        entry_id: &str,
+        name: &str,
+        source_paths: &[String],
+        storage_policy: StoragePolicy,
+        sync_mode: SyncMode,
+    ) -> Result<Entry> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(StorageError::EmptyName);
+        }
+        if source_paths.is_empty() {
+            return Err(StorageError::EmptySources);
+        }
+        let directory = self.entry_dir(entry_id)?;
+        let mut entry = self.get_entry(entry_id)?;
+        entry.sources = resolve_entry_sources_by_position(source_paths, &entry.sources)?;
+        name.clone_into(&mut entry.name);
+        entry.storage_policy = storage_policy;
+        entry.sync_mode = sync_mode;
+        self.save_bindings_for_entry(&entry.id, &entry.sources)?;
+        write_json_atomic(
+            &directory.join("entry.json"),
+            &shared_entry(&entry),
+            &self.temp_dir(),
+        )?;
+
+        let mut catalog = self.read_catalog()?;
+        let summary = catalog
+            .entries
+            .iter_mut()
+            .find(|item| item.id == entry_id)
+            .ok_or_else(|| StorageError::EntryNotFound(entry_id.into()))?;
+        summary.name.clone_from(&entry.name);
+        summary.storage_policy = storage_policy;
+        summary.sync_mode = sync_mode;
+        summary.source_count = entry.sources.len();
+        self.write_catalog(&mut catalog)?;
+        Ok(entry)
+    }
+
+    /// Changes only an entry's synchronization policy without touching its sources or snapshots.
+    ///
+    /// # Errors
+    /// Returns an error when the entry does not exist or its metadata cannot be persisted.
+    pub fn set_entry_sync_mode(&self, entry_id: &str, sync_mode: SyncMode) -> Result<Entry> {
+        let directory = self.entry_dir(entry_id)?;
+        let mut entry = self.get_entry(entry_id)?;
+        entry.sync_mode = sync_mode;
+        write_json_atomic(
+            &directory.join("entry.json"),
+            &shared_entry(&entry),
+            &self.temp_dir(),
+        )?;
+
+        let mut catalog = self.read_catalog()?;
+        let summary = catalog
+            .entries
+            .iter_mut()
+            .find(|item| item.id == entry_id)
+            .ok_or_else(|| StorageError::EntryNotFound(entry_id.into()))?;
+        summary.sync_mode = sync_mode;
+        self.write_catalog(&mut catalog)?;
+        Ok(entry)
+    }
+
+    /// Removes one entry permanently or moves its complete directory into a recycle bin.
+    ///
+    /// # Errors
+    /// Returns an error when the entry is missing or its data cannot be moved or deleted.
+    pub fn delete_entry(&self, entry_id: &str, recycle_root: Option<&Path>) -> Result<()> {
+        let mut catalog = self.read_catalog()?;
+        let summary = catalog
+            .entries
+            .iter()
+            .find(|item| item.id == entry_id)
+            .cloned()
+            .ok_or_else(|| StorageError::EntryNotFound(entry_id.into()))?;
+        let source = self.entries_dir().join(&summary.folder);
+        let recycle_batch = if let Some(root) = recycle_root {
+            let batch = recycle_batch(root, "entry", entry_id)?;
+            copy_directory_verified(&source, &batch.join(&summary.folder))?;
+            write_json_atomic(
+                &batch.join("manifest.json"),
+                &RecycleManifest {
+                    format_version: 1,
+                    id: batch
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                    kind: "entry".into(),
+                    display_name: summary.name.clone(),
+                    deleted_at_ms: unix_millis(SystemTime::now()),
+                    categories: Vec::new(),
+                    entries: vec![summary.clone()],
+                },
+                &self.temp_dir(),
+            )?;
+            Some(batch)
+        } else {
+            None
+        };
+        let staged_root = self
+            .temp_dir()
+            .join(format!("delete-entry-{}", Uuid::new_v4()));
+        fs::create_dir_all(&staged_root)?;
+        let staged_source = staged_root.join(&summary.folder);
+        if source.exists()
+            && let Err(error) = fs::rename(&source, &staged_source)
+        {
+            let _ = fs::remove_dir_all(&staged_root);
+            if let Some(batch) = recycle_batch {
+                let _ = fs::remove_dir_all(batch);
+            }
+            return Err(error.into());
+        }
+        catalog.entries.retain(|item| item.id != entry_id);
+        if let Err(error) = self.write_catalog(&mut catalog) {
+            if staged_source.exists() {
+                let _ = fs::rename(&staged_source, &source);
+            }
+            let _ = fs::remove_dir_all(&staged_root);
+            if let Some(batch) = recycle_batch {
+                let _ = fs::remove_dir_all(batch);
+            }
+            return Err(error);
+        }
+        if staged_root.exists() {
+            fs::remove_dir_all(staged_root)?;
+        }
+        Ok(())
+    }
+
+    /// Removes a category subtree and every entry assigned within it.
+    ///
+    /// # Errors
+    /// Returns an error when the category is missing or its data cannot be moved or deleted.
+    pub fn delete_category(&self, category_id: &str, recycle_root: Option<&Path>) -> Result<()> {
+        let mut catalog = self.read_catalog()?;
+        if !catalog.categories.iter().any(|item| item.id == category_id) {
+            return Err(StorageError::ParentCategoryNotFound(category_id.into()));
+        }
+        let mut category_ids = vec![category_id.to_owned()];
+        let mut cursor = 0;
+        while cursor < category_ids.len() {
+            let parent = category_ids[cursor].clone();
+            category_ids.extend(
+                catalog
+                    .categories
+                    .iter()
+                    .filter(|item| item.parent_id.as_ref() == Some(&parent))
+                    .map(|item| item.id.clone()),
+            );
+            cursor += 1;
+        }
+        let removed_entries = catalog
+            .entries
+            .iter()
+            .filter(|item| {
+                item.category_id
+                    .as_ref()
+                    .is_some_and(|id| category_ids.contains(id))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let removed_categories = catalog
+            .categories
+            .iter()
+            .filter(|item| category_ids.contains(&item.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let recycle_batch = if let Some(root) = recycle_root {
+            let batch = recycle_batch(root, "category", category_id)?;
+            for entry in &removed_entries {
+                copy_directory_verified(
+                    &self.entries_dir().join(&entry.folder),
+                    &batch.join(&entry.folder),
+                )?;
+            }
+            let display_name = removed_categories
+                .iter()
+                .find(|item| item.id == category_id)
+                .map_or_else(|| category_id.to_owned(), |item| item.name.clone());
+            write_json_atomic(
+                &batch.join("manifest.json"),
+                &RecycleManifest {
+                    format_version: 1,
+                    id: batch
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                    kind: "category".into(),
+                    display_name,
+                    deleted_at_ms: unix_millis(SystemTime::now()),
+                    categories: removed_categories.clone(),
+                    entries: removed_entries.clone(),
+                },
+                &self.temp_dir(),
+            )?;
+            Some(batch)
+        } else {
+            None
+        };
+        let staged_root = self
+            .temp_dir()
+            .join(format!("delete-category-{}", Uuid::new_v4()));
+        fs::create_dir_all(&staged_root)?;
+        let staged_entries =
+            match stage_entry_directories(&self.entries_dir(), &removed_entries, &staged_root) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    if let Some(batch) = recycle_batch {
+                        let _ = fs::remove_dir_all(batch);
+                    }
+                    return Err(error);
+                }
+            };
+        catalog
+            .categories
+            .retain(|item| !category_ids.contains(&item.id));
+        catalog
+            .entries
+            .retain(|item| !removed_entries.iter().any(|removed| removed.id == item.id));
+        if let Err(error) = self.write_catalog(&mut catalog) {
+            for (original, temporary) in staged_entries.iter().rev() {
+                let _ = fs::rename(temporary, original);
+            }
+            let _ = fs::remove_dir_all(&staged_root);
+            if let Some(batch) = recycle_batch {
+                let _ = fs::remove_dir_all(batch);
+            }
+            return Err(error);
+        }
+        if staged_root.exists() {
+            fs::remove_dir_all(staged_root)?;
+        }
+        Ok(())
+    }
+
+    /// Lists recoverable deletion batches.
+    ///
+    /// # Errors
+    /// Returns an error when recycle manifests or files cannot be read.
+    pub fn list_recycle_items(&self, recycle_root: &Path) -> Result<Vec<RecycleItem>> {
+        if !recycle_root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut items = Vec::new();
+        for item in fs::read_dir(recycle_root)? {
+            let path = item?.path();
+            let manifest_path = path.join("manifest.json");
+            if !manifest_path.is_file() {
+                continue;
+            }
+            let manifest: RecycleManifest = read_json(&manifest_path)?;
+            items.push(RecycleItem {
+                id: manifest.id,
+                kind: manifest.kind,
+                display_name: manifest.display_name,
+                deleted_at_ms: manifest.deleted_at_ms,
+                size_bytes: directory_size(&path)?,
+                entry_count: manifest.entries.len(),
+            });
+        }
+        items.sort_by_key(|item| Reverse(item.deleted_at_ms));
+        Ok(items)
+    }
+
+    /// Restores one deletion batch without overwriting live identifiers or sibling names.
+    ///
+    /// # Errors
+    /// Returns an error for conflicts, failed verification, or failed writes.
+    pub fn restore_recycle_item(&self, recycle_root: &Path, item_id: &str) -> Result<()> {
+        let batch = recycle_root.join(item_id);
+        let manifest: RecycleManifest = read_json(&batch.join("manifest.json"))?;
+        let mut catalog = self.read_catalog()?;
+        for entry in &manifest.entries {
+            if catalog
+                .entries
+                .iter()
+                .any(|current| current.id == entry.id || current.folder == entry.folder)
+                || self.entries_dir().join(&entry.folder).exists()
+            {
+                return Err(StorageError::RestoreConflict(format!(
+                    "存档“{}”与现有内容冲突",
+                    entry.name
+                )));
+            }
+        }
+        for category in &manifest.categories {
+            if catalog.categories.iter().any(|current| {
+                current.id == category.id
+                    || (current.parent_id == category.parent_id
+                        && current.name.eq_ignore_ascii_case(&category.name))
+            }) {
+                return Err(StorageError::RestoreConflict(format!(
+                    "分类“{}”与现有内容冲突",
+                    category.name
+                )));
+            }
+            if let Some(parent_id) = &category.parent_id
+                && !catalog
+                    .categories
+                    .iter()
+                    .any(|current| &current.id == parent_id)
+                && !manifest
+                    .categories
+                    .iter()
+                    .any(|current| &current.id == parent_id)
+            {
+                return Err(StorageError::RestoreConflict(format!(
+                    "分类“{}”的上级分类不存在",
+                    category.name
+                )));
+            }
+        }
+        let mut restored_folders = Vec::new();
+        for entry in &manifest.entries {
+            let destination = self.entries_dir().join(&entry.folder);
+            if let Err(error) = copy_directory_verified(&batch.join(&entry.folder), &destination) {
+                for folder in restored_folders {
+                    let _ = fs::remove_dir_all(folder);
+                }
+                return Err(error);
+            }
+            restored_folders.push(destination);
+        }
+        catalog.categories.extend(manifest.categories.clone());
+        catalog.entries.extend(manifest.entries.clone());
+        if let Err(error) = self.write_catalog(&mut catalog) {
+            for folder in restored_folders {
+                let _ = fs::remove_dir_all(folder);
+            }
+            return Err(error);
+        }
+        fs::remove_dir_all(batch)?;
+        Ok(())
+    }
+
+    /// Permanently removes one recycle bundle.
+    ///
+    /// # Errors
+    /// Returns an error when the bundle cannot be removed.
+    pub fn permanently_delete_recycle_item(
+        &self,
+        recycle_root: &Path,
+        item_id: &str,
+    ) -> Result<()> {
+        let target = recycle_root.join(item_id);
+        if target.is_dir() {
+            fs::remove_dir_all(target)?;
+        }
+        Ok(())
+    }
+
+    /// Permanently removes all recycle bundles.
+    ///
+    /// # Errors
+    /// Returns an error when a bundle cannot be enumerated or removed.
+    pub fn empty_recycle_bin(&self, recycle_root: &Path) -> Result<()> {
+        if recycle_root.exists() {
+            for item in fs::read_dir(recycle_root)? {
+                let path = item?.path();
+                if path.is_dir() {
+                    fs::remove_dir_all(path)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Lists all registered entries.
@@ -246,7 +727,7 @@ impl LocalRepository {
         let mut entries = catalog
             .entries
             .iter()
-            .map(|item| read_json(&self.entries_dir().join(&item.folder).join("entry.json")))
+            .map(|item| self.get_entry(&item.id))
             .collect::<Result<Vec<Entry>>>()?;
         entries.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(entries)
@@ -257,7 +738,16 @@ impl LocalRepository {
     /// # Errors
     /// Returns an error when the entry does not exist or is invalid.
     pub fn get_entry(&self, entry_id: &str) -> Result<Entry> {
-        read_json(&self.entry_dir(entry_id)?.join("entry.json"))
+        let mut entry: Entry = read_json(&self.entry_dir(entry_id)?.join("entry.json"))?;
+        let bindings = self.read_bindings()?;
+        if let Some(bound) = bindings.entries.get(entry_id) {
+            for source in &mut entry.sources {
+                if let Some(binding) = bound.iter().find(|binding| binding.id == source.id) {
+                    source.path.clone_from(&binding.path);
+                }
+            }
+        }
+        Ok(entry)
     }
 
     /// Lists all category nodes stored in the repository catalog.
@@ -477,6 +967,7 @@ impl LocalRepository {
             entry_id: entry.id,
             parent_id,
             device_id: device_id.into(),
+            device_name: self.device_identity()?.1,
             title: title.into(),
             created_at_ms,
             archive_name,
@@ -578,6 +1069,39 @@ impl LocalRepository {
                 &self.temp_dir(),
             )?;
         }
+        if !self.bindings_path().exists() {
+            write_json_atomic(
+                &self.bindings_path(),
+                &BindingsDocument {
+                    format_version: 1,
+                    entries: HashMap::new(),
+                },
+                &self.temp_dir(),
+            )?;
+        }
+        if !self.device_path().exists() {
+            write_json_atomic(
+                &self.device_path(),
+                &DeviceDocument {
+                    format_version: 1,
+                    id: Uuid::new_v4().to_string(),
+                    name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "本地设备".into()),
+                },
+                &self.temp_dir(),
+            )?;
+        }
+        if !self.library_path().exists() {
+            write_json_atomic(
+                &self.library_path(),
+                &serde_json::json!({
+                    "formatVersion": 1,
+                    "libraryId": Uuid::new_v4().to_string(),
+                    "updatedAtMs": unix_millis(SystemTime::now())
+                }),
+                &self.temp_dir(),
+            )?;
+        }
+        self.migrate_source_bindings()?;
         Ok(())
     }
 
@@ -586,6 +1110,15 @@ impl LocalRepository {
     }
     fn settings_path(&self) -> PathBuf {
         self.config_dir().join("settings.json")
+    }
+    fn bindings_path(&self) -> PathBuf {
+        self.config_dir().join("bindings.json")
+    }
+    fn device_path(&self) -> PathBuf {
+        self.config_dir().join("device.json")
+    }
+    fn library_path(&self) -> PathBuf {
+        self.config_dir().join("library.json")
     }
     fn data_dir(&self) -> PathBuf {
         self.root.join("data")
@@ -626,6 +1159,201 @@ impl LocalRepository {
         summary.last_snapshot_at_ms = timeline.last().map(|snapshot| snapshot.created_at_ms);
         self.write_catalog(&mut catalog)
     }
+
+    /// Returns the stable local device identifier and display name.
+    ///
+    /// # Errors
+    /// Returns an error when the device document cannot be read.
+    pub fn device_identity(&self) -> Result<(String, String)> {
+        let device: DeviceDocument = read_json(&self.device_path())?;
+        Ok((device.id, device.name))
+    }
+
+    fn read_bindings(&self) -> Result<BindingsDocument> {
+        read_json(&self.bindings_path())
+    }
+
+    fn save_bindings_for_entry(&self, entry_id: &str, sources: &[EntrySource]) -> Result<()> {
+        let mut bindings = self.read_bindings()?;
+        let saved = bindings.entries.entry(entry_id.to_owned()).or_default();
+        for source in sources {
+            if let Some(existing) = saved.iter_mut().find(|existing| existing.id == source.id) {
+                *existing = source.clone();
+            } else {
+                saved.push(source.clone());
+            }
+        }
+        write_json_atomic(&self.bindings_path(), &bindings, &self.temp_dir())
+    }
+
+    fn migrate_source_bindings(&self) -> Result<()> {
+        let mut catalog = self.read_catalog()?;
+        let mut bindings = self.read_bindings()?;
+        let mut bindings_changed = false;
+        for summary in &catalog.entries {
+            let path = self.entries_dir().join(&summary.folder).join("entry.json");
+            let mut entry: Entry = read_json(&path)?;
+            if entry.sources.iter().any(|source| !source.path.is_empty()) {
+                let saved = bindings.entries.entry(entry.id.clone()).or_default();
+                for source in &entry.sources {
+                    if !source.path.is_empty()
+                        && !saved.iter().any(|existing| existing.id == source.id)
+                    {
+                        saved.push(source.clone());
+                    }
+                }
+                entry
+                    .sources
+                    .iter_mut()
+                    .for_each(|source| source.path.clear());
+                write_json_atomic(&path, &entry, &self.temp_dir())?;
+                bindings_changed = true;
+            }
+        }
+        if bindings_changed {
+            write_json_atomic(&self.bindings_path(), &bindings, &self.temp_dir())?;
+        }
+        if catalog.format_version < FORMAT_VERSION {
+            catalog.format_version = FORMAT_VERSION;
+            self.write_catalog(&mut catalog)?;
+        }
+        Ok(())
+    }
+}
+
+fn shared_entry(entry: &Entry) -> Entry {
+    let mut shared = entry.clone();
+    shared
+        .sources
+        .iter_mut()
+        .for_each(|source| source.path.clear());
+    shared
+}
+
+fn resolve_entry_sources(
+    source_paths: &[String],
+    existing: &[EntrySource],
+) -> Result<Vec<EntrySource>> {
+    let mut sources = Vec::with_capacity(source_paths.len());
+    for source_path in source_paths {
+        let path = Path::new(source_path);
+        if !path.exists() {
+            return Err(StorageError::MissingSource(path.to_path_buf()));
+        }
+        let canonical = path.canonicalize()?;
+        let metadata = canonical.metadata()?;
+        let source_name = canonical
+            .file_name()
+            .ok_or_else(|| StorageError::MissingName(canonical.clone()))?
+            .to_string_lossy()
+            .into_owned();
+        let path = path_string(&canonical)?;
+        sources.push(EntrySource {
+            id: existing
+                .iter()
+                .find(|source| source.path.eq_ignore_ascii_case(&path))
+                .map_or_else(|| Uuid::new_v4().to_string(), |source| source.id.clone()),
+            name: source_name,
+            path,
+            kind: if metadata.is_dir() {
+                EntryKind::Directory
+            } else {
+                EntryKind::File
+            },
+        });
+    }
+    Ok(sources)
+}
+
+fn resolve_entry_sources_by_position(
+    source_paths: &[String],
+    existing: &[EntrySource],
+) -> Result<Vec<EntrySource>> {
+    let mut resolved = resolve_entry_sources(source_paths, existing)?;
+    for (index, source) in resolved.iter_mut().enumerate() {
+        if let Some(previous) = existing.get(index) {
+            source.id.clone_from(&previous.id);
+        }
+    }
+    Ok(resolved)
+}
+
+fn recycle_batch(root: &Path, kind: &str, id: &str) -> Result<PathBuf> {
+    fs::create_dir_all(root)?;
+    let batch = root.join(format!(
+        "{}__{}__{}__{}",
+        unix_millis(SystemTime::now()),
+        kind,
+        safe_folder_name(id),
+        Uuid::new_v4()
+    ));
+    fs::create_dir_all(&batch)?;
+    Ok(batch)
+}
+
+fn stage_entry_directories(
+    entries_dir: &Path,
+    entries: &[CatalogEntry],
+    staged_root: &Path,
+) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let mut staged_entries = Vec::new();
+    for entry in entries {
+        let source = entries_dir.join(&entry.folder);
+        if !source.exists() {
+            continue;
+        }
+        let staged = staged_root.join(&entry.folder);
+        if let Err(error) = fs::rename(&source, &staged) {
+            for (original, temporary) in staged_entries.iter().rev() {
+                let _ = fs::rename(temporary, original);
+            }
+            let _ = fs::remove_dir_all(staged_root);
+            return Err(error.into());
+        }
+        staged_entries.push((source, staged));
+    }
+    Ok(staged_entries)
+}
+
+fn copy_directory_verified(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination)?;
+    for item in WalkDir::new(source).min_depth(1) {
+        let item = item?;
+        let relative = item
+            .path()
+            .strip_prefix(source)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        let target = destination.join(relative);
+        if item.file_type().is_dir() {
+            fs::create_dir_all(target)?;
+        } else {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(item.path(), target)?;
+            let copied = destination.join(relative);
+            if item.metadata()?.len() != copied.metadata()?.len()
+                || hash_file(item.path())? != hash_file(&copied)?
+            {
+                return Err(StorageError::IntegrityMismatch);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn directory_size(path: &Path) -> Result<u64> {
+    let mut total = 0_u64;
+    for item in WalkDir::new(path) {
+        let item = item?;
+        if item.file_type().is_file() {
+            total = total.saturating_add(item.metadata()?.len());
+        }
+    }
+    Ok(total)
 }
 
 fn stage_sources(sources: &[EntrySource], destination: &Path) -> Result<Vec<SnapshotFile>> {
@@ -867,7 +1595,7 @@ fn unix_millis(time: SystemTime) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::LocalRepository;
-    use chronicle_core::StoragePolicy;
+    use chronicle_core::{StoragePolicy, SyncMode};
     use std::{fs, io::Read, path::Path};
     use tempfile::tempdir;
 
@@ -881,7 +1609,7 @@ mod tests {
         fs::write(&file, b"version one").unwrap();
         let repository_root = workspace.path().join("Chronicle");
         let repository = LocalRepository::open(&repository_root).unwrap();
-        assert_eq!(repository.load_settings().unwrap()["formatVersion"], 1);
+        assert_eq!(repository.load_settings().unwrap()["formatVersion"], 2);
         assert!(
             repository
                 .save_settings(&serde_json::json!({ "app": {}, "cloud": {} }))
@@ -889,7 +1617,7 @@ mod tests {
         );
         repository
             .save_settings(&serde_json::json!({
-                "formatVersion": 1,
+                "formatVersion": 2,
                 "app": { "defaultCategory": "配置" },
                 "cloud": { "enabled": false }
             }))
@@ -939,8 +1667,20 @@ mod tests {
             .unwrap();
         assert_eq!(signature, [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]);
         assert!(repository_root.join("config/settings.json").is_file());
+        assert!(repository_root.join("config/device.json").is_file());
+        assert!(repository_root.join("config/bindings.json").is_file());
+        assert!(repository_root.join("config/library.json").is_file());
         assert!(repository_root.join("data/catalog.json").is_file());
         assert!(entry_folder.join("entry.json").is_file());
+        let shared_entry: serde_json::Value =
+            super::read_json(&entry_folder.join("entry.json")).unwrap();
+        assert!(
+            shared_entry["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|source| source.get("path").is_none())
+        );
         assert!(entry_folder.join("timeline.json").is_file());
         fs::write(folder.join("nested/note.txt"), b"changed").unwrap();
         fs::write(&file, b"version two").unwrap();
@@ -997,5 +1737,93 @@ mod tests {
             repository.get_entry(&entry.id).unwrap().tags,
             vec!["重要", "配置"]
         );
+    }
+
+    #[test]
+    fn recycle_entry_and_category_round_trip() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("state.dat");
+        fs::write(&source, b"state").unwrap();
+        let repository = LocalRepository::open(workspace.path().join("Chronicle")).unwrap();
+        let category = repository.create_category("项目", None).unwrap();
+        let entry = repository
+            .add_entry_sources(
+                "状态",
+                &[source.to_string_lossy().into_owned()],
+                Some(category.id.clone()),
+                StoragePolicy::Local,
+            )
+            .unwrap();
+        repository
+            .create_snapshot(&entry.id, "初始", "device", false)
+            .unwrap();
+        let recycle = workspace.path().join("Recycle");
+        repository
+            .delete_category(&category.id, Some(&recycle))
+            .unwrap();
+        assert!(repository.list_entries().unwrap().is_empty());
+        let items = repository.list_recycle_items(&recycle).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].entry_count, 1);
+        assert!(
+            repository
+                .total_stored_bytes_with_recycle(Some(&recycle))
+                .unwrap()
+                > repository.total_stored_bytes().unwrap()
+        );
+        repository
+            .restore_recycle_item(&recycle, &items[0].id)
+            .unwrap();
+        assert_eq!(repository.list_categories().unwrap().len(), 1);
+        assert_eq!(
+            Path::new(&repository.list_entries().unwrap()[0].sources[0].path)
+                .canonicalize()
+                .unwrap(),
+            source.canonicalize().unwrap(),
+        );
+        assert!(repository.list_recycle_items(&recycle).unwrap().is_empty());
+    }
+
+    #[test]
+    fn replacing_a_source_keeps_its_stable_slot_id() {
+        let workspace = tempdir().unwrap();
+        let first = workspace.path().join("first.dat");
+        let second = workspace.path().join("second.dat");
+        fs::write(&first, b"one").unwrap();
+        fs::write(&second, b"two").unwrap();
+        let repository = LocalRepository::open(workspace.path().join("Chronicle")).unwrap();
+        let entry = repository.add_entry(&first, Some("slot"), None).unwrap();
+        let original_id = entry.sources[0].id.clone();
+        let updated = repository
+            .update_entry_with_sync(
+                &entry.id,
+                "slot",
+                &[second.to_string_lossy().into_owned()],
+                StoragePolicy::Local,
+                SyncMode::Automatic,
+            )
+            .unwrap();
+        assert_eq!(updated.sources[0].id, original_id);
+        assert_eq!(updated.sync_mode, SyncMode::Automatic);
+    }
+
+    #[test]
+    fn changing_sync_mode_keeps_sources_and_snapshots_intact() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("save.dat");
+        fs::write(&source, b"save").unwrap();
+        let repository = LocalRepository::open(workspace.path().join("Chronicle")).unwrap();
+        let entry = repository.add_entry(&source, Some("Save"), None).unwrap();
+        repository
+            .create_snapshot(&entry.id, "initial", "test", false)
+            .unwrap();
+
+        let updated = repository
+            .set_entry_sync_mode(&entry.id, SyncMode::Automatic)
+            .unwrap();
+
+        assert_eq!(updated.sync_mode, SyncMode::Automatic);
+        assert_eq!(updated.sources, entry.sources);
+        assert_eq!(repository.list_snapshots(&entry.id).unwrap().len(), 1);
     }
 }

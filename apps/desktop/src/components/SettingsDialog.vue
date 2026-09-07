@@ -1,20 +1,67 @@
 <script setup lang="ts">
-import { HardDrive, Info, Keyboard, RotateCcw, Settings2, X } from "@lucide/vue";
+import { FolderOpen, HardDrive, Info, Keyboard, RotateCcw, Settings2, Trash2, Undo2, X } from "@lucide/vue";
+import { isTauri } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { onMounted, reactive, ref } from "vue";
 import { appSettings, resetAppSettings, saveAppSettings, type AppSettings } from "../services/settings";
+import { archiveRepository } from "../services/repository";
+import type { RecycleItem } from "../domain";
+import ConfirmDialog from "./ConfirmDialog.vue";
 
 const emit = defineEmits<{ close: []; saved: [] }>();
-const activeSection = ref<"software" | "backup" | "hotkeys" | "about">("software");
+const activeSection = ref<"software" | "backup" | "recycle" | "hotkeys" | "about">("software");
 const closeButton = ref<HTMLButtonElement>();
 const draft = reactive<AppSettings>({ ...appSettings });
 const saving = ref(false);
+const recycleItems = ref<RecycleItem[]>([]);
+const recycleBusy = ref(false);
+const recycleError = ref("");
+const confirmAction = ref<{ title: string; message: string; run: () => Promise<void> }>();
 
 const sections = [
   { id: "software" as const, label: "软件", icon: Settings2 },
   { id: "backup" as const, label: "存储与备份", icon: HardDrive },
+  { id: "recycle" as const, label: "回收站", icon: Trash2 },
   { id: "hotkeys" as const, label: "热键", icon: Keyboard },
   { id: "about" as const, label: "关于", icon: Info },
 ];
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+
+async function loadRecycleItems(): Promise<void> {
+  recycleBusy.value = true;
+  recycleError.value = "";
+  try { recycleItems.value = await archiveRepository.listRecycleItems(); }
+  catch (error) { recycleError.value = error instanceof Error ? error.message : String(error); }
+  finally { recycleBusy.value = false; }
+}
+
+async function runRecycleAction(): Promise<void> {
+  const action = confirmAction.value;
+  confirmAction.value = undefined;
+  if (!action) return;
+  recycleBusy.value = true;
+  try { await action.run(); await loadRecycleItems(); emit("saved"); }
+  catch (error) { recycleError.value = error instanceof Error ? error.message : String(error); }
+  finally { recycleBusy.value = false; }
+}
+
+function restoreItem(item: RecycleItem): void {
+  confirmAction.value = { title: "恢复项目", message: `将“${item.displayName}”恢复到资料库。`, run: () => archiveRepository.restoreRecycleItem(item.id) };
+}
+
+function deleteItem(item: RecycleItem): void {
+  confirmAction.value = { title: "永久删除", message: `“${item.displayName}”及其全部备份将永久删除，无法恢复。`, run: () => archiveRepository.permanentlyDeleteRecycleItem(item.id) };
+}
+
+function emptyRecycleBin(): void {
+  confirmAction.value = { title: "清空回收站", message: "回收站中的全部存档和分类将永久删除，无法恢复。", run: () => archiveRepository.emptyRecycleBin() };
+}
 
 async function save(): Promise<void> {
   if (draft.retentionCount !== null) {
@@ -40,7 +87,13 @@ function reset(): void {
   Object.assign(draft, appSettings);
 }
 
-onMounted(() => closeButton.value?.focus());
+async function chooseRecycleBinPath(): Promise<void> {
+  if (!isTauri()) return;
+  const selected = await open({ directory: true, multiple: false, title: "选择回收站文件夹" });
+  if (typeof selected === "string") draft.recycleBinPath = selected;
+}
+
+onMounted(() => { closeButton.value?.focus(); void loadRecycleItems(); });
 </script>
 
 <template>
@@ -75,8 +128,23 @@ onMounted(() => closeButton.value?.focus());
               <label class="setting-row"><span><b>立即创建首个备份</b><small>添加文件或文件夹后建立初始时间节点</small></span><input v-model="draft.createInitialSnapshot" type="checkbox" role="switch" /></label>
               <label class="setting-row select-row"><span><b>自动备份频率</b><small>仅在 Chronicle 运行时执行</small></span><select v-model="draft.backupSchedule"><option value="off">关闭</option><option value="15m">每 15 分钟</option><option value="1h">每小时</option><option value="6h">每 6 小时</option><option value="daily">每天</option></select></label>
               <div class="setting-row"><span><b>每个存档保留版本</b><small>默认保留全部版本；设置上限后清理最旧的普通备份</small></span><div class="retention-control"><label><input :checked="draft.retentionCount === null" type="checkbox" role="switch" @change="toggleRetentionLimit" /><span>无限制</span></label><input v-if="draft.retentionCount !== null" v-model.number="draft.retentionCount" aria-label="版本保留数量" class="number-input" type="number" min="1" max="999" /></div></div>
+              <label class="setting-row"><span><b>启用回收站</b><small>删除的存档先移入回收站；关闭后直接永久删除</small></span><input v-model="draft.recycleBinEnabled" type="checkbox" role="switch" /></label>
+              <div class="setting-row recycle-path"><span><b>回收站位置</b><small>留空时使用 Chronicle 本地资料库中的 recycle 文件夹</small></span><div><input v-model.trim="draft.recycleBinPath" type="text" placeholder="默认位置" :disabled="!draft.recycleBinEnabled" /><button aria-label="选择回收站文件夹" :disabled="!draft.recycleBinEnabled || !isTauri()" @click="chooseRecycleBinPath"><FolderOpen :size="15" /></button></div></div>
             </div>
             <div class="path-card"><HardDrive :size="18" /><span><b>本地资料库</b><small>由 Chronicle 桌面应用数据目录管理</small></span><em>可用</em></div>
+          </section>
+
+          <section v-else-if="activeSection === 'recycle'" aria-labelledby="recycle-title">
+            <div class="section-heading recycle-heading"><div><h3 id="recycle-title">回收站</h3><p>删除内容默认永久保留，可恢复或永久清理。</p></div><button class="empty-button" :disabled="recycleBusy || !recycleItems.length" @click="emptyRecycleBin"><Trash2 :size="14" />清空</button></div>
+            <p v-if="recycleError" class="recycle-error" role="alert">{{ recycleError }}</p>
+            <div v-if="recycleBusy && !recycleItems.length" class="recycle-empty">正在读取回收站…</div>
+            <div v-else-if="!recycleItems.length" class="recycle-empty"><Trash2 :size="24" /><b>回收站为空</b><span>删除的存档和分类会显示在这里。</span></div>
+            <div v-else class="recycle-list">
+              <article v-for="item in recycleItems" :key="item.id">
+                <span class="recycle-icon"><Trash2 :size="17" /></span><span><b>{{ item.displayName }}</b><small>{{ item.kind === 'category' ? '分类' : '存档' }} · {{ item.entryCount }} 个存档 · {{ formatBytes(item.sizeBytes) }} · {{ new Date(item.deletedAt).toLocaleString() }}</small></span>
+                <div><button :disabled="recycleBusy" :aria-label="`恢复 ${item.displayName}`" @click="restoreItem(item)"><Undo2 :size="14" />恢复</button><button class="danger" :disabled="recycleBusy" :aria-label="`永久删除 ${item.displayName}`" @click="deleteItem(item)"><Trash2 :size="14" />删除</button></div>
+              </article>
+            </div>
           </section>
 
           <section v-else-if="activeSection === 'hotkeys'" aria-labelledby="hotkeys-title">
@@ -99,6 +167,7 @@ onMounted(() => closeButton.value?.focus());
 
       <footer><button class="reset-button" :disabled="saving" @click="reset"><RotateCcw :size="15" />恢复默认设置</button><div><button class="cancel-button" :disabled="saving" @click="emit('close')">取消</button><button class="save-button" :disabled="saving" @click="save">{{ saving ? '保存中' : '保存设置' }}</button></div></footer>
     </section>
+    <ConfirmDialog v-if="confirmAction" :title="confirmAction.title" :message="confirmAction.message" confirm-label="确定" danger @cancel="confirmAction = undefined" @confirm="runRecycleAction" />
   </div>
 </template>
 
@@ -134,6 +203,7 @@ select, .setting-row input[type="text"], .number-input { min-width: 152px; heigh
 .number-input { min-width: 82px; width: 82px; }
 .retention-control { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }.retention-control label { display: flex; align-items: center; gap: 7px; color: var(--text-2); font-size: 10px; white-space: nowrap; }
 .hotkey-group input { width: 154px; font-family: "Cascadia Code", Consolas, monospace; text-align: center; }
+.recycle-path > div { display: flex; align-items: center; gap: 7px; }.recycle-path input { width: 220px; }.recycle-path button { display: grid; place-items: center; width: 34px; height: 34px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 6px; }.recycle-path button:hover:not(:disabled) { background: #d2e5e0; }.recycle-path button:disabled { color: var(--text-3); cursor: default; opacity: .55; }
 .path-card { display: grid; grid-template-columns: 22px 1fr auto; align-items: center; gap: 11px; margin-top: 16px; padding: 14px 16px; color: var(--primary); background: var(--primary-soft); border-radius: 9px; }
 .path-card span { display: flex; flex-direction: column; gap: 3px; color: #263431; }
 .path-card b { font-size: 11px; }.path-card small { color: var(--text-3); font-size: 9px; }.path-card em { color: var(--primary); font-size: 10px; font-style: normal; font-weight: 650; }
@@ -147,5 +217,8 @@ footer > div { display: flex; gap: 8px; }
 footer button { min-height: 36px; padding: 0 13px; border-radius: 7px; font-size: 11px; font-weight: 650; }
 .reset-button { display: inline-flex; align-items: center; gap: 7px; color: var(--text-2); background: transparent; }
 .cancel-button { background: transparent; }.save-button { color: #fff; background: var(--primary); }.save-button:hover { background: var(--primary-dark); }
+.recycle-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }.recycle-heading h3 { margin: 0; }.empty-button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 10px; color: #a52e28; background: #fff0ef; border-radius: 7px; font-size: 10px; font-weight: 650; }.empty-button:disabled { color: var(--text-3); background: #f1f3f2; cursor: default; opacity: .65; }
+.recycle-list { overflow: hidden; border: 1px solid var(--border); border-radius: 10px; }.recycle-list article { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: 66px; padding: 9px 12px; }.recycle-list article + article { border-top: 1px solid var(--border); }.recycle-icon { display: grid; place-items: center; width: 32px; height: 32px; color: #a52e28; background: #fff0ef; border-radius: 7px; }.recycle-list article > span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 4px; }.recycle-list b { font-size: 11px; }.recycle-list small { overflow: hidden; color: var(--text-3); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.recycle-list article > div { display: flex; gap: 6px; }.recycle-list button { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 0 8px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 6px; font-size: 9px; }.recycle-list button.danger { color: #a52e28; background: #fff0ef; }.recycle-list button:disabled { cursor: default; opacity: .55; }
+.recycle-empty { display: grid; place-items: center; min-height: 210px; gap: 7px; color: var(--text-3); background: #f8faf9; border: 1px dashed var(--border-2); border-radius: 10px; font-size: 10px; }.recycle-empty b { color: var(--text-2); font-size: 12px; }.recycle-error { padding: 10px 12px; color: #a52e28; background: #fff0ef; border-radius: 7px; font-size: 10px; }
 @media (max-width: 1100px) { .settings-dialog { width: calc(100vw - 40px); height: calc(100vh - 40px); }.dialog-backdrop { padding: 20px; } }
 </style>

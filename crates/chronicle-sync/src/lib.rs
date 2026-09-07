@@ -1,5 +1,9 @@
 #![doc = "Repository comparison and rate-limited synchronization orchestration."]
 
+mod webdav;
+
+pub use webdav::{WebDavClient, WebDavError, WebDavSource};
+
 /// How a synchronization job was started.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SyncTrigger {

@@ -3,8 +3,7 @@ import { reactive } from "vue";
 
 export type CloseBehavior = "ask" | "tray" | "exit";
 export type BackupSchedule = "off" | "15m" | "1h" | "6h" | "daily";
-export type SyncDirection = "bidirectional" | "upload" | "download";
-export type ConflictStrategy = "ask" | "newest" | "local" | "remote";
+export type CloudProvider = "webdav" | "github";
 
 export interface AppSettings {
   launchAtStartup: boolean;
@@ -14,30 +13,38 @@ export interface AppSettings {
   createInitialSnapshot: boolean;
   backupSchedule: BackupSchedule;
   retentionCount: number | null;
+  recycleBinEnabled: boolean;
+  recycleBinPath: string;
   searchShortcut: string;
   snapshotShortcut: string;
   settingsShortcut: string;
 }
 
-export interface CloudSettings {
-  enabled: boolean;
+export interface CloudSource {
+  id: string;
+  name: string;
+  provider: CloudProvider;
   endpoint: string;
   username: string;
   remotePath: string;
-  syncDirection: SyncDirection;
-  conflictStrategy: ConflictStrategy;
-  syncOnLaunch: boolean;
+  credentialRef: string;
+}
+
+export interface CloudSettings {
+  enabled: boolean;
+  activeSourceId: string | null;
+  sources: CloudSource[];
   maxConcurrentMetadataReads: number;
   maxConcurrentTransfers: number;
   requestDelayMs: number;
   retryLimit: number;
 }
 
-const APP_SETTINGS_KEY = "chronicle.app-settings.v1";
-const CLOUD_SETTINGS_KEY = "chronicle.cloud-settings.v1";
+const APP_SETTINGS_KEY = "chronicle.app-settings.v2";
+const CLOUD_SETTINGS_KEY = "chronicle.cloud-settings.v2";
 
 export interface SettingsDocument {
-  formatVersion: 1;
+  formatVersion: 2;
   app: AppSettings;
   cloud: CloudSettings;
 }
@@ -50,6 +57,8 @@ const defaultAppSettings: AppSettings = {
   createInitialSnapshot: true,
   backupSchedule: "off",
   retentionCount: null,
+  recycleBinEnabled: true,
+  recycleBinPath: "",
   searchShortcut: "Ctrl+K",
   snapshotShortcut: "Ctrl+Shift+B",
   settingsShortcut: "Ctrl+,",
@@ -57,17 +66,48 @@ const defaultAppSettings: AppSettings = {
 
 const defaultCloudSettings: CloudSettings = {
   enabled: false,
-  endpoint: "",
-  username: "",
-  remotePath: "/Chronicle",
-  syncDirection: "bidirectional",
-  conflictStrategy: "ask",
-  syncOnLaunch: true,
+  activeSourceId: null,
+  sources: [],
   maxConcurrentMetadataReads: 2,
   maxConcurrentTransfers: 2,
   requestDelayMs: 150,
   retryLimit: 5,
 };
+
+type LegacyCloudSettings = Partial<CloudSettings> & {
+  endpoint?: string;
+  username?: string;
+  remotePath?: string;
+};
+
+function normalizedCloud(value?: LegacyCloudSettings): CloudSettings {
+  const raw = value ?? {};
+  let sources = Array.isArray(raw.sources) ? raw.sources.map((source) => ({ ...source })) : [];
+  let activeSourceId = raw.activeSourceId ?? null;
+  if (!sources.length && raw.endpoint) {
+    const id = crypto.randomUUID();
+    sources = [{
+      id,
+      name: "WebDAV",
+      provider: "webdav",
+      endpoint: raw.endpoint,
+      username: raw.username ?? "",
+      remotePath: raw.remotePath || "/Chronicle",
+      credentialRef: `chronicle-webdav:${id}`,
+    }];
+    activeSourceId = id;
+  }
+  if (!sources.some((source) => source.id === activeSourceId)) activeSourceId = sources[0]?.id ?? null;
+  return {
+    enabled: Boolean(raw.enabled && sources.length),
+    activeSourceId,
+    sources,
+    maxConcurrentMetadataReads: Math.max(1, Math.min(4, Number(raw.maxConcurrentMetadataReads) || 2)),
+    maxConcurrentTransfers: Math.max(1, Math.min(4, Number(raw.maxConcurrentTransfers) || 2)),
+    requestDelayMs: Math.max(0, Math.min(5000, Number(raw.requestDelayMs) || 150)),
+    retryLimit: Math.max(1, Math.min(10, Number(raw.retryLimit) || 5)),
+  };
+}
 
 function loadSettings<T extends object>(key: string, defaults: T): T {
   try {
@@ -79,25 +119,26 @@ function loadSettings<T extends object>(key: string, defaults: T): T {
 }
 
 export const appSettings = reactive({ ...defaultAppSettings });
-export const cloudSettings = reactive({ ...defaultCloudSettings });
+export const cloudSettings = reactive<CloudSettings>(normalizedCloud());
 
 function settingsDocument(): SettingsDocument {
   return {
-    formatVersion: 1,
+    formatVersion: 2,
     app: { ...appSettings },
-    cloud: { ...cloudSettings },
+    cloud: { ...cloudSettings, sources: cloudSettings.sources.map((source) => ({ ...source })) },
   };
 }
 
 export async function initializeSettings(): Promise<void> {
   if (isTauri()) {
-    const saved = await invoke<Partial<SettingsDocument>>("load_settings");
+    const saved = await invoke<Partial<SettingsDocument> & { cloud?: LegacyCloudSettings }>("load_settings");
     Object.assign(appSettings, defaultAppSettings, saved.app ?? {});
-    Object.assign(cloudSettings, defaultCloudSettings, saved.cloud ?? {});
+    Object.assign(cloudSettings, normalizedCloud(saved.cloud));
+    if (saved.formatVersion !== 2) await persistSettings();
     return;
   }
   Object.assign(appSettings, loadSettings(APP_SETTINGS_KEY, defaultAppSettings));
-  Object.assign(cloudSettings, loadSettings(CLOUD_SETTINGS_KEY, defaultCloudSettings));
+  Object.assign(cloudSettings, normalizedCloud(loadSettings(CLOUD_SETTINGS_KEY, defaultCloudSettings)));
 }
 
 export async function persistSettings(): Promise<void> {
@@ -115,7 +156,7 @@ export async function saveAppSettings(value: AppSettings): Promise<void> {
 }
 
 export async function saveCloudSettings(value: CloudSettings): Promise<void> {
-  Object.assign(cloudSettings, value);
+  Object.assign(cloudSettings, normalizedCloud(value));
   await persistSettings();
 }
 

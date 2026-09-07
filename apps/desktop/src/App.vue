@@ -1,19 +1,22 @@
 <script setup lang="ts">
 import {
   ArchiveRestore, Check, ChevronDown, ChevronRight, Clock3, CloudCog, File, FileClock,
-  Folder, FolderArchive, HardDrive, LockKeyhole, MoreHorizontal, Plus, RotateCcw,
+  Folder, FolderArchive, FolderOpen, HardDrive, LockKeyhole, MoreHorizontal, Pencil, Plus, RotateCcw,
   Search, Settings2, SlidersHorizontal, UploadCloud, X,
+  Trash2,
 } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import CloudSettingsDialog from "./components/CloudSettingsDialog.vue";
+import CloudSettingsDialog from "./components/CloudCenterDialog.vue";
 import ArchiveMetadata from "./components/ArchiveMetadata.vue";
+import ConfirmDialog from "./components/ConfirmDialog.vue";
 import CreateCategoryDialog from "./components/CreateCategoryDialog.vue";
 import CreateArchiveDialog from "./components/CreateArchiveDialog.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
-import type { ArchiveRecord, ArchiveSource, CategoryRecord, CreateArchiveInput, SnapshotProgress, SnapshotRecord, SourceKind } from "./domain";
+import type { ArchiveRecord, ArchiveSource, CategoryRecord, CreateArchiveInput, RepositoryInfo, SnapshotProgress, SnapshotRecord, SourceKind } from "./domain";
 import { archiveRepository, isTauriRuntime } from "./services/repository";
+import { cloudRepository } from "./services/cloud";
 import { compareArchiveNames, type ArchiveSortMode } from "./services/archiveSorting";
-import { appSettings, initializeSettings, shortcutMatches } from "./services/settings";
+import { appSettings, cloudSettings, initializeSettings, shortcutMatches } from "./services/settings";
 
 const categoryDefinitions = [
   { name: "游戏", icon: ArchiveRestore },
@@ -66,8 +69,26 @@ const cloudSettingsOpen = ref(false);
 const snapshotProgress = ref<SnapshotProgress>();
 const busyAction = ref<"snapshot" | "restore">();
 const savingTags = ref(false);
+const repositoryInfo = ref<RepositoryInfo>({ path: "", totalBytes: 0 });
+const editingArchive = ref<ArchiveRecord>();
+const archiveMenuOpen = ref(false);
+const trashDropActive = ref(false);
+const treeMenu = ref<{ kind: "archive" | "category"; id: string }>();
+const confirmRequest = ref<{ title: string; message: string; confirmLabel: string; destructive: boolean }>();
+let confirmResolver: ((confirmed: boolean) => void) | undefined;
 const notice = ref<{ type: "success" | "error" | "info"; message: string }>();
 let noticeTimer: number | undefined;
+const automaticSyncTimers = new Map<string, number>();
+
+function queueAutomaticUpload(archive?: ArchiveRecord): void {
+  if (!archive || !isTauriRuntime || archive.storagePolicy !== "local_and_remote" || archive.syncMode !== "automatic" || !cloudSettings.activeSourceId) return;
+  window.clearTimeout(automaticSyncTimers.get(archive.id));
+  automaticSyncTimers.set(archive.id, window.setTimeout(async () => {
+    automaticSyncTimers.delete(archive.id);
+    try { await cloudRepository.upload(cloudSettings.activeSourceId!, archive.id); showNotice(`“${archive.name}”已自动上传`); }
+    catch (error) { showNotice(`自动上传失败：${readableError(error)}`, "error"); }
+  }, 1200));
+}
 
 const descendantIds = (categoryId: string): Set<string> => {
   const result = new Set([categoryId]);
@@ -172,15 +193,58 @@ async function refreshCategories() {
   categoryRecords.value = await archiveRepository.listCategories();
 }
 
+async function refreshRepositoryInfo() {
+  repositoryInfo.value = await archiveRepository.getRepositoryInfo();
+}
+
+async function handleSettingsChanged() {
+  await Promise.all([refreshArchives(), refreshCategories(), refreshRepositoryInfo()]);
+  showNotice("设置已保存");
+}
+
+async function openRepositoryFolder() {
+  try {
+    await archiveRepository.openRepositoryFolder();
+  } catch (error) {
+    showNotice(readableError(error), "error");
+  }
+}
+
 async function refreshSnapshots(archiveId?: string) {
   snapshots.value = archiveId ? await archiveRepository.listSnapshots(archiveId) : [];
   selectedSnapshotId.value = snapshots.value[0]?.id;
 }
 
 function openCreateArchive() {
+  editingArchive.value = undefined;
   pendingSources.value = [];
   createArchiveError.value = undefined;
   createDialogOpen.value = true;
+}
+
+function openEditArchive() {
+  if (!selectedArchive.value) return;
+  editingArchive.value = selectedArchive.value;
+  pendingSources.value = selectedArchive.value.sources.map((source) => ({ ...source }));
+  createArchiveError.value = undefined;
+  archiveMenuOpen.value = false;
+  createDialogOpen.value = true;
+}
+
+function closeArchiveDialog() {
+  createDialogOpen.value = false;
+  editingArchive.value = undefined;
+}
+
+function requestConfirmation(title: string, message: string, confirmLabel: string, destructive = false): Promise<boolean> {
+  confirmRequest.value = { title, message, confirmLabel, destructive };
+  return new Promise((resolve) => { confirmResolver = resolve; });
+}
+
+function answerConfirmation(confirmed: boolean) {
+  confirmRequest.value = undefined;
+  confirmResolver?.(confirmed);
+  confirmResolver = undefined;
 }
 
 async function pickSources(kind: SourceKind) {
@@ -205,10 +269,23 @@ async function createArchive(input: CreateArchiveInput) {
   creatingArchive.value = true;
   createArchiveError.value = undefined;
   try {
-    const archive = await archiveRepository.createArchive(input);
+    if (editingArchive.value) {
+      const archiveId = editingArchive.value.id;
+      await archiveRepository.updateArchive(archiveId, input);
+      closeArchiveDialog();
+      await refreshArchives(archiveId);
+      await refreshRepositoryInfo();
+      queueAutomaticUpload(archives.value.find((archive) => archive.id === archiveId));
+      showNotice("存档设置已更新");
+      return;
+    }
+    const categoryId = selectedCategoryId.value === "all" ? undefined : selectedCategoryId.value;
+    const archive = await archiveRepository.createArchive({ ...input, categoryId });
     createDialogOpen.value = false;
+    if (categoryId) expandedCategoryIds.value = new Set([...expandedCategoryIds.value, categoryId]);
     await refreshArchives(archive.id);
     await refreshSnapshots(archive.id);
+    await refreshRepositoryInfo();
     if (input.createInitialSnapshot) {
       await createSnapshot("初始版本");
     } else {
@@ -219,6 +296,74 @@ async function createArchive(input: CreateArchiveInput) {
   } finally {
     creatingArchive.value = false;
   }
+}
+
+async function deleteArchive(archive: ArchiveRecord) {
+  archiveMenuOpen.value = false;
+  const action = appSettings.recycleBinEnabled ? "移入回收站" : "永久删除";
+  const confirmed = await requestConfirmation(
+    `${action}“${archive.name}”`,
+    appSettings.recycleBinEnabled ? "存档及其全部时间节点将移入回收站。" : "存档及其全部时间节点将被永久删除，无法恢复。",
+    action,
+    true,
+  );
+  if (!confirmed) return;
+  try {
+    await archiveRepository.deleteArchive(archive.id, appSettings.recycleBinEnabled, appSettings.recycleBinPath);
+    selectedArchiveId.value = undefined;
+    activeTreeNodeId.value = `category:${selectedCategoryId.value}`;
+    await refreshArchives();
+    await refreshCategories();
+    await refreshRepositoryInfo();
+    showNotice(appSettings.recycleBinEnabled ? "存档已移入回收站" : "存档已永久删除");
+  } catch (error) {
+    showNotice(readableError(error), "error");
+  }
+}
+
+async function deleteCategory(categoryId: string) {
+  const category = categoryRecords.value.find((item) => item.id === categoryId);
+  if (!category) return;
+  const ids = descendantIds(categoryId);
+  const archiveCount = archives.value.filter((archive) => archive.categoryId && ids.has(archive.categoryId)).length;
+  const action = appSettings.recycleBinEnabled ? "移入回收站" : "永久删除";
+  const confirmed = await requestConfirmation(
+    `${action}分类“${category.name}”`,
+    `该分类的子分类和 ${archiveCount} 个存档将一并${appSettings.recycleBinEnabled ? "移入回收站" : "永久删除"}。`,
+    action,
+    true,
+  );
+  if (!confirmed) return;
+  try {
+    await archiveRepository.deleteCategory(categoryId, appSettings.recycleBinEnabled, appSettings.recycleBinPath);
+    selectedCategoryId.value = "all";
+    selectedArchiveId.value = undefined;
+    activeTreeNodeId.value = "category:all";
+    await refreshCategories();
+    await refreshArchives();
+    await refreshRepositoryInfo();
+    showNotice(appSettings.recycleBinEnabled ? "分类已移入回收站" : "分类已永久删除");
+  } catch (error) {
+    showNotice(readableError(error), "error");
+  }
+}
+
+async function moveArchiveFromMenu(archiveId: string, event: Event) {
+  const value = (event.target as HTMLSelectElement).value;
+  try {
+    await archiveRepository.setArchiveCategory(archiveId, value || undefined);
+    treeMenu.value = undefined;
+    await refreshArchives(archiveId);
+  } catch (error) { showNotice(readableError(error), "error"); }
+}
+
+async function moveCategoryFromMenu(categoryId: string, event: Event) {
+  const value = (event.target as HTMLSelectElement).value;
+  try {
+    await archiveRepository.moveCategory(categoryId, value || undefined);
+    treeMenu.value = undefined;
+    await refreshCategories();
+  } catch (error) { showNotice(readableError(error), "error"); }
 }
 
 async function createSnapshot(title = "手动备份") {
@@ -232,7 +377,9 @@ async function createSnapshot(title = "手动备份") {
     );
     await refreshArchives(selectedArchive.value.id);
     await refreshSnapshots(selectedArchive.value.id);
+    await refreshRepositoryInfo();
     selectedSnapshotId.value = snapshot.id;
+    queueAutomaticUpload(archives.value.find((archive) => archive.id === selectedArchive.value?.id));
     showNotice(`时间节点已创建，保存 ${snapshot.files.length} 个文件`);
   } catch (error) {
     showNotice(readableError(error), "error");
@@ -375,6 +522,22 @@ function finishDrag() {
   draggedArchiveId.value = undefined;
   draggedCategoryId.value = undefined;
   categoryDropTarget.value = undefined;
+  trashDropActive.value = false;
+}
+
+function handleTrashDragOver(event: DragEvent) {
+  if (!draggedArchiveId.value && !draggedCategoryId.value) return;
+  event.preventDefault();
+  trashDropActive.value = true;
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+}
+
+async function dropInTrash() {
+  const archive = archives.value.find((item) => item.id === draggedArchiveId.value);
+  const categoryId = draggedCategoryId.value;
+  finishDrag();
+  if (archive) await deleteArchive(archive);
+  else if (categoryId) await deleteCategory(categoryId);
 }
 
 function canDropOnCategory(categoryId: string): boolean {
@@ -416,7 +579,12 @@ async function dropOnCategory(categoryId: string) {
 
 function handleShortcut(event: KeyboardEvent) {
   if (event.key === "Escape") {
+    if (confirmRequest.value) {
+      answerConfirmation(false);
+      return;
+    }
     createDialogOpen.value = false;
+    editingArchive.value = undefined;
     categoryDialogOpen.value = false;
     sortMenuOpen.value = false;
     settingsOpen.value = false;
@@ -449,6 +617,7 @@ onMounted(async () => {
     await initializeSettings();
     await refreshCategories();
     await refreshArchives();
+    await refreshRepositoryInfo();
   }
   catch (error) { showNotice(readableError(error), "error"); }
   finally { loading.value = false; }
@@ -456,6 +625,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleShortcut);
   window.clearTimeout(noticeTimer);
+  automaticSyncTimers.forEach((timer) => window.clearTimeout(timer));
 });
 </script>
 
@@ -485,15 +655,18 @@ onBeforeUnmount(() => {
             <button v-if="node.id !== 'all'" class="disclosure" :class="{ hidden: !node.hasChildren }" :aria-label="`${expandedCategoryIds.has(node.id) ? '折叠' : '展开'} ${node.name}`" :aria-expanded="node.hasChildren ? expandedCategoryIds.has(node.id) : undefined" @click="toggleCategory(node.id)"><ChevronDown v-if="expandedCategoryIds.has(node.id)" :size="14" /><ChevronRight v-else :size="14" /></button>
             <span v-else class="disclosure-spacer"></span>
             <button class="category-select" :draggable="node.id !== 'all'" :title="node.id === 'all' ? '将分类或存档拖到这里可移至根目录' : undefined" @dragstart.stop="node.id !== 'all' && startCategoryDrag(node.id, $event)" @click="selectCategory(node.id)"><component :is="node.icon" :size="17" /><span>{{ node.name }}</span><span class="category-suffix"><LockKeyhole v-if="node.id === 'all'" :size="12" aria-label="固定根目录" /><small>{{ node.count }}</small></span></button>
+            <div v-if="node.id !== 'all'" class="tree-more"><button aria-label="分类操作" :aria-expanded="treeMenu?.kind === 'category' && treeMenu.id === node.id" @click="treeMenu = treeMenu?.id === node.id ? undefined : { kind: 'category', id: node.id }"><MoreHorizontal :size="14" /></button><div v-if="treeMenu?.kind === 'category' && treeMenu.id === node.id" class="tree-menu"><label>移动到<select :value="node.parentId ?? ''" @change="moveCategoryFromMenu(node.id, $event)"><option value="">根目录</option><option v-for="target in categoryRecords.filter((item) => !descendantIds(node.id).has(item.id))" :key="target.id" :value="target.id">{{ target.name }}</option></select></label><button class="danger" @click="deleteCategory(node.id)"><Trash2 :size="13" />删除分类</button></div></div>
           </div>
           <div v-else class="archive-tree-row" :class="{ active: activeTreeNodeId === `archive:${node.id}` }" :style="{ paddingLeft: `${4 + node.depth * 16}px` }" @dragend="finishDrag">
             <span class="disclosure-spacer"></span>
             <button class="archive-tree-select" draggable="true" :title="node.archive.name" @dragstart.stop="startArchiveDrag(node.id, $event)" @click="selectArchiveFromTree(node.archive)"><File :size="16" /><span>{{ node.archive.name }}</span></button>
+            <div class="tree-more"><button aria-label="存档移动操作" :aria-expanded="treeMenu?.kind === 'archive' && treeMenu.id === node.id" @click="treeMenu = treeMenu?.id === node.id ? undefined : { kind: 'archive', id: node.id }"><MoreHorizontal :size="14" /></button><div v-if="treeMenu?.kind === 'archive' && treeMenu.id === node.id" class="tree-menu"><label>移动到<select :value="node.archive.categoryId ?? ''" @change="moveArchiveFromMenu(node.id, $event)"><option value="">根目录</option><option v-for="target in categoryRecords" :key="target.id" :value="target.id">{{ target.name }}</option></select></label><button class="danger" @click="deleteArchive(node.archive)"><Trash2 :size="13" />删除存档</button></div></div>
           </div>
         </template>
       </nav>
       <div class="spacer"></div>
-      <section class="storage"><div><HardDrive :size="17" /><span>本地快照</span><b>{{ formatBytes(snapshots.reduce((sum, item) => sum + item.totalBytes, 0)) }}</b></div><small>数据保存在 Chronicle 本地资料库</small></section>
+      <div v-if="draggedArchiveId || draggedCategoryId" class="trash-drop-zone" :class="{ active: trashDropActive }" @dragover="handleTrashDragOver" @dragleave="trashDropActive = false" @drop.prevent="dropInTrash"><Trash2 :size="19" /><span><b>{{ appSettings.recycleBinEnabled ? '移入回收站' : '永久删除' }}</b><small>拖到这里后松开</small></span></div>
+      <section class="storage"><div><HardDrive :size="17" /><span>本地存储</span><b>{{ formatBytes(repositoryInfo.totalBytes) }}</b><button aria-label="打开本地资料库文件夹" title="打开本地资料库文件夹" @click="openRepositoryFolder"><FolderOpen :size="14" /></button></div><small :title="repositoryInfo.path">{{ repositoryInfo.path || 'Chronicle 本地资料库' }}</small></section>
       <button class="account"><span class="avatar">T</span><span><b>ThermalEX</b><small>本机设备</small></span><ChevronDown :size="16" /></button>
     </aside>
 
@@ -514,7 +687,7 @@ onBeforeUnmount(() => {
       <section v-if="selectedArchive" class="detail-panel" aria-labelledby="detail-title">
         <header class="detail-header">
           <div class="identity"><span class="detail-icon"><Folder v-if="selectedArchive.kind === 'folder'" /><File v-else-if="selectedArchive.kind === 'file'" /><FolderArchive v-else /></span><div class="title-line"><h2 id="detail-title">{{ selectedArchive.name }}</h2></div></div>
-          <div class="actions"><button class="secondary" @click="cloudSettingsOpen = true"><UploadCloud :size="17" />同步</button><button class="accent" :disabled="busyAction !== undefined" @click="createSnapshot()"><Plus :size="17" />{{ busyAction === 'snapshot' ? '创建中' : '创建备份' }}</button><button class="icon-button" aria-label="更多操作"><MoreHorizontal :size="19" /></button></div>
+          <div class="actions"><button class="secondary" @click="cloudSettingsOpen = true"><UploadCloud :size="17" />同步</button><button class="accent" :disabled="busyAction !== undefined" @click="createSnapshot()"><Plus :size="17" />{{ busyAction === 'snapshot' ? '创建中' : '创建备份' }}</button><div class="more-control"><button class="icon-button" aria-label="更多操作" :aria-expanded="archiveMenuOpen" @click="archiveMenuOpen = !archiveMenuOpen"><MoreHorizontal :size="19" /></button><div v-if="archiveMenuOpen" class="archive-actions-menu"><button @click="openEditArchive"><Pencil :size="15" />编辑存档</button><button class="danger" @click="selectedArchive && deleteArchive(selectedArchive)"><Trash2 :size="15" />删除存档</button></div></div></div>
         </header>
 
         <ArchiveMetadata :archive="selectedArchive" :saving-tags="savingTags" @add-tag="addArchiveTag" @remove-tag="removeArchiveTag" />
@@ -546,7 +719,7 @@ onBeforeUnmount(() => {
     </main>
 
     <div v-if="notice" class="toast" :class="notice.type" role="status"><span>{{ notice.message }}</span><button aria-label="关闭通知" @click="notice = undefined"><X :size="15" /></button></div>
-    <SettingsDialog v-if="settingsOpen" @close="settingsOpen = false" @saved="showNotice('设置已保存')" />
+    <SettingsDialog v-if="settingsOpen" @close="settingsOpen = false" @saved="handleSettingsChanged" />
     <CloudSettingsDialog v-if="cloudSettingsOpen" @close="cloudSettingsOpen = false" @saved="showNotice('云端设置已保存')" />
     <CreateCategoryDialog
       v-if="categoryDialogOpen"
@@ -563,10 +736,14 @@ onBeforeUnmount(() => {
       :picking="pickingSource"
       :submitting="creatingArchive"
       :error="createArchiveError"
-      @close="createDialogOpen = false"
+      :edit-name="editingArchive?.name"
+      :edit-storage-policy="editingArchive?.storagePolicy"
+      :edit-sync-mode="editingArchive?.syncMode"
+      @close="closeArchiveDialog"
       @pick="pickSources"
       @remove="pendingSources = pendingSources.filter((source) => source.id !== $event)"
       @submit="createArchive"
     />
+    <ConfirmDialog v-if="confirmRequest" :title="confirmRequest.title" :message="confirmRequest.message" :confirm-label="confirmRequest.confirmLabel" :destructive="confirmRequest.destructive" @cancel="answerConfirmation(false)" @confirm="answerConfirmation(true)" />
   </div>
 </template>
