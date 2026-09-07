@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { CheckCircle2, CloudCog, Download, FileJson, Plus, RefreshCw, Server, Trash2, Upload, X } from "@lucide/vue";
+import { CheckCircle2, ChevronDown, CloudCog, Download, FileJson, Plus, RefreshCw, Server, Trash2, Upload, X } from "@lucide/vue";
 import { computed, onMounted, reactive, ref } from "vue";
-import type { ArchiveSyncMode } from "../domain";
 import { cloudRepository, type CloudPreview, type RemoteItem } from "../services/cloud";
 import { cloudSettings, saveCloudSettings, type CloudSettings, type CloudSource } from "../services/settings";
 import ConfirmDialog from "./ConfirmDialog.vue";
+import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
 
 const emit = defineEmits<{ close: []; saved: [] }>();
 const tab = ref<"repository" | "sources">("repository");
@@ -18,6 +18,14 @@ const feedback = ref("");
 const error = ref("");
 const confirmAction = ref<{ title: string; message: string; run: () => Promise<void> }>();
 const activeSource = computed(() => draft.sources.find((source) => source.id === draft.activeSourceId));
+const sourceOptions = computed<ThemedSelectOption[]>(() => [
+  { value: null, label: "未选择" },
+  ...draft.sources.map((source) => ({ value: source.id, label: source.name })),
+]);
+const syncOptions: ThemedSelectOption[] = [
+  { value: "manual", label: "手动同步" },
+  { value: "automatic", label: "自动上传" },
+];
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -92,13 +100,17 @@ function confirmDelete(ids: string[]): void {
   } };
 }
 
-async function changeSyncMode(item: RemoteItem, event: Event): Promise<void> {
-  if (!activeSource.value) return;
-  const mode = (event.target as HTMLSelectElement).value as ArchiveSyncMode;
+async function changeSyncMode(item: RemoteItem, mode: string | null): Promise<void> {
+  if (!activeSource.value || (mode !== "manual" && mode !== "automatic")) return;
   busy.value = `mode:${item.id}`;
   try { await cloudRepository.setSyncMode(activeSource.value.id, item.id, mode); item.syncMode = mode; feedback.value = "同步方案已保存"; }
   catch (reason) { error.value = reason instanceof Error ? reason.message : String(reason); }
   finally { busy.value = ""; }
+}
+
+function selectActiveSource(sourceId: string | null): void {
+  draft.activeSourceId = sourceId;
+  preview.value = undefined;
 }
 
 async function runConfirmed(): Promise<void> {
@@ -136,7 +148,7 @@ onMounted(() => { closeButton.value?.focus(); if (activeSource.value) void loadP
               <article v-for="item in preview?.items ?? []" :key="item.id" :class="{ protected: item.protected }">
                 <input v-if="!item.protected" v-model="selected" type="checkbox" :value="item.id" :aria-label="`选择 ${item.name}`" /><span v-else class="config-mark"><FileJson :size="16" /></span>
                 <span class="remote-copy"><b>{{ item.name }}</b><small>{{ item.protected ? '受保护的仓库配置' : `${item.snapshotCount} 个时间节点 · ${formatBytes(item.sizeBytes)}` }}</small></span>
-                <select v-if="!item.protected" :value="item.syncMode" :disabled="Boolean(busy)" :aria-label="`${item.name} 同步方案`" @change="changeSyncMode(item, $event)"><option value="manual">手动同步</option><option value="automatic">自动上传</option></select>
+                <ThemedSelect v-if="!item.protected" :model-value="item.syncMode" :options="syncOptions" :disabled="Boolean(busy)" :label="`${item.name} 同步方案`" @update:model-value="changeSyncMode(item, $event)" />
                 <div class="item-actions"><button v-if="!item.protected" :disabled="Boolean(busy)" @click="runItemAction(item, 'sync')"><RefreshCw :size="14" />同步</button><button v-if="!item.protected" :disabled="Boolean(busy)" @click="confirmOverwrite(item, 'download')"><Download :size="14" />覆盖下载</button><button v-if="!item.protected" :disabled="Boolean(busy)" @click="confirmOverwrite(item, 'upload')"><Upload :size="14" />覆盖上传</button><span v-else>不可删除</span></div>
               </article>
               <div v-if="preview && preview.items.length <= 2" class="list-empty">远端暂无存档，可从本地存档执行覆盖上传。</div>
@@ -145,7 +157,7 @@ onMounted(() => { closeButton.value?.focus(); if (activeSource.value) void loadP
         </section>
 
         <section v-else class="sources-page">
-          <div class="source-toolbar"><label><span>当前同步源</span><select v-model="draft.activeSourceId"><option :value="null">未选择</option><option v-for="source in draft.sources" :key="source.id" :value="source.id">{{ source.name }}</option></select></label><button @click="addSource"><Plus :size="15" />添加 WebDAV</button><button disabled title="后续版本开放">GitHub（预留）</button></div>
+          <div class="source-toolbar"><label><span>当前同步源</span><ThemedSelect :model-value="draft.activeSourceId" :options="sourceOptions" label="当前同步源" @update:model-value="selectActiveSource" /></label><button @click="addSource"><Plus :size="15" />添加 WebDAV</button><button disabled title="后续版本开放">GitHub（预留）</button></div>
           <div v-if="!draft.sources.length" class="empty compact"><Server :size="28" /><h3>没有同步源</h3><p>Chronicle 支持保存多个云端配置，同时只启用其中一个。</p></div>
           <article v-for="source in draft.sources" v-else :key="source.id" class="source-card" :class="{ active: source.id === draft.activeSourceId }">
             <div class="source-title"><span><Server :size="17" /><b>{{ source.name }}</b><small v-if="source.id === draft.activeSourceId">当前使用</small></span><button class="icon-danger" :aria-label="`删除 ${source.name}`" @click="removeSource(source)"><Trash2 :size="15" /></button></div>

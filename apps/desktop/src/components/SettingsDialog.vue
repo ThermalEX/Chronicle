@@ -3,10 +3,11 @@ import { FolderOpen, HardDrive, Info, Keyboard, RotateCcw, Settings2, Trash2, Un
 import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { onMounted, reactive, ref } from "vue";
-import { appSettings, resetAppSettings, saveAppSettings, type AppSettings } from "../services/settings";
+import { appSettings, resetAppSettings, saveAppSettings, type AppSettings, type BackupSchedule, type CloseBehavior } from "../services/settings";
 import { archiveRepository } from "../services/repository";
 import type { RecycleItem } from "../domain";
 import ConfirmDialog from "./ConfirmDialog.vue";
+import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
 
 const emit = defineEmits<{ close: []; saved: [] }>();
 const activeSection = ref<"software" | "backup" | "recycle" | "hotkeys" | "about">("software");
@@ -17,6 +18,18 @@ const recycleItems = ref<RecycleItem[]>([]);
 const recycleBusy = ref(false);
 const recycleError = ref("");
 const confirmAction = ref<{ title: string; message: string; run: () => Promise<void> }>();
+const closeBehaviorOptions: ThemedSelectOption[] = [
+  { value: "ask", label: "每次询问" },
+  { value: "tray", label: "最小化到托盘" },
+  { value: "exit", label: "退出 Chronicle" },
+];
+const backupScheduleOptions: ThemedSelectOption[] = [
+  { value: "off", label: "关闭" },
+  { value: "15m", label: "每 15 分钟" },
+  { value: "1h", label: "每小时" },
+  { value: "6h", label: "每 6 小时" },
+  { value: "daily", label: "每天" },
+];
 
 const sections = [
   { id: "software" as const, label: "软件", icon: Settings2 },
@@ -82,6 +95,14 @@ function toggleRetentionLimit(event: Event): void {
   draft.retentionCount = unlimited ? null : 30;
 }
 
+function updateCloseBehavior(value: string | null): void {
+  if (value) draft.closeBehavior = value as CloseBehavior;
+}
+
+function updateBackupSchedule(value: string | null): void {
+  if (value) draft.backupSchedule = value as BackupSchedule;
+}
+
 function reset(): void {
   resetAppSettings();
   Object.assign(draft, appSettings);
@@ -118,7 +139,7 @@ onMounted(() => { closeButton.value?.focus(); void loadRecycleItems(); });
               <label class="setting-row"><span><b>随系统启动</b><small>登录 Windows 后自动启动 Chronicle</small></span><input v-model="draft.launchAtStartup" type="checkbox" role="switch" /></label>
               <label class="setting-row"><span><b>自动检查更新</b><small>启动后检查稳定版本更新</small></span><input v-model="draft.checkForUpdates" type="checkbox" role="switch" /></label>
               <label class="setting-row"><span><b>桌面通知</b><small>备份、同步和恢复完成后显示通知</small></span><input v-model="draft.notifications" type="checkbox" role="switch" /></label>
-              <label class="setting-row select-row"><span><b>关闭主窗口时</b><small>决定关闭按钮的默认行为</small></span><select v-model="draft.closeBehavior"><option value="ask">每次询问</option><option value="tray">最小化到托盘</option><option value="exit">退出 Chronicle</option></select></label>
+              <label class="setting-row select-row"><span><b>关闭主窗口时</b><small>决定关闭按钮的默认行为</small></span><ThemedSelect :model-value="draft.closeBehavior" :options="closeBehaviorOptions" label="关闭主窗口时" @update:model-value="updateCloseBehavior" /></label>
             </div>
           </section>
 
@@ -126,7 +147,7 @@ onMounted(() => { closeButton.value?.focus(); void loadRecycleItems(); });
             <div class="section-heading"><h3 id="backup-title">存储与备份</h3><p>设置新存档、自动备份和本地版本保留方式。</p></div>
             <div class="setting-group">
               <label class="setting-row"><span><b>立即创建首个备份</b><small>添加文件或文件夹后建立初始时间节点</small></span><input v-model="draft.createInitialSnapshot" type="checkbox" role="switch" /></label>
-              <label class="setting-row select-row"><span><b>自动备份频率</b><small>仅在 Chronicle 运行时执行</small></span><select v-model="draft.backupSchedule"><option value="off">关闭</option><option value="15m">每 15 分钟</option><option value="1h">每小时</option><option value="6h">每 6 小时</option><option value="daily">每天</option></select></label>
+              <label class="setting-row select-row"><span><b>自动备份频率</b><small>仅在 Chronicle 运行时执行</small></span><ThemedSelect :model-value="draft.backupSchedule" :options="backupScheduleOptions" label="自动备份频率" @update:model-value="updateBackupSchedule" /></label>
               <div class="setting-row"><span><b>每个存档保留版本</b><small>默认保留全部版本；设置上限后清理最旧的普通备份</small></span><div class="retention-control"><label><input :checked="draft.retentionCount === null" type="checkbox" role="switch" @change="toggleRetentionLimit" /><span>无限制</span></label><input v-if="draft.retentionCount !== null" v-model.number="draft.retentionCount" aria-label="版本保留数量" class="number-input" type="number" min="1" max="999" /></div></div>
               <label class="setting-row"><span><b>启用回收站</b><small>删除的存档先移入回收站；关闭后直接永久删除</small></span><input v-model="draft.recycleBinEnabled" type="checkbox" role="switch" /></label>
               <div class="setting-row recycle-path"><span><b>回收站位置</b><small>留空时使用 Chronicle 本地资料库中的 recycle 文件夹</small></span><div><input v-model.trim="draft.recycleBinPath" type="text" placeholder="默认位置" :disabled="!draft.recycleBinEnabled" /><button aria-label="选择回收站文件夹" :disabled="!draft.recycleBinEnabled || !isTauri()" @click="chooseRecycleBinPath"><FolderOpen :size="15" /></button></div></div>
@@ -195,7 +216,7 @@ main { min-width: 0; overflow-y: auto; padding: 28px 32px 36px; }
 .setting-row > span { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
 .setting-row b { font-size: 12px; font-weight: 650; }
 .setting-row small { color: var(--text-3); font-size: 10px; line-height: 1.4; }
-select, .setting-row input[type="text"], .number-input { min-width: 152px; height: 34px; padding: 0 9px; color: #263431; background: #f8faf9; border: 1px solid var(--border-2); border-radius: 6px; font-size: 11px; }
+.select-row :deep(.themed-select), .setting-row input[type="text"], .number-input { min-width: 152px; }
 .setting-row input[type="checkbox"] { position: relative; width: 38px; height: 22px; flex: none; appearance: none; background: #cbd5d1; border-radius: 20px; cursor: pointer; transition: background .16s ease; }
 .setting-row input[type="checkbox"]::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; background: #fff; border-radius: 50%; box-shadow: 0 1px 3px #102b2738; transition: transform .16s ease; }
 .setting-row input[type="checkbox"]:checked { background: var(--primary); }

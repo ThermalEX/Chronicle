@@ -2,6 +2,7 @@
 import { File, Folder, HardDrive, Plus, Trash2, UploadCloud, X } from "@lucide/vue";
 import { onMounted, ref, watch } from "vue";
 import type { ArchiveSource, ArchiveSyncMode, CreateArchiveInput, SourceKind, StoragePolicy } from "../domain";
+import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
 
 const props = defineProps<{
   sources: ArchiveSource[];
@@ -26,6 +27,10 @@ const syncMode = ref<ArchiveSyncMode>(props.editSyncMode ?? "manual");
 const createInitialSnapshot = ref(props.defaultInitialSnapshot);
 const nameInput = ref<HTMLInputElement>();
 const attempted = ref(false);
+const syncModeOptions: ThemedSelectOption[] = [
+  { value: "manual", label: "手动同步" },
+  { value: "automatic", label: "本地变更后自动上传" },
+];
 
 watch(() => props.sources, (sources) => {
   if (!name.value && sources.length === 1) name.value = sources[0].name;
@@ -41,6 +46,10 @@ function submit(): void {
     createInitialSnapshot: createInitialSnapshot.value,
     syncMode: syncMode.value,
   });
+}
+
+function updateSyncMode(value: string | null): void {
+  if (value === "manual" || value === "automatic") syncMode.value = value;
 }
 
 onMounted(() => nameInput.value?.focus());
@@ -83,7 +92,7 @@ onMounted(() => nameInput.value?.focus());
             <label :class="{ selected: storagePolicy === 'local_and_remote' }"><input v-model="storagePolicy" type="radio" value="local_and_remote" /><UploadCloud :size="16" /><span><b>本地与云端</b><small>云端接入后自动加入同步</small></span></label>
           </div></div>
 
-        <label v-if="storagePolicy === 'local_and_remote'" class="field sync-mode-field"><span>同步方案</span><select v-model="syncMode"><option value="manual">手动同步</option><option value="automatic">本地变更后自动上传</option></select><small>自动模式不会在启动时下载远端内容。</small></label>
+        <label v-if="storagePolicy === 'local_and_remote'" class="field sync-mode-field"><span>同步方案</span><ThemedSelect :model-value="syncMode" :options="syncModeOptions" label="同步方案" @update:model-value="updateSyncMode" /><small>自动模式不会在启动时下载远端内容。</small></label>
 
         <label v-if="!editName" class="initial-toggle"><span><b>创建后立即备份</b><small>生成第一个可恢复的 7z 时间节点</small></span><input v-model="createInitialSnapshot" type="checkbox" role="switch" /></label>
         <p v-if="error" class="submit-error" role="alert">{{ error }}</p>
@@ -102,7 +111,7 @@ header { border-bottom: 1px solid var(--border); } header p, header h2 { margin:
 header button { display: grid; place-items: center; width: 38px; height: 38px; background: transparent; border-radius: 7px; } header button:hover, .cancel:hover { background: var(--hover); }
 main { overflow-y: auto; padding: 23px 26px 28px; }
 .field { display: flex; flex-direction: column; gap: 7px; } .field > span, legend { color: var(--text-2); font-size: 10px; font-weight: 700; }
-input[type="text"], select { width: 100%; height: 38px; padding: 0 11px; color: #263431; background: #f8faf9; border: 1px solid var(--border-2); border-radius: 7px; font-size: 11px; } input[aria-invalid="true"] { border-color: #b83a32; }
+input[type="text"] { width: 100%; height: 38px; padding: 0 11px; color: #263431; background: #f8faf9; border: 1px solid var(--border-2); border-radius: 7px; font-size: 11px; } input[aria-invalid="true"] { border-color: #b83a32; }
 fieldset { margin: 20px 0; padding: 15px; border: 1px solid var(--border); border-radius: 9px; } legend { padding: 0 6px; } fieldset > p { margin: 0 0 12px; color: var(--text-3); font-size: 10px; }
 .source-actions { display: flex; gap: 8px; } .source-actions button { display: inline-flex; align-items: center; gap: 7px; min-height: 35px; padding: 0 11px; color: var(--primary-dark); background: var(--primary-soft); border: 1px solid #c5ded8; border-radius: 7px; font-size: 10px; font-weight: 650; }
 .source-list { margin-top: 12px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; } .source-list > div { display: grid; grid-template-columns: 32px minmax(0, 1fr) 34px; align-items: center; min-height: 54px; padding: 6px 8px; } .source-list > div + div { border-top: 1px solid var(--border); } .source-icon { display: grid; place-items: center; width: 28px; height: 28px; color: var(--primary); background: var(--primary-soft); border-radius: 6px; } .source-list span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 3px; } .source-list b { font-size: 10px; } .source-list small { overflow: hidden; color: var(--text-3); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; } .source-list button { display: grid; place-items: center; width: 32px; height: 32px; color: var(--text-3); background: transparent; border-radius: 6px; } .source-list button:hover { color: #b83a32; background: #fff0ef; }
@@ -113,5 +122,6 @@ fieldset { margin: 20px 0; padding: 15px; border: 1px solid var(--border); borde
 footer { border-top: 1px solid var(--border); color: var(--text-3); font-size: 9px; } footer > div { display: flex; gap: 8px; } footer button { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 13px; border-radius: 7px; font-size: 10px; font-weight: 650; } .cancel { background: transparent; } .submit { color: #fff; background: var(--primary); } .submit:hover { background: var(--primary-dark); }
 button:disabled { opacity: .55; cursor: default; }
 .sync-mode-field { margin-top: 16px; }.sync-mode-field small { color: var(--text-3); font-size: 9px; }
+.sync-mode-field :deep(.trigger) { height: 38px; border-radius: 7px; font-size: 11px; }
 @media (max-width: 760px) { .storage-options { grid-template-columns: 1fr; } .create-dialog { width: calc(100vw - 28px); max-height: calc(100vh - 28px); } .dialog-backdrop { padding: 14px; } }
 </style>

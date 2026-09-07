@@ -2,12 +2,24 @@
 import { CheckCircle2, CloudCog, LockKeyhole, X } from "@lucide/vue";
 import { onMounted, reactive, ref } from "vue";
 import { cloudSettings, saveCloudSettings, type CloudSettings } from "../services/settings";
+import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
 
 const emit = defineEmits<{ close: []; saved: [] }>();
 const closeButton = ref<HTMLButtonElement>();
 const draft = reactive<any>({ ...cloudSettings });
 const password = ref("");
 const saving = ref(false);
+const directionOptions: ThemedSelectOption[] = [
+  { value: "bidirectional", label: "双向同步" },
+  { value: "upload", label: "仅上传" },
+  { value: "download", label: "仅下载" },
+];
+const conflictOptions: ThemedSelectOption[] = [
+  { value: "ask", label: "每次询问" },
+  { value: "newest", label: "保留较新版本" },
+  { value: "local", label: "优先本地" },
+  { value: "remote", label: "优先远端" },
+];
 
 async function save(): Promise<void> {
   draft.maxConcurrentMetadataReads = Math.max(1, Math.min(4, Number(draft.maxConcurrentMetadataReads) || 2));
@@ -44,7 +56,7 @@ onMounted(() => closeButton.value?.focus());
 
         <fieldset :disabled="!draft.enabled">
           <legend>同步策略</legend>
-          <div class="field-grid"><label><span>同步方向</span><select v-model="draft.syncDirection"><option value="bidirectional">双向同步</option><option value="upload">仅上传</option><option value="download">仅下载</option></select></label><label><span>冲突处理</span><select v-model="draft.conflictStrategy"><option value="ask">每次询问</option><option value="newest">保留较新版本</option><option value="local">优先本地</option><option value="remote">优先远端</option></select></label></div>
+          <div class="field-grid"><label><span>同步方向</span><ThemedSelect v-model="draft.syncDirection" :options="directionOptions" label="同步方向" /></label><label><span>冲突处理</span><ThemedSelect v-model="draft.conflictStrategy" :options="conflictOptions" label="冲突处理" /></label></div>
           <label class="inline-toggle"><span><b>启动时同步</b><small>打开 Chronicle 后检查远端变化</small></span><input v-model="draft.syncOnLaunch" type="checkbox" role="switch" /></label>
         </fieldset>
 
@@ -76,8 +88,9 @@ main { overflow-y: auto; padding: 22px 26px 28px; }
 input[type="checkbox"] { position: relative; width: 38px; height: 22px; flex: none; appearance: none; background: #cbd5d1; border-radius: 20px; cursor: pointer; }input[type="checkbox"]::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; background: #fff; border-radius: 50%; box-shadow: 0 1px 3px #102b2738; transition: transform .16s ease; }input[type="checkbox"]:checked { background: var(--primary); }input[type="checkbox"]:checked::after { transform: translateX(16px); }
 fieldset { display: grid; gap: 14px; margin: 20px 0 0; padding: 17px; border: 1px solid var(--border); border-radius: 9px; }fieldset:disabled { opacity: .52; }legend { padding: 0 6px; color: var(--text-2); font-size: 10px; font-weight: 700; }
 label { display: flex; flex-direction: column; gap: 6px; }label > span { color: var(--text-2); font-size: 10px; font-weight: 650; }
-input[type="text"], input[type="url"], input[type="password"], input[type="number"], select { width: 100%; height: 36px; padding: 0 10px; color: #263431; background: #f8faf9; border: 1px solid var(--border-2); border-radius: 6px; font-size: 11px; }
+input[type="text"], input[type="url"], input[type="password"], input[type="number"] { width: 100%; height: 36px; padding: 0 10px; color: #263431; background: #f8faf9; border: 1px solid var(--border-2); border-radius: 6px; font-size: 11px; }
 .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }.inline-toggle { flex-direction: row; min-height: 48px; }.security-note { display: flex; align-items: center; gap: 7px; margin: 0; color: var(--text-3); font-size: 9px; }
+.field-grid :deep(.trigger) { height: 36px; font-size: 11px; }
 .connection-state { display: grid; grid-template-columns: 18px 1fr; align-items: center; gap: 9px; margin-top: 17px; padding: 11px 13px; color: var(--primary); background: #f3f8f6; border-radius: 7px; }
 footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 0 20px; border-top: 1px solid var(--border); }footer button { min-height: 36px; padding: 0 13px; border-radius: 7px; font-size: 11px; font-weight: 650; }.cancel-button { background: transparent; }.cancel-button:hover { background: var(--hover); }.save-button { color: #fff; background: var(--primary); }.save-button:hover { background: var(--primary-dark); }
 @media (max-width: 800px) { .field-grid { grid-template-columns: 1fr; } }

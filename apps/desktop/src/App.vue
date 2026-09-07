@@ -12,6 +12,7 @@ import ConfirmDialog from "./components/ConfirmDialog.vue";
 import CreateCategoryDialog from "./components/CreateCategoryDialog.vue";
 import CreateArchiveDialog from "./components/CreateArchiveDialog.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
+import ThemedSelect, { type ThemedSelectOption } from "./components/ThemedSelect.vue";
 import type { ArchiveRecord, ArchiveSource, CategoryRecord, CreateArchiveInput, RepositoryInfo, SnapshotProgress, SnapshotRecord, SourceKind } from "./domain";
 import { archiveRepository, isTauriRuntime } from "./services/repository";
 import { cloudRepository } from "./services/cloud";
@@ -349,19 +350,34 @@ async function deleteCategory(categoryId: string) {
   }
 }
 
-async function moveArchiveFromMenu(archiveId: string, event: Event) {
-  const value = (event.target as HTMLSelectElement).value;
+function archiveMoveOptions(): ThemedSelectOption[] {
+  return [
+    { value: null, label: "根目录" },
+    ...categoryRecords.value.map((category) => ({ value: category.id, label: category.name })),
+  ];
+}
+
+function categoryMoveOptions(categoryId: string): ThemedSelectOption[] {
+  const excluded = descendantIds(categoryId);
+  return [
+    { value: null, label: "根目录" },
+    ...categoryRecords.value
+      .filter((category) => !excluded.has(category.id))
+      .map((category) => ({ value: category.id, label: category.name })),
+  ];
+}
+
+async function moveArchiveFromMenu(archiveId: string, value: string | null) {
   try {
-    await archiveRepository.setArchiveCategory(archiveId, value || undefined);
+    await archiveRepository.setArchiveCategory(archiveId, value ?? undefined);
     treeMenu.value = undefined;
     await refreshArchives(archiveId);
   } catch (error) { showNotice(readableError(error), "error"); }
 }
 
-async function moveCategoryFromMenu(categoryId: string, event: Event) {
-  const value = (event.target as HTMLSelectElement).value;
+async function moveCategoryFromMenu(categoryId: string, value: string | null) {
   try {
-    await archiveRepository.moveCategory(categoryId, value || undefined);
+    await archiveRepository.moveCategory(categoryId, value ?? undefined);
     treeMenu.value = undefined;
     await refreshCategories();
   } catch (error) { showNotice(readableError(error), "error"); }
@@ -685,12 +701,12 @@ onBeforeUnmount(() => {
             <button v-if="node.id !== 'all'" class="disclosure" :class="{ hidden: !node.hasChildren }" :aria-label="`${expandedCategoryIds.has(node.id) ? '折叠' : '展开'} ${node.name}`" :aria-expanded="node.hasChildren ? expandedCategoryIds.has(node.id) : undefined" @click="toggleCategory(node.id)"><ChevronDown v-if="expandedCategoryIds.has(node.id)" :size="14" /><ChevronRight v-else :size="14" /></button>
             <span v-else class="disclosure-spacer"></span>
             <button class="category-select" :draggable="node.id !== 'all'" :title="node.id === 'all' ? '将分类或存档拖到这里可移至根目录' : undefined" @dragstart.stop="node.id !== 'all' && startCategoryDrag(node.id, $event)" @click="selectCategory(node.id)"><component :is="node.icon" :size="17" /><span>{{ node.name }}</span><span class="category-suffix"><LockKeyhole v-if="node.id === 'all'" :size="12" aria-label="固定根目录" /><small>{{ node.count }}</small></span></button>
-            <div v-if="node.id !== 'all'" class="tree-more"><button aria-label="分类操作" :aria-expanded="treeMenu?.kind === 'category' && treeMenu.id === node.id" @click="treeMenu = treeMenu?.id === node.id ? undefined : { kind: 'category', id: node.id }"><MoreHorizontal :size="14" /></button><div v-if="treeMenu?.kind === 'category' && treeMenu.id === node.id" class="tree-menu"><label>移动到<select :value="node.parentId ?? ''" @change="moveCategoryFromMenu(node.id, $event)"><option value="">根目录</option><option v-for="target in categoryRecords.filter((item) => !descendantIds(node.id).has(item.id))" :key="target.id" :value="target.id">{{ target.name }}</option></select></label><button class="danger" @click="deleteCategory(node.id)"><Trash2 :size="13" />删除分类</button></div></div>
+            <div v-if="node.id !== 'all'" class="tree-more"><button aria-label="分类操作" :aria-expanded="treeMenu?.kind === 'category' && treeMenu.id === node.id" @click="treeMenu = treeMenu?.id === node.id ? undefined : { kind: 'category', id: node.id }"><MoreHorizontal :size="14" /></button><div v-if="treeMenu?.kind === 'category' && treeMenu.id === node.id" class="tree-menu"><label>移动到<ThemedSelect :model-value="node.parentId ?? null" :options="categoryMoveOptions(node.id)" :label="`移动分类 ${node.name}`" @update:model-value="moveCategoryFromMenu(node.id, $event)" /></label><button class="danger" @click="deleteCategory(node.id)"><Trash2 :size="13" />删除分类</button></div></div>
           </div>
           <div v-else class="archive-tree-row" :class="{ active: activeTreeNodeId === `archive:${node.id}` }" :style="{ paddingLeft: `${4 + node.depth * 16}px` }" @dragend="finishDrag">
             <span class="disclosure-spacer"></span>
             <button class="archive-tree-select" draggable="true" :title="node.archive.name" @dragstart.stop="startArchiveDrag(node.id, $event)" @click="selectArchiveFromTree(node.archive)"><File :size="16" /><span>{{ node.archive.name }}</span></button>
-            <div class="tree-more"><button aria-label="存档移动操作" :aria-expanded="treeMenu?.kind === 'archive' && treeMenu.id === node.id" @click="treeMenu = treeMenu?.id === node.id ? undefined : { kind: 'archive', id: node.id }"><MoreHorizontal :size="14" /></button><div v-if="treeMenu?.kind === 'archive' && treeMenu.id === node.id" class="tree-menu"><label>移动到<select :value="node.archive.categoryId ?? ''" @change="moveArchiveFromMenu(node.id, $event)"><option value="">根目录</option><option v-for="target in categoryRecords" :key="target.id" :value="target.id">{{ target.name }}</option></select></label><button class="danger" @click="deleteArchive(node.archive)"><Trash2 :size="13" />删除存档</button></div></div>
+            <div class="tree-more"><button aria-label="存档移动操作" :aria-expanded="treeMenu?.kind === 'archive' && treeMenu.id === node.id" @click="treeMenu = treeMenu?.id === node.id ? undefined : { kind: 'archive', id: node.id }"><MoreHorizontal :size="14" /></button><div v-if="treeMenu?.kind === 'archive' && treeMenu.id === node.id" class="tree-menu"><label>移动到<ThemedSelect :model-value="node.archive.categoryId ?? null" :options="archiveMoveOptions()" :label="`移动存档 ${node.archive.name}`" @update:model-value="moveArchiveFromMenu(node.id, $event)" /></label><button class="danger" @click="deleteArchive(node.archive)"><Trash2 :size="13" />删除存档</button></div></div>
           </div>
         </template>
       </nav>

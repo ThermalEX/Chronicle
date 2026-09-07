@@ -214,3 +214,5 @@ kbd { padding: 2px 5px; color: var(--text-3); background: #edf1ef; border: 1px s
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+.tree-menu .themed-select { width: 100%; }
+.tree-menu .themed-select .trigger { height: 30px; padding: 0 7px; font-size: 10px; }
