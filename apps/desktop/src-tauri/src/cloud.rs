@@ -315,12 +315,8 @@ pub async fn cloud_preview(
     state: State<'_, AppState>,
     source_id: String,
 ) -> Result<CloudPreviewDto, String> {
-    let (client, source, _) = configured_client(&state, &source_id)?;
-    let library: Option<Value> = match client.get_json("config/library.json").await {
-        Ok(value) => Some(value),
-        Err(WebDavError::NotFound(_)) => None,
-        Err(error) => return Err(error.to_string()),
-    };
+    let (client, source, root) = configured_client(&state, &source_id)?;
+    let library = ensure_remote_library(&client, &root).await?;
     let catalog: Option<Catalog> = match client.get_json("data/catalog.json").await {
         Ok(value) => Some(value),
         Err(WebDavError::NotFound(_)) => None,
@@ -335,8 +331,7 @@ pub async fn cloud_preview(
             snapshot_count: 0,
             size_bytes: 0,
             updated_at: library
-                .as_ref()
-                .and_then(|value| value.get("updatedAtMs"))
+                .get("updatedAtMs")
                 .and_then(Value::as_u64),
             sync_mode: "manual".into(),
         },
@@ -365,12 +360,10 @@ pub async fn cloud_preview(
     }
     Ok(CloudPreviewDto {
         source_name: source.name,
-        library_id: library.and_then(|value| {
-            value
-                .get("libraryId")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        }),
+        library_id: library
+            .get("libraryId")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         items,
     })
 }
@@ -383,6 +376,29 @@ async fn ensure_remote_layout(client: &WebDavClient) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+async fn ensure_remote_library(client: &WebDavClient, root: &Path) -> Result<Value, String> {
+    match client.get_json("config/library.json").await {
+        Ok(value) => Ok(value),
+        Err(WebDavError::NotFound(_)) => {
+            ensure_remote_layout(client).await?;
+            let library_path = root.join("config/library.json");
+            let mut library = if library_path.is_file() {
+                read_json::<Value>(&library_path)?
+            } else {
+                serde_json::json!({ "formatVersion": 1, "libraryId": Uuid::new_v4().to_string() })
+            };
+            library["updatedAtMs"] = Value::from(unix_millis());
+            write_json_atomic(&library_path, &library)?;
+            client
+                .put_json("config/library.json", &library)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(library)
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 fn merge_catalog_entry(
