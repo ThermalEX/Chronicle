@@ -96,4 +96,9 @@ input[type="text"], input[type="url"], input[type="password"], input[type="numbe
 .connection-state { display: grid; grid-template-columns: 18px 1fr; align-items: center; gap: 9px; margin-top: 17px; padding: 11px 13px; color: var(--primary); background: #f3f8f6; border-radius: 7px; }
 footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 0 20px; border-top: 1px solid var(--border); }footer button { min-height: 36px; padding: 0 13px; border-radius: 7px; font-size: 11px; font-weight: 650; }.cancel-button { background: transparent; }.cancel-button:hover { background: var(--hover); }.save-button { color: #fff; background: var(--primary); }.save-button:hover { background: var(--primary-dark); }
 @media (max-width: 800px) { .field-grid { grid-template-columns: 1fr; } }
+input[type="checkbox"] { background: var(--border-2); }
+input[type="checkbox"]::after { background: var(--surface); }
+input[type="text"], input[type="url"], input[type="password"], input[type="number"] { color: var(--text); background: var(--field); }
+.connection-state { background: var(--primary-soft); }
+.save-button { color: var(--on-primary); }
 </style>

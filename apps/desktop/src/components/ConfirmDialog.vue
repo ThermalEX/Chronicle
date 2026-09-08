@@ -36,4 +36,6 @@ header p, header h2 { margin: 0; }header p { color: var(--text-3); font-size: 9p
 header button { display: grid; place-items: center; width: 38px; height: 38px; background: transparent; border-radius: 7px; }header button:hover { background: var(--hover); }
 .message { margin: 0; padding: 20px 22px; color: var(--text-2); font-size: 12px; line-height: 1.65; white-space: pre-line; }
 footer { display: flex; justify-content: flex-end; gap: 8px; padding: 13px 18px; background: #f8faf9; border-top: 1px solid var(--border); }footer button { min-height: 36px; padding: 0 14px; border-radius: 7px; font-size: 11px; font-weight: 650; }.cancel { background: transparent; }.cancel:hover { background: var(--hover); }.confirm { color: #fff; background: var(--primary); }.confirm.destructive { background: #b42318; }.confirm.destructive:hover { background: #912018; }
+.confirm-dialog, footer { background: var(--surface); }
+.confirm { color: var(--on-primary); }
 </style>

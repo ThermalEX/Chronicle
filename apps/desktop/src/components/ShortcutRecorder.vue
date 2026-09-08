@@ -53,4 +53,6 @@ function capture(event: KeyboardEvent): void {
 
 <style scoped>
 .shortcut-recorder { display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: 194px; min-height: 38px; padding: 0 12px; color: var(--text-2); background: #f8faf9; border: 1px solid var(--border-2); border-radius: 7px; font-family: "Cascadia Code", Consolas, monospace; font-size: 11px; font-weight: 650; letter-spacing: .02em; transition: border-color .16s ease, background .16s ease, box-shadow .16s ease; }.shortcut-recorder:hover { color: var(--primary-dark); border-color: #8bbdb4; background: #fff; }.shortcut-recorder.recording { color: var(--primary-dark); background: var(--primary-soft); border-color: var(--primary); box-shadow: 0 0 0 2px #0d8b7d1f; }.shortcut-recorder:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }.shortcut-recorder span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shortcut-recorder { background: var(--field); }
+.shortcut-recorder:hover { border-color: var(--primary); background: var(--surface-raised); }
 </style>

@@ -49,4 +49,7 @@ main { padding: 22px 24px 26px; } .parent-path { margin: 0 0 16px; padding: 9px 
 label { display: block; margin-bottom: 7px; color: var(--text-2); font-size: 10px; font-weight: 700; } input { width: 100%; height: 38px; padding: 0 11px; color: #263431; background: #f8faf9; border: 1px solid var(--border-2); border-radius: 7px; font-size: 12px; outline: none; } input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px #0f766e1f; } input[aria-invalid="true"] { border-color: #b83a32; }
 .field-error { display: block; margin-top: 6px; color: #a52e28; font-size: 9px; }.submit-error { margin: 13px 0 0; padding: 9px 11px; color: #a52e28; background: #fff0ef; border-radius: 7px; font-size: 9px; }
 footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 62px; padding: 0 18px; border-top: 1px solid var(--border); } footer button { min-height: 36px; padding: 0 14px; border-radius: 7px; font-size: 10px; font-weight: 650; }.cancel { background: transparent; }.submit { color: #fff; background: var(--primary); }.submit:hover { background: var(--primary-dark); }button:disabled { opacity: .55; cursor: wait; }
+input { color: var(--text); background: var(--field); }
+input:focus { box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 16%, transparent); }
+.submit { color: var(--on-primary); }
 </style>

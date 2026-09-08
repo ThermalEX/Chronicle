@@ -126,4 +126,10 @@ button:disabled { opacity: .55; cursor: default; }
 .sync-mode-field { margin-top: 16px; }.sync-mode-field small { color: var(--text-3); font-size: 9px; }
 .sync-mode-field :deep(.trigger) { height: 38px; border-radius: 7px; font-size: 11px; }
 @media (max-width: 760px) { .storage-options { grid-template-columns: 1fr; } .create-dialog { width: calc(100vw - 28px); max-height: calc(100vh - 28px); } .dialog-backdrop { padding: 14px; } }
+input[type="text"] { color: var(--text); background: var(--field); }
+.storage-options > label.selected { border-color: color-mix(in srgb, var(--primary) 35%, var(--border)); }
+.initial-toggle { background: var(--subtle); }
+.initial-toggle input { background: var(--border-2); }
+.initial-toggle input::after { background: var(--surface); }
+.submit { color: var(--on-primary); }
 </style>

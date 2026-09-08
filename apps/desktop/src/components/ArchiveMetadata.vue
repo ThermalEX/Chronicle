@@ -57,27 +57,27 @@ function addTag(): void {
 </template>
 
 <style scoped>
-.archive-metadata { display: grid; grid-template-columns: minmax(280px, 1.35fr) minmax(240px, 1fr); gap: 18px; padding: 12px 20px 14px; background: #fbfcfc; border-bottom: 1px solid var(--border); }
+.archive-metadata { display: grid; grid-template-columns: minmax(280px, 1.35fr) minmax(240px, 1fr); gap: 18px; padding: 12px 20px 14px; background: var(--surface-raised); border-bottom: 1px solid var(--border); }
 section { min-width: 0; }
 header { display: flex; align-items: center; gap: 7px; min-height: 20px; margin-bottom: 6px; }
 header b { color: var(--text-2); font-size: 10px; }
 header span { color: var(--text-3); font-size: 9px; }
 .source-list { display: flex; max-height: 108px; flex-direction: column; gap: 4px; overflow-y: auto; }
-.source-row { display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; min-height: 38px; padding: 4px 7px; background: #f2f6f4; border: 1px solid #e3e9e6; border-radius: 7px; }
+.source-row { display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; min-height: 38px; padding: 4px 7px; background: var(--subtle); border: 1px solid var(--border); border-radius: 7px; }
 .source-icon { display: grid; place-items: center; width: 24px; height: 24px; color: var(--primary); }
 .source-row > span:last-child { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .source-row b, .source-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.source-row b { color: #263431; font-size: 10px; }
+.source-row b { color: var(--text); font-size: 10px; }
 .source-row small { color: var(--text-3); font-size: 9px; }
 .tag-editor { display: flex; align-items: center; align-content: flex-start; gap: 5px; min-height: 38px; flex-wrap: wrap; }
-.tag-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 160px; min-height: 28px; padding-left: 7px; color: #38534e; background: #e8f1ef; border: 1px solid #d2e4e0; border-radius: 6px; font-size: 10px; font-weight: 600; }
+.tag-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 160px; min-height: 28px; padding-left: 7px; color: var(--primary-dark); background: var(--primary-soft); border: 1px solid color-mix(in srgb, var(--primary) 22%, var(--border)); border-radius: 6px; font-size: 10px; font-weight: 600; }
 .tag-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tag-chip button { display: grid; place-items: center; width: 26px; height: 26px; flex: none; color: var(--text-3); background: transparent; border-radius: 5px; }
-.tag-chip button:hover { color: #a52e28; background: #fff0ef; }
+.tag-chip button:hover { color: var(--danger); background: var(--danger-soft); }
 .tag-empty { color: var(--text-3); font-size: 9px; }
-.tag-input { display: grid; grid-template-columns: 16px minmax(70px, 1fr) 28px; align-items: center; width: 142px; min-height: 30px; padding-left: 7px; color: var(--text-3); background: #fff; border: 1px solid var(--border-2); border-radius: 6px; }
-.tag-input:focus-within { border-color: #0d9488; box-shadow: 0 0 0 2px #0d948822; }
-.tag-input input { min-width: 0; height: 28px; padding: 0 3px; color: #263431; background: transparent; border: 0; outline: 0; font-size: 10px; }
+.tag-input { display: grid; grid-template-columns: 16px minmax(70px, 1fr) 28px; align-items: center; width: 142px; min-height: 30px; padding-left: 7px; color: var(--text-3); background: var(--field); border: 1px solid var(--border-2); border-radius: 6px; }
+.tag-input:focus-within { border-color: var(--primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 18%, transparent); }
+.tag-input input { min-width: 0; height: 28px; padding: 0 3px; color: var(--text); background: transparent; border: 0; outline: 0; font-size: 10px; }
 .tag-input button { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; color: var(--primary); background: transparent; border-radius: 5px; }
 .tag-input button:hover:not(:disabled) { background: var(--primary-soft); }
 .tag-input button:disabled { color: #a8b2ae; cursor: default; opacity: 1; }
