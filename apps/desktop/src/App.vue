@@ -16,6 +16,8 @@ import ThemedSelect, { type ThemedSelectOption } from "./components/ThemedSelect
 import type { ArchiveRecord, ArchiveSource, CategoryRecord, CreateArchiveInput, RepositoryInfo, SnapshotProgress, SnapshotRecord, SourceKind } from "./domain";
 import { archiveRepository, isTauriRuntime } from "./services/repository";
 import { cloudRepository } from "./services/cloud";
+import { diagnosticsRepository } from "./services/diagnostics";
+import { diagnosticFromError, type DiagnosticContext } from "./services/diagnosticsCore";
 import { compareArchiveNames, type ArchiveSortMode } from "./services/archiveSorting";
 import { appSettings, cloudSettings, initializeSettings, shortcutMatches } from "./services/settings";
 
@@ -88,7 +90,7 @@ function queueAutomaticUpload(archive?: ArchiveRecord): void {
   automaticSyncTimers.set(archive.id, window.setTimeout(async () => {
     automaticSyncTimers.delete(archive.id);
     try { await cloudRepository.upload(cloudSettings.activeSourceId!, archive.id); showNotice(`“${archive.name}”已自动上传`); }
-    catch (error) { showNotice(`自动上传失败：${readableError(error)}`, "error"); }
+    catch (error) { reportError(error, { operation: "自动上传", archiveId: archive.id, sourceId: cloudSettings.activeSourceId ?? undefined }); }
   }, 1200));
 }
 
@@ -155,7 +157,13 @@ function showNotice(message: string, type: "success" | "error" | "info" = "succe
 }
 
 function readableError(error: unknown): string {
-  return error instanceof Error ? error.message : "操作失败";
+  return diagnosticFromError(error, { operation: "应用操作" }).message;
+}
+
+function reportError(error: unknown, context: DiagnosticContext): void {
+  const entry = diagnosticFromError(error, context);
+  showNotice(entry.message, "error");
+  void diagnosticsRepository.record(error, context).catch(() => undefined);
 }
 
 function formatBytes(bytes: number): string {
@@ -208,7 +216,7 @@ async function openRepositoryFolder() {
   try {
     await archiveRepository.openRepositoryFolder();
   } catch (error) {
-    showNotice(readableError(error), "error");
+    reportError(error, { operation: "打开资料库" });
   }
 }
 
@@ -399,7 +407,7 @@ async function createSnapshot(title = "手动备份") {
     queueAutomaticUpload(archives.value.find((archive) => archive.id === selectedArchive.value?.id));
     showNotice(`时间节点已创建，保存 ${snapshot.files.length} 个文件`);
   } catch (error) {
-    showNotice(readableError(error), "error");
+    reportError(error, { operation: "创建备份", archiveId: selectedArchive.value?.id });
   } finally {
     busyAction.value = undefined;
     snapshotProgress.value = undefined;
@@ -429,7 +437,7 @@ async function syncSelectedArchive() {
     await refreshSnapshots(archive.id);
     showNotice(result.message, result.status === "conflict" ? "info" : "success");
   } catch (error) {
-    showNotice(readableError(error), "error");
+    reportError(error, { operation: "同步存档", archiveId: archive.id, sourceId: cloudSettings.activeSourceId });
   } finally {
     syncingArchive.value = false;
   }

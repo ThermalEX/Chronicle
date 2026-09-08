@@ -3,6 +3,7 @@ import { CheckCircle2, ChevronDown, CloudCog, Download, FileJson, Plus, RefreshC
 import { computed, onMounted, reactive, ref } from "vue";
 import { cloudRepository, type CloudPreview, type RemoteItem } from "../services/cloud";
 import { cloudSettings, saveCloudSettings, type CloudSettings, type CloudSource } from "../services/settings";
+import { createBackdropDismissal } from "../services/dialogDismissal";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
 
@@ -14,6 +15,7 @@ const closeButton = ref<HTMLButtonElement>();
 const preview = ref<CloudPreview>();
 const selected = ref<string[]>([]);
 const busy = ref("");
+const backdrop = createBackdropDismissal(() => emit("close"), () => !busy.value);
 const feedback = ref("");
 const error = ref("");
 const confirmAction = ref<{ title: string; message: string; run: () => Promise<void> }>();
@@ -146,7 +148,7 @@ onMounted(() => { closeButton.value?.focus(); if (activeSource.value) void loadP
 </script>
 
 <template>
-  <div class="dialog-backdrop" @click.self="emit('close')">
+  <div class="dialog-backdrop" @pointerdown="backdrop.pointerDown" @pointerup="backdrop.pointerUp" @pointercancel="backdrop.pointerCancel">
     <section class="cloud-center" role="dialog" aria-modal="true" aria-labelledby="cloud-title">
       <header><div class="heading-icon"><CloudCog :size="21" /></div><div><p>同步服务</p><h2 id="cloud-title">云端设置</h2></div><button ref="closeButton" aria-label="关闭云端设置" @click="emit('close')"><X :size="18" /></button></header>
       <nav aria-label="云端设置页面"><button :class="{ active: tab === 'repository' }" @click="tab = 'repository'; activeSource && loadPreview()">云端仓库</button><button :class="{ active: tab === 'sources' }" @click="tab = 'sources'">同步源</button></nav>

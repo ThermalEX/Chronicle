@@ -4,7 +4,7 @@ use chronicle_core::{
     Category, ChangeSummary, Entry, EntryKind, EntrySource, Snapshot, SnapshotFile, StoragePolicy,
     SyncMode,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Command;
@@ -89,6 +89,27 @@ pub struct SnapshotDto {
     safety: bool,
     device_id: String,
     device_name: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticEntryDto {
+    id: String,
+    occurred_at: u64,
+    operation: String,
+    #[serde(default)]
+    archive_id: Option<String>,
+    #[serde(default)]
+    source_id: Option<String>,
+    message: String,
+    details: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct DiagnosticsDocument {
+    #[serde(rename = "formatVersion")]
+    format_version: u8,
+    entries: Vec<DiagnosticEntryDto>,
 }
 
 fn entry_dto(entry: Entry, latest: Option<&Snapshot>, category_name: Option<String>) -> EntryDto {
@@ -440,6 +461,69 @@ pub fn save_settings(state: State<'_, AppState>, settings: Value) -> Result<(), 
     repository
         .save_settings(&settings)
         .map_err(|error| error.to_string())
+}
+
+fn diagnostics_path(repository: &chronicle_storage::LocalRepository) -> PathBuf {
+    repository.root().join("config").join("diagnostics.json")
+}
+
+fn read_diagnostics(path: &std::path::Path) -> Result<DiagnosticsDocument, String> {
+    if !path.is_file() {
+        return Ok(DiagnosticsDocument {
+            format_version: 1,
+            entries: Vec::new(),
+        });
+    }
+    serde_json::from_slice(&std::fs::read(path).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())
+}
+
+fn write_diagnostics(path: &std::path::Path, document: &DiagnosticsDocument) -> Result<(), String> {
+    let parent = path.parent().ok_or_else(|| "错误记录路径无效".to_owned())?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let temporary = parent.join(format!(".diagnostics-{}.tmp", uuid::Uuid::new_v4()));
+    std::fs::write(
+        &temporary,
+        serde_json::to_vec_pretty(document).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    std::fs::rename(temporary, path).map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
+pub fn append_diagnostic(
+    state: State<'_, AppState>,
+    entry: DiagnosticEntryDto,
+) -> Result<(), String> {
+    let repository = state.repository.lock().map_err(|_| state_error())?;
+    let path = diagnostics_path(&repository);
+    drop(repository);
+    let mut document = read_diagnostics(&path)?;
+    document.entries.insert(0, entry);
+    document.entries.truncate(200);
+    write_diagnostics(&path, &document)
+}
+
+#[tauri::command(async)]
+pub fn list_diagnostics(state: State<'_, AppState>) -> Result<Vec<DiagnosticEntryDto>, String> {
+    let repository = state.repository.lock().map_err(|_| state_error())?;
+    let path = diagnostics_path(&repository);
+    drop(repository);
+    Ok(read_diagnostics(&path)?.entries)
+}
+
+#[tauri::command(async)]
+pub fn clear_diagnostics(state: State<'_, AppState>) -> Result<(), String> {
+    let repository = state.repository.lock().map_err(|_| state_error())?;
+    let path = diagnostics_path(&repository);
+    drop(repository);
+    write_diagnostics(
+        &path,
+        &DiagnosticsDocument {
+            format_version: 1,
+            entries: Vec::new(),
+        },
+    )
 }
 
 #[tauri::command(async)]

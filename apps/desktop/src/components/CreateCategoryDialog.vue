@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { FolderPlus, X } from "@lucide/vue";
 import { onMounted, ref } from "vue";
+import { createBackdropDismissal } from "../services/dialogDismissal";
 
-defineProps<{ parentName?: string; submitting?: boolean; error?: string }>();
+const props = defineProps<{ parentName?: string; submitting?: boolean; error?: string }>();
 const emit = defineEmits<{ close: []; submit: [name: string] }>();
 const name = ref("");
 const attempted = ref(false);
 const input = ref<HTMLInputElement>();
+const backdrop = createBackdropDismissal(() => emit("close"), () => !props.submitting);
 
 function submit(): void {
   attempted.value = true;
@@ -17,7 +19,7 @@ onMounted(() => input.value?.focus());
 </script>
 
 <template>
-  <div class="dialog-backdrop" @click.self="emit('close')">
+  <div class="dialog-backdrop" @pointerdown="backdrop.pointerDown" @pointerup="backdrop.pointerUp" @pointercancel="backdrop.pointerCancel">
     <form class="category-dialog" role="dialog" aria-modal="true" aria-labelledby="category-dialog-title" @submit.prevent="submit">
       <header>
         <span class="dialog-icon"><FolderPlus :size="20" /></span>

@@ -2,6 +2,7 @@
 import { CheckCircle2, CloudCog, LockKeyhole, X } from "@lucide/vue";
 import { onMounted, reactive, ref } from "vue";
 import { cloudSettings, saveCloudSettings, type CloudSettings } from "../services/settings";
+import { createBackdropDismissal } from "../services/dialogDismissal";
 import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
 
 const emit = defineEmits<{ close: []; saved: [] }>();
@@ -9,6 +10,7 @@ const closeButton = ref<HTMLButtonElement>();
 const draft = reactive<any>({ ...cloudSettings });
 const password = ref("");
 const saving = ref(false);
+const backdrop = createBackdropDismissal(() => emit("close"), () => !saving.value);
 const directionOptions: ThemedSelectOption[] = [
   { value: "bidirectional", label: "双向同步" },
   { value: "upload", label: "仅上传" },
@@ -40,7 +42,7 @@ onMounted(() => closeButton.value?.focus());
 </script>
 
 <template>
-  <div class="dialog-backdrop" @click.self="emit('close')">
+  <div class="dialog-backdrop" @pointerdown="backdrop.pointerDown" @pointerup="backdrop.pointerUp" @pointercancel="backdrop.pointerCancel">
     <section class="cloud-dialog" role="dialog" aria-modal="true" aria-labelledby="cloud-title">
       <header><div class="heading-icon"><CloudCog :size="21" /></div><div><p>同步服务</p><h2 id="cloud-title">云端设置</h2></div><button ref="closeButton" aria-label="关闭云端设置" @click="emit('close')"><X :size="18" /></button></header>
       <main>

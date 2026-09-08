@@ -324,9 +324,7 @@ pub async fn cloud_preview(
             protected: true,
             snapshot_count: 0,
             size_bytes: 0,
-            updated_at: library
-                .get("updatedAtMs")
-                .and_then(Value::as_u64),
+            updated_at: library.get("updatedAtMs").and_then(Value::as_u64),
             sync_mode: "manual".into(),
         },
         RemoteItemDto {
@@ -728,9 +726,7 @@ async fn merge_remote_snapshots(
             .get("object_hash")
             .and_then(Value::as_str)
             .ok_or_else(|| "远端时间线缺少校验值".to_owned())?;
-        let temporary = root
-            .join(".tmp")
-            .join(format!("merge-{}", Uuid::new_v4()));
+        let temporary = root.join(".tmp").join(format!("merge-{}", Uuid::new_v4()));
         client
             .download_file(
                 &format!("archives/{remote_folder}/{archive_name}"),
@@ -820,8 +816,10 @@ pub async fn cloud_sync_entry(
                 .collect::<Vec<_>>();
             let remote_timeline = Value::Array(remote_entry.snapshots.clone());
             let remote_ids = snapshot_ids_from_timeline(&remote_timeline);
-            let mut local_metadata = serde_json::to_value(local_entry).map_err(|error| error.to_string())?;
-            let mut remote_metadata = serde_json::to_value(remote_entry).map_err(|error| error.to_string())?;
+            let mut local_metadata =
+                serde_json::to_value(local_entry).map_err(|error| error.to_string())?;
+            let mut remote_metadata =
+                serde_json::to_value(remote_entry).map_err(|error| error.to_string())?;
             for metadata in [&mut local_metadata, &mut remote_metadata] {
                 metadata["snapshots"] = Value::Array(Vec::new());
                 metadata["snapshot_count"] = Value::from(0);

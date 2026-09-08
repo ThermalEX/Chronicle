@@ -1,23 +1,29 @@
 <script setup lang="ts">
-import { FolderOpen, HardDrive, Info, Keyboard, RotateCcw, Settings2, Trash2, Undo2, X } from "@lucide/vue";
+import { BellRing, ClipboardCopy, FolderOpen, HardDrive, Info, Keyboard, RotateCcw, Settings2, Trash2, Undo2, X } from "@lucide/vue";
 import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { appSettings, resetAppSettings, saveAppSettings, type AppSettings, type BackupSchedule, type CloseBehavior } from "../services/settings";
 import { archiveRepository } from "../services/repository";
+import { createBackdropDismissal } from "../services/dialogDismissal";
+import { diagnosticsRepository, type DiagnosticEntry } from "../services/diagnostics";
 import type { RecycleItem } from "../domain";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
 
 const emit = defineEmits<{ close: []; saved: [] }>();
-const activeSection = ref<"software" | "backup" | "recycle" | "hotkeys" | "about">("software");
+const activeSection = ref<"software" | "notifications" | "backup" | "recycle" | "hotkeys" | "about">("software");
 const closeButton = ref<HTMLButtonElement>();
 const draft = reactive<AppSettings>({ ...appSettings });
 const saving = ref(false);
+const backdrop = createBackdropDismissal(() => emit("close"), () => !saving.value);
 const recycleItems = ref<RecycleItem[]>([]);
 const recycleBusy = ref(false);
 const recycleError = ref("");
 const recycleLocationError = ref("");
+const diagnostics = ref<DiagnosticEntry[]>([]);
+const diagnosticsBusy = ref(false);
+const diagnosticsError = ref("");
 const repositoryPath = ref("");
 const confirmAction = ref<{ title: string; message: string; run: () => Promise<void> }>();
 const recycleLocation = computed(() => draft.recycleBinPath || (repositoryPath.value ? `${repositoryPath.value}\\recycle` : "Chronicle\\recycle"));
@@ -38,6 +44,7 @@ const backupScheduleOptions: ThemedSelectOption[] = [
 
 const sections = [
   { id: "software" as const, label: "软件", icon: Settings2 },
+  { id: "notifications" as const, label: "通知与错误", icon: BellRing },
   { id: "backup" as const, label: "存储与备份", icon: HardDrive },
   { id: "recycle" as const, label: "回收站", icon: Trash2 },
   { id: "hotkeys" as const, label: "热键", icon: Keyboard },
@@ -49,6 +56,30 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+
+async function loadDiagnostics(): Promise<void> {
+  diagnosticsBusy.value = true;
+  diagnosticsError.value = "";
+  try { diagnostics.value = await diagnosticsRepository.list(); }
+  catch (error) { diagnosticsError.value = error instanceof Error ? error.message : String(error); }
+  finally { diagnosticsBusy.value = false; }
+}
+
+async function copyDiagnostics(entry?: DiagnosticEntry): Promise<void> {
+  const text = entry
+    ? `${entry.occurredAt}\n${entry.operation}\n${entry.message}\n${entry.details}`
+    : diagnostics.value.map((item) => `${item.occurredAt}\n${item.operation}\n${item.message}\n${item.details}`).join("\n\n");
+  try { await navigator.clipboard.writeText(text); }
+  catch (error) { diagnosticsError.value = error instanceof Error ? error.message : "无法复制错误记录"; }
+}
+
+async function clearDiagnostics(): Promise<void> {
+  if (!diagnostics.value.length || !window.confirm("清空全部错误记录？此操作不会影响存档和同步设置。")) return;
+  diagnosticsBusy.value = true;
+  try { await diagnosticsRepository.clear(); diagnostics.value = []; }
+  catch (error) { diagnosticsError.value = error instanceof Error ? error.message : String(error); }
+  finally { diagnosticsBusy.value = false; }
 }
 
 async function loadRecycleItems(): Promise<void> {
@@ -140,6 +171,7 @@ function updateRecycleLocationOverflow(): void {
 onMounted(() => {
   closeButton.value?.focus();
   void loadRecycleItems();
+  void loadDiagnostics();
   void archiveRepository.getRepositoryInfo().then((info) => { repositoryPath.value = info.path; });
   void nextTick(() => {
     recycleLocationButton = document.querySelector<HTMLButtonElement>(".settings-dialog .recycle-location") ?? undefined;
@@ -150,11 +182,12 @@ onMounted(() => {
 });
 
 watch(recycleLocation, () => { void nextTick(updateRecycleLocationOverflow); });
+watch(activeSection, (section) => { if (section === "notifications") void loadDiagnostics(); });
 onBeforeUnmount(() => recycleLocationObserver?.disconnect());
 </script>
 
 <template>
-  <div class="dialog-backdrop" @click.self="emit('close')">
+  <div class="dialog-backdrop" @pointerdown="backdrop.pointerDown" @pointerup="backdrop.pointerUp" @pointercancel="backdrop.pointerCancel">
     <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <header>
         <div><p>CHRONICLE</p><h2 id="settings-title">设置</h2></div>
@@ -177,6 +210,14 @@ onBeforeUnmount(() => recycleLocationObserver?.disconnect());
               <label class="setting-row"><span><b>桌面通知</b><small>备份、同步和恢复完成后显示通知</small></span><input v-model="draft.notifications" type="checkbox" role="switch" /></label>
               <label class="setting-row select-row"><span><b>关闭主窗口时</b><small>决定关闭按钮的默认行为</small></span><ThemedSelect :model-value="draft.closeBehavior" :options="closeBehaviorOptions" label="关闭主窗口时" @update:model-value="updateCloseBehavior" /></label>
             </div>
+          </section>
+
+          <section v-else-if="activeSection === 'notifications'" aria-labelledby="notifications-title">
+            <div class="section-heading recycle-heading"><div><h3 id="notifications-title">通知与错误记录</h3><p>同步、备份和资料库操作失败时会保留脱敏后的详情。</p></div><div class="diagnostics-actions"><button :disabled="diagnosticsBusy || !diagnostics.length" @click="copyDiagnostics()"><ClipboardCopy :size="14" />复制全部</button><button class="empty-button" :disabled="diagnosticsBusy || !diagnostics.length" @click="clearDiagnostics"><Trash2 :size="14" />清空</button></div></div>
+            <p v-if="diagnosticsError" class="recycle-error" role="alert">{{ diagnosticsError }}</p>
+            <div v-if="diagnosticsBusy && !diagnostics.length" class="recycle-empty">正在读取错误记录…</div>
+            <div v-else-if="!diagnostics.length" class="recycle-empty"><BellRing :size="24" /><b>暂无错误记录</b><span>后续失败操作会显示在这里。</span></div>
+            <div v-else class="diagnostics-list"><article v-for="entry in diagnostics" :key="entry.id"><span><b>{{ entry.operation }}</b><small>{{ new Date(entry.occurredAt).toLocaleString('zh-CN') }} · {{ entry.message }}</small><code>{{ entry.details }}</code></span><button :aria-label="`复制 ${entry.operation} 错误详情`" @click="copyDiagnostics(entry)"><ClipboardCopy :size="15" />复制</button></article></div>
           </section>
 
           <section v-else-if="activeSection === 'backup'" aria-labelledby="backup-title">
@@ -278,6 +319,7 @@ footer button { min-height: 36px; padding: 0 13px; border-radius: 7px; font-size
 .recycle-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }.recycle-heading h3 { margin: 0; }.empty-button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 10px; color: #a52e28; background: #fff0ef; border-radius: 7px; font-size: 10px; font-weight: 650; }.empty-button:disabled { color: var(--text-3); background: #f1f3f2; cursor: default; opacity: .65; }
 .recycle-list { overflow: hidden; border: 1px solid var(--border); border-radius: 10px; }.recycle-list article { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: 66px; padding: 9px 12px; }.recycle-list article + article { border-top: 1px solid var(--border); }.recycle-icon { display: grid; place-items: center; width: 32px; height: 32px; color: #a52e28; background: #fff0ef; border-radius: 7px; }.recycle-list article > span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 4px; }.recycle-list b { font-size: 11px; }.recycle-list small { overflow: hidden; color: var(--text-3); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.recycle-list article > div { display: flex; gap: 6px; }.recycle-list button { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 0 8px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 6px; font-size: 9px; }.recycle-list button.danger { color: #a52e28; background: #fff0ef; }.recycle-list button:disabled { cursor: default; opacity: .55; }
 .recycle-empty { display: grid; place-items: center; min-height: 210px; gap: 7px; color: var(--text-3); background: #f8faf9; border: 1px dashed var(--border-2); border-radius: 10px; font-size: 10px; }.recycle-empty b { color: var(--text-2); font-size: 12px; }.recycle-error { padding: 10px 12px; color: #a52e28; background: #fff0ef; border-radius: 7px; font-size: 10px; }
+.diagnostics-actions { display: flex; gap: 7px; }.diagnostics-actions button { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 0 9px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 7px; font-size: 10px; font-weight: 650; }.diagnostics-actions .empty-button { color: #a52e28; background: #fff0ef; }.diagnostics-list { overflow: hidden; border: 1px solid var(--border); border-radius: 9px; }.diagnostics-list article { display: flex; align-items: start; justify-content: space-between; gap: 12px; padding: 12px; }.diagnostics-list article + article { border-top: 1px solid var(--border); }.diagnostics-list article > span { display: grid; min-width: 0; gap: 4px; }.diagnostics-list b { color: var(--text); font-size: 11px; }.diagnostics-list small { overflow: hidden; color: var(--text-3); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.diagnostics-list code { overflow: auto; max-height: 88px; padding: 7px; color: var(--text-2); background: #f6f8f7; border-radius: 5px; font-family: ui-monospace, Consolas, monospace; font-size: 9px; line-height: 1.45; white-space: pre-wrap; }.diagnostics-list article > button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; min-height: 30px; padding: 0 8px; color: var(--text-2); background: #f2f6f4; border-radius: 6px; font-size: 9px; }
 .recycle-path > div { display: flex; align-items: center; min-width: 0; gap: 7px; }.recycle-location { overflow: hidden; min-width: 220px; max-width: 290px; height: 34px; padding: 0 10px; color: var(--text-2); background: #f8faf9; border: 1px solid var(--border-2); border-radius: 6px; font-size: 10px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }.recycle-location:hover:not(:disabled) { color: var(--primary-dark); border-color: #8bbdb4; background: #fff; }.recycle-path > div > button:last-child { display: grid; place-items: center; width: 34px; height: 34px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 6px; }.recycle-path > div > button:last-child:hover:not(:disabled) { background: #d2e5e0; }.recycle-path button:disabled { color: var(--text-3); cursor: default; opacity: .55; }.recycle-location-error { margin: -3px 16px 10px; color: #a52e28; font-size: 9px; }
 .recycle-location.scrolling { text-overflow: clip; animation: recycle-location-pan 8s ease-in-out infinite; }.recycle-location.scrolling:hover, .recycle-location.scrolling:focus-visible { animation-play-state: paused; }@keyframes recycle-location-pan { 0%, 20% { text-indent: 0; } 52%, 72% { text-indent: var(--recycle-scroll-distance); } 100% { text-indent: 0; } }@media (prefers-reduced-motion: reduce) { .recycle-location.scrolling { animation: none; text-overflow: ellipsis; } }@media (max-width: 1100px) { .settings-dialog { width: calc(100vw - 40px); height: calc(100vh - 40px); }.dialog-backdrop { padding: 20px; } }
 </style>

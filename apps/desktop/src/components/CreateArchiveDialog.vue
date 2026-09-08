@@ -2,6 +2,7 @@
 import { File, Folder, HardDrive, Plus, Trash2, UploadCloud, X } from "@lucide/vue";
 import { onMounted, ref, watch } from "vue";
 import type { ArchiveSource, ArchiveSyncMode, CreateArchiveInput, SourceKind, StoragePolicy } from "../domain";
+import { createBackdropDismissal } from "../services/dialogDismissal";
 import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
 
 const props = defineProps<{
@@ -27,6 +28,7 @@ const syncMode = ref<ArchiveSyncMode>(props.editSyncMode ?? "manual");
 const createInitialSnapshot = ref(props.defaultInitialSnapshot);
 const nameInput = ref<HTMLInputElement>();
 const attempted = ref(false);
+const backdrop = createBackdropDismissal(() => emit("close"), () => !props.submitting);
 const syncModeOptions: ThemedSelectOption[] = [
   { value: "manual", label: "手动同步" },
   { value: "automatic", label: "本地变更后自动上传" },
@@ -56,7 +58,7 @@ onMounted(() => nameInput.value?.focus());
 </script>
 
 <template>
-  <div class="dialog-backdrop" @click.self="emit('close')">
+  <div class="dialog-backdrop" @pointerdown="backdrop.pointerDown" @pointerup="backdrop.pointerUp" @pointercancel="backdrop.pointerCancel">
     <form class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-title" @submit.prevent="submit">
       <header>
         <div><p>{{ editName ? '编辑存档' : '新建存档' }}</p><h2 id="create-title">{{ editName ? '修改存档设置' : '添加到 Chronicle' }}</h2></div>
