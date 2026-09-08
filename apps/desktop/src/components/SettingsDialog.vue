@@ -9,6 +9,7 @@ import { createBackdropDismissal } from "../services/dialogDismissal";
 import { diagnosticsRepository, type DiagnosticEntry } from "../services/diagnostics";
 import type { RecycleItem } from "../domain";
 import ConfirmDialog from "./ConfirmDialog.vue";
+import ShortcutRecorder from "./ShortcutRecorder.vue";
 import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
 
 const emit = defineEmits<{ close: []; saved: [] }>();
@@ -228,11 +229,11 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
           </section>
 
           <section v-else-if="activeSection === 'hotkeys'" aria-labelledby="hotkeys-title">
-            <div class="section-heading"><h3 id="hotkeys-title">热键</h3><p>使用 Ctrl、Shift、Alt 和一个按键组合。</p></div>
+            <div class="section-heading"><h3 id="hotkeys-title">热键</h3><p>点击热键后按下组合键保存；Esc 取消，Delete 清除。</p></div>
             <div class="setting-group hotkey-group">
-              <label class="setting-row"><span><b>聚焦搜索</b><small>在存档列表中开始查找</small></span><input v-model.trim="draft.searchShortcut" type="text" aria-label="聚焦搜索热键" /></label>
-              <label class="setting-row"><span><b>创建备份</b><small>为当前选中的存档创建时间节点</small></span><input v-model.trim="draft.snapshotShortcut" type="text" aria-label="创建备份热键" /></label>
-              <label class="setting-row"><span><b>打开设置</b><small>从任意主界面打开此窗口</small></span><input v-model.trim="draft.settingsShortcut" type="text" aria-label="打开设置热键" /></label>
+              <div class="setting-row"><span><b>聚焦搜索</b><small>在存档列表中开始查找</small></span><ShortcutRecorder v-model="draft.searchShortcut" label="聚焦搜索热键" /></div>
+              <div class="setting-row"><span><b>创建备份</b><small>为当前选中的存档创建时间节点</small></span><ShortcutRecorder v-model="draft.snapshotShortcut" label="创建备份热键" /></div>
+              <div class="setting-row"><span><b>打开设置</b><small>从任意主界面打开此窗口</small></span><ShortcutRecorder v-model="draft.settingsShortcut" label="打开设置热键" /></div>
             </div>
           </section>
 
@@ -282,7 +283,6 @@ main { min-width: 0; overflow-y: auto; padding: 28px 32px 36px; }
 .setting-row input[type="checkbox"]:checked::after { transform: translateX(16px); }
 .number-input { min-width: 82px; width: 82px; }
 .retention-control { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }.retention-control label { display: flex; align-items: center; gap: 7px; color: var(--text-2); font-size: 10px; white-space: nowrap; }
-.hotkey-group input { width: 154px; font-family: "Cascadia Code", Consolas, monospace; text-align: center; }
 .recycle-path > div { display: flex; align-items: center; gap: 7px; }.recycle-path input { width: 220px; }.recycle-path button { display: grid; place-items: center; width: 34px; height: 34px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 6px; }.recycle-path button:hover:not(:disabled) { background: #d2e5e0; }.recycle-path button:disabled { color: var(--text-3); cursor: default; opacity: .55; }
 .path-card { display: grid; grid-template-columns: 22px 1fr auto; align-items: center; gap: 11px; margin-top: 16px; padding: 14px 16px; color: var(--primary); background: var(--primary-soft); border-radius: 9px; }
 .path-card span { display: flex; flex-direction: column; gap: 3px; color: #263431; }

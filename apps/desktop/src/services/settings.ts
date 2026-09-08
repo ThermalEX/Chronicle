@@ -177,3 +177,17 @@ export function shortcutMatches(event: KeyboardEvent, shortcut: string): boolean
     event.metaKey === parts.includes("meta"),
   );
 }
+
+export function shortcutFromKeyboardEvent(event: KeyboardEvent): string | null {
+  if (["Control", "Shift", "Alt", "Meta"].includes(event.key) || !(event.ctrlKey || event.shiftKey || event.altKey || event.metaKey)) {
+    return null;
+  }
+  const key = event.key.length === 1 ? event.key.toLocaleUpperCase() : event.key;
+  return [
+    event.ctrlKey && "Ctrl",
+    event.shiftKey && "Shift",
+    event.altKey && "Alt",
+    event.metaKey && "Meta",
+    key,
+  ].filter(Boolean).join("+");
+}
