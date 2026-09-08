@@ -19,6 +19,7 @@ import { cloudRepository } from "./services/cloud";
 import { diagnosticsRepository } from "./services/diagnostics";
 import { diagnosticFromError, type DiagnosticContext } from "./services/diagnosticsCore";
 import { compareArchiveNames, type ArchiveSortMode } from "./services/archiveSorting";
+import { positionFloatingMenu } from "./services/floatingMenu";
 import { filterTimeline, type TimelineSort } from "./services/snapshotTimeline";
 import { appSettings, cloudSettings, initializeSettings, shortcutMatches } from "./services/settings";
 
@@ -87,6 +88,10 @@ const editingArchive = ref<ArchiveRecord>();
 const archiveMenuOpen = ref(false);
 const trashDropActive = ref(false);
 const treeMenu = ref<{ kind: "archive" | "category"; id: string }>();
+const treeMenuAnchor = ref<DOMRect>();
+const treeMenuStyle = computed(() => treeMenuAnchor.value
+  ? positionFloatingMenu(treeMenuAnchor.value, { width: 168, height: 96 }, { width: window.innerWidth, height: window.innerHeight })
+  : undefined);
 const confirmRequest = ref<{ title: string; message: string; confirmLabel: string; destructive: boolean }>();
 let confirmResolver: ((confirmed: boolean) => void) | undefined;
 const notice = ref<{ type: "success" | "error" | "info"; message: string }>();
@@ -404,6 +409,28 @@ function categoryMoveOptions(categoryId: string): ThemedSelectOption[] {
       .map((category) => ({ value: category.id, label: category.name })),
   ];
 }
+
+function toggleTreeMenu(kind: "archive" | "category", id: string, event: MouseEvent): void {
+  if (treeMenu.value?.kind === kind && treeMenu.value.id === id) {
+    treeMenu.value = undefined;
+    return;
+  }
+  const button = event.currentTarget;
+  if (!(button instanceof HTMLElement)) return;
+  treeMenuAnchor.value = button.getBoundingClientRect();
+  treeMenu.value = { kind, id };
+}
+
+watch(treeMenu, (value, _, onCleanup) => {
+  if (!value) return;
+  const close = () => { treeMenu.value = undefined; };
+  window.addEventListener("scroll", close, true);
+  window.addEventListener("resize", close);
+  onCleanup(() => {
+    window.removeEventListener("scroll", close, true);
+    window.removeEventListener("resize", close);
+  });
+});
 
 async function moveArchiveFromMenu(archiveId: string, value: string | null) {
   try {
@@ -751,12 +778,12 @@ onBeforeUnmount(() => {
             <button v-if="node.id !== 'all'" class="disclosure" :class="{ hidden: !node.hasChildren }" :aria-label="`${expandedCategoryIds.has(node.id) ? '折叠' : '展开'} ${node.name}`" :aria-expanded="node.hasChildren ? expandedCategoryIds.has(node.id) : undefined" @click="toggleCategory(node.id)"><ChevronDown v-if="expandedCategoryIds.has(node.id)" :size="14" /><ChevronRight v-else :size="14" /></button>
             <span v-else class="disclosure-spacer"></span>
             <button class="category-select" :draggable="node.id !== 'all'" :title="node.id === 'all' ? '将分类或存档拖到这里可移至根目录' : undefined" @dragstart.stop="node.id !== 'all' && startCategoryDrag(node.id, $event)" @click="selectCategory(node.id)"><component :is="node.icon" :size="17" /><span>{{ node.name }}</span><span class="category-suffix"><LockKeyhole v-if="node.id === 'all'" :size="12" aria-label="固定根目录" /><small>{{ node.count }}</small></span></button>
-            <div v-if="node.id !== 'all'" class="tree-more"><button aria-label="分类操作" :aria-expanded="treeMenu?.kind === 'category' && treeMenu.id === node.id" @click="treeMenu = treeMenu?.id === node.id ? undefined : { kind: 'category', id: node.id }"><MoreHorizontal :size="14" /></button><div v-if="treeMenu?.kind === 'category' && treeMenu.id === node.id" class="tree-menu"><label>移动到<ThemedSelect :model-value="node.parentId ?? null" :options="categoryMoveOptions(node.id)" :label="`移动分类 ${node.name}`" @update:model-value="moveCategoryFromMenu(node.id, $event)" /></label><button class="danger" @click="deleteCategory(node.id)"><Trash2 :size="13" />删除分类</button></div></div>
+            <div v-if="node.id !== 'all'" class="tree-more"><button aria-label="分类操作" :aria-expanded="treeMenu?.kind === 'category' && treeMenu.id === node.id" @click="toggleTreeMenu('category', node.id, $event)"><MoreHorizontal :size="14" /></button><Teleport to="body"><div v-if="treeMenu?.kind === 'category' && treeMenu.id === node.id" class="tree-menu" :style="treeMenuStyle"><label>移动到<ThemedSelect :model-value="node.parentId ?? null" :options="categoryMoveOptions(node.id)" :label="`移动分类 ${node.name}`" @update:model-value="moveCategoryFromMenu(node.id, $event)" /></label><button class="danger" @click="deleteCategory(node.id)"><Trash2 :size="13" />删除分类</button></div></Teleport></div>
           </div>
           <div v-else class="archive-tree-row" :class="{ active: activeTreeNodeId === `archive:${node.id}` }" :style="{ paddingLeft: `${4 + node.depth * 16}px` }" @dragend="finishDrag">
             <span class="disclosure-spacer"></span>
             <button class="archive-tree-select" draggable="true" :title="node.archive.name" @dragstart.stop="startArchiveDrag(node.id, $event)" @click="selectArchiveFromTree(node.archive)"><File :size="16" /><span>{{ node.archive.name }}</span></button>
-            <div class="tree-more"><button aria-label="存档移动操作" :aria-expanded="treeMenu?.kind === 'archive' && treeMenu.id === node.id" @click="treeMenu = treeMenu?.id === node.id ? undefined : { kind: 'archive', id: node.id }"><MoreHorizontal :size="14" /></button><div v-if="treeMenu?.kind === 'archive' && treeMenu.id === node.id" class="tree-menu"><label>移动到<ThemedSelect :model-value="node.archive.categoryId ?? null" :options="archiveMoveOptions()" :label="`移动存档 ${node.archive.name}`" @update:model-value="moveArchiveFromMenu(node.id, $event)" /></label><button class="danger" @click="deleteArchive(node.archive)"><Trash2 :size="13" />删除存档</button></div></div>
+            <div class="tree-more"><button aria-label="存档移动操作" :aria-expanded="treeMenu?.kind === 'archive' && treeMenu.id === node.id" @click="toggleTreeMenu('archive', node.id, $event)"><MoreHorizontal :size="14" /></button><Teleport to="body"><div v-if="treeMenu?.kind === 'archive' && treeMenu.id === node.id" class="tree-menu" :style="treeMenuStyle"><label>移动到<ThemedSelect :model-value="node.archive.categoryId ?? null" :options="archiveMoveOptions()" :label="`移动存档 ${node.archive.name}`" @update:model-value="moveArchiveFromMenu(node.id, $event)" /></label><button class="danger" @click="deleteArchive(node.archive)"><Trash2 :size="13" />删除存档</button></div></Teleport></div>
           </div>
         </template>
       </nav>
