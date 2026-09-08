@@ -34,4 +34,8 @@ describe("appearance stylesheet", () => {
   it("uses the titlebar foreground for the brand in dark mode", () => {
     expect(rule(".brand")).toContain("color: var(--titlebar-text)");
   });
+
+  it("visually centers titlebar status dots with their labels", () => {
+    expect(rule(".sync-state i")).toContain("transform: translateY(1px)");
+  });
 });
