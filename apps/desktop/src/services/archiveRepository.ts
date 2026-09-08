@@ -415,6 +415,7 @@ export class BrowserArchiveRepository {
       id: crypto.randomUUID(),
       archiveId: archive.id,
       title,
+      note: "",
       createdAt: Date.now(),
       totalBytes: files.reduce((total, file) => total + file.size, 0),
       contentHash: await digest(new Blob([manifest])),
@@ -436,6 +437,48 @@ export class BrowserArchiveRepository {
       totalBytes: snapshot.totalBytes,
     });
     return snapshot;
+  }
+
+  async updateSnapshotNote(archiveId: string, snapshotId: string, note: string): Promise<SnapshotRecord> {
+    const database = await openDatabase();
+    const transaction = database.transaction(SNAPSHOTS, "readwrite");
+    const snapshot = await requestResult(transaction.objectStore(SNAPSHOTS).get(snapshotId) as IDBRequest<SnapshotRecord | undefined>);
+    if (!snapshot || snapshot.archiveId !== archiveId) {
+      transaction.abort();
+      database.close();
+      throw new Error("快照不存在");
+    }
+    const updated = { ...snapshot, note: note.trim() };
+    transaction.objectStore(SNAPSHOTS).put(updated);
+    await transactionDone(transaction);
+    database.close();
+    return updated;
+  }
+
+  async deleteSnapshot(archiveId: string, snapshotId: string): Promise<void> {
+    const database = await openDatabase();
+    const transaction = database.transaction([ARCHIVES, SNAPSHOTS], "readwrite");
+    const snapshotStore = transaction.objectStore(SNAPSHOTS);
+    const snapshot = await requestResult(snapshotStore.get(snapshotId) as IDBRequest<SnapshotRecord | undefined>);
+    if (!snapshot || snapshot.archiveId !== archiveId) {
+      transaction.abort();
+      database.close();
+      throw new Error("快照不存在");
+    }
+    snapshotStore.delete(snapshotId);
+    const remaining = (await requestResult(snapshotStore.index("archiveId").getAll(archiveId) as IDBRequest<SnapshotRecord[]>))
+      .filter((item) => item.id !== snapshotId)
+      .sort((left, right) => right.createdAt - left.createdAt);
+    const archiveStore = transaction.objectStore(ARCHIVES);
+    const archive = await requestResult(archiveStore.get(archiveId) as IDBRequest<ArchiveRecord | undefined>);
+    if (archive) archiveStore.put({
+      ...archive,
+      lastSnapshotAt: remaining[0]?.createdAt,
+      totalBytes: remaining[0]?.totalBytes ?? 0,
+      updatedAt: Date.now(),
+    });
+    await transactionDone(transaction);
+    database.close();
   }
 
   async restoreSnapshot(archive: ArchiveRecord, snapshot: SnapshotRecord): Promise<void> {

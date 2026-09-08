@@ -4,6 +4,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { appSettings, resetAppSettings, saveAppSettings, type AppSettings, type BackupSchedule, type CloseBehavior } from "../services/settings";
+import { type ColorMode, type ColorTheme } from "../services/appearance";
 import { archiveRepository } from "../services/repository";
 import { createBackdropDismissal } from "../services/dialogDismissal";
 import { diagnosticsRepository, type DiagnosticEntry } from "../services/diagnostics";
@@ -39,6 +40,17 @@ const backupScheduleOptions: ThemedSelectOption[] = [
   { value: "1h", label: "每小时" },
   { value: "6h", label: "每 6 小时" },
   { value: "daily", label: "每天" },
+];
+const colorThemeOptions: ThemedSelectOption[] = [
+  { value: "teal", label: "青绿" },
+  { value: "indigo", label: "靛蓝" },
+  { value: "violet", label: "紫罗兰" },
+  { value: "amber", label: "琥珀" },
+  { value: "rose", label: "玫红" },
+];
+const colorModeOptions: ThemedSelectOption[] = [
+  { value: "light", label: "日间模式" },
+  { value: "dark", label: "夜间模式" },
 ];
 
 const sections = [
@@ -138,6 +150,14 @@ function updateBackupSchedule(value: string | null): void {
   if (value) draft.backupSchedule = value as BackupSchedule;
 }
 
+function updateColorTheme(value: string | null): void {
+  if (value) draft.colorTheme = value as ColorTheme;
+}
+
+function updateColorMode(value: string | null): void {
+  if (value) draft.colorMode = value as ColorMode;
+}
+
 function reset(): void {
   resetAppSettings();
   Object.assign(draft, appSettings);
@@ -187,6 +207,8 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
           <section v-if="activeSection === 'software'" aria-labelledby="software-title">
             <div class="section-heading"><h3 id="software-title">软件</h3><p>控制 Chronicle 的启动、关闭和通知行为。</p></div>
             <div class="setting-group">
+              <label class="setting-row select-row"><span><b>配色主题</b><small>为 Chronicle 选择一组强调色。</small></span><ThemedSelect :model-value="draft.colorTheme" :options="colorThemeOptions" label="配色主题" @update:model-value="updateColorTheme" /></label>
+              <label class="setting-row select-row"><span><b>显示模式</b><small>右上角太阳/月亮按钮可随时切换。</small></span><ThemedSelect :model-value="draft.colorMode" :options="colorModeOptions" label="显示模式" @update:model-value="updateColorMode" /></label>
               <label class="setting-row"><span><b>随系统启动</b><small>登录 Windows 后自动启动 Chronicle</small></span><input v-model="draft.launchAtStartup" type="checkbox" role="switch" /></label>
               <label class="setting-row"><span><b>自动检查更新</b><small>启动后检查稳定版本更新</small></span><input v-model="draft.checkForUpdates" type="checkbox" role="switch" /></label>
               <label class="setting-row"><span><b>桌面通知</b><small>备份、同步和恢复完成后显示通知</small></span><input v-model="draft.notifications" type="checkbox" role="switch" /></label>
@@ -262,16 +284,16 @@ header h2 { margin-top: 4px; font-size: 20px; }
 .close-button { display: grid; place-items: center; width: 38px; height: 38px; background: transparent; border-radius: 7px; }
 .close-button:hover, .cancel-button:hover, .reset-button:hover { background: var(--hover); }
 .settings-layout { display: grid; grid-template-columns: 196px minmax(0, 1fr); min-height: 0; }
-nav { padding: 15px 10px; background: #f1f5f3; border-right: 1px solid var(--border); }
+nav { padding: 15px 10px; background: var(--subtle); border-right: 1px solid var(--border); }
 nav button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 42px; margin: 2px 0; padding: 0 12px; color: var(--text-2); background: transparent; border-radius: 7px; font-size: 12px; text-align: left; }
-nav button:hover { color: #17211f; background: #e5ebe8; }
-nav button.active { color: var(--primary-dark); background: #dcece8; font-weight: 650; }
+nav button:hover { color: var(--text); background: var(--hover); }
+nav button.active { color: var(--primary-dark); background: var(--primary-soft); font-weight: 650; }
 main { min-width: 0; overflow-y: auto; padding: 28px 32px 36px; }
 .section-heading { margin-bottom: 20px; }
 .section-heading h3 { font-size: 18px; }
 .section-heading p { margin: 6px 0 0; color: var(--text-3); font-size: 11px; }
 .setting-group { overflow: hidden; border: 1px solid var(--border); border-radius: 10px; }
-.setting-row { display: flex; align-items: center; justify-content: space-between; min-height: 70px; gap: 28px; padding: 12px 16px; background: #fff; }
+.setting-row { display: flex; align-items: center; justify-content: space-between; min-height: 70px; gap: 28px; padding: 12px 16px; background: var(--surface); }
 .setting-row + .setting-row { border-top: 1px solid var(--border); }
 .setting-row > span { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
 .setting-row b { font-size: 12px; font-weight: 650; }
@@ -287,7 +309,7 @@ main { min-width: 0; overflow-y: auto; padding: 28px 32px 36px; }
 .path-card { display: grid; grid-template-columns: 22px 1fr auto; align-items: center; gap: 11px; margin-top: 16px; padding: 14px 16px; color: var(--primary); background: var(--primary-soft); border-radius: 9px; }
 .path-card span { display: flex; flex-direction: column; gap: 3px; color: #263431; }
 .path-card b { font-size: 11px; }.path-card small { color: var(--text-3); font-size: 9px; }.path-card em { color: var(--primary); font-size: 10px; font-style: normal; font-weight: 650; }
-.about-card { display: flex; align-items: center; gap: 14px; padding: 18px; background: #f4f8f6; border: 1px solid var(--border); border-radius: 10px; }
+.about-card { display: flex; align-items: center; gap: 14px; padding: 18px; background: var(--subtle); border: 1px solid var(--border); border-radius: 10px; }
 .about-logo { display: grid; place-items: center; width: 48px; height: 48px; color: #fff; background: #153b37; border-radius: 11px; }
 .about-card h4, .about-card p { margin: 0; }.about-card h4 { font-size: 16px; }.about-card p { margin-top: 4px; color: var(--text-3); font-size: 10px; }
 .about-list { margin: 18px 0; }.about-list div { display: flex; justify-content: space-between; padding: 11px 2px; border-bottom: 1px solid var(--border); font-size: 11px; }.about-list dt { color: var(--text-3); }.about-list dd { margin: 0; }

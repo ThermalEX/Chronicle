@@ -41,6 +41,8 @@ export interface ArchiveRepository {
     safety?: boolean,
     onProgress?: (progress: SnapshotProgress) => void,
   ): Promise<SnapshotRecord>;
+  updateSnapshotNote(archiveId: string, snapshotId: string, note: string): Promise<SnapshotRecord>;
+  deleteSnapshot(archiveId: string, snapshotId: string): Promise<void>;
   restoreSnapshot(archive: ArchiveRecord, snapshot: SnapshotRecord): Promise<void>;
 }
 
@@ -167,6 +169,14 @@ class TauriArchiveRepository implements ArchiveRepository {
     });
     onProgress?.({ current: 1, total: 1, currentPath: "" });
     return snapshot;
+  }
+
+  updateSnapshotNote(archiveId: string, snapshotId: string, note: string): Promise<SnapshotRecord> {
+    return invoke("update_snapshot_note", { entryId: archiveId, snapshotId, note });
+  }
+
+  deleteSnapshot(archiveId: string, snapshotId: string): Promise<void> {
+    return invoke("delete_snapshot", { entryId: archiveId, snapshotId });
   }
 
   restoreSnapshot(archive: ArchiveRecord, snapshot: SnapshotRecord): Promise<void> {

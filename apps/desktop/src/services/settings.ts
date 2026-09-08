@@ -1,11 +1,14 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { reactive } from "vue";
+import { normalizeAppearance, type ColorMode, type ColorTheme } from "./appearance";
 
 export type CloseBehavior = "ask" | "tray" | "exit";
 export type BackupSchedule = "off" | "15m" | "1h" | "6h" | "daily";
 export type CloudProvider = "webdav" | "github";
 
 export interface AppSettings {
+  colorTheme: ColorTheme;
+  colorMode: ColorMode;
   launchAtStartup: boolean;
   closeBehavior: CloseBehavior;
   checkForUpdates: boolean;
@@ -52,6 +55,8 @@ export interface SettingsDocument {
 }
 
 const defaultAppSettings: AppSettings = {
+  colorTheme: "teal",
+  colorMode: "light",
   launchAtStartup: false,
   closeBehavior: "ask",
   checkForUpdates: true,
@@ -134,12 +139,13 @@ function settingsDocument(): SettingsDocument {
 export async function initializeSettings(): Promise<void> {
   if (isTauri()) {
     const saved = await invoke<Partial<SettingsDocument> & { cloud?: LegacyCloudSettings }>("load_settings");
-    Object.assign(appSettings, defaultAppSettings, saved.app ?? {});
+    Object.assign(appSettings, defaultAppSettings, saved.app ?? {}, normalizeAppearance(saved.app ?? {}));
     Object.assign(cloudSettings, normalizedCloud(saved.cloud));
     if (saved.formatVersion !== 2) await persistSettings();
     return;
   }
-  Object.assign(appSettings, loadSettings(APP_SETTINGS_KEY, defaultAppSettings));
+  const savedApp = loadSettings(APP_SETTINGS_KEY, defaultAppSettings);
+  Object.assign(appSettings, savedApp, normalizeAppearance(savedApp));
   Object.assign(cloudSettings, normalizedCloud(loadSettings(CLOUD_SETTINGS_KEY, defaultCloudSettings)));
 }
 

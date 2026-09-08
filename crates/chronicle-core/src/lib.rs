@@ -121,6 +121,9 @@ pub struct Snapshot {
     pub device_name: String,
     /// User-facing snapshot name.
     pub title: String,
+    /// Optional user note shared with every synced device.
+    #[serde(default)]
+    pub note: String,
     /// Creation time expressed as Unix milliseconds.
     pub created_at_ms: u64,
     /// Chronologically sortable 7z filename inside the entry directory.

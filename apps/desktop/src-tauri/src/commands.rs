@@ -81,6 +81,7 @@ pub struct SnapshotDto {
     id: String,
     archive_id: String,
     title: String,
+    note: String,
     created_at: u64,
     total_bytes: u64,
     content_hash: String,
@@ -368,6 +369,7 @@ fn snapshot_dto(snapshot: Snapshot) -> SnapshotDto {
         id: snapshot.id,
         archive_id: snapshot.entry_id,
         title: snapshot.title,
+        note: snapshot.note,
         created_at: snapshot.created_at_ms,
         total_bytes: snapshot.files.iter().map(|file| file.size_bytes).sum(),
         content_hash: snapshot.object_hash,
@@ -665,6 +667,32 @@ pub fn create_snapshot(
     repository
         .create_snapshot(&entry_id, title, device_id, safety)
         .map(snapshot_dto)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
+pub fn update_snapshot_note(
+    state: State<'_, AppState>,
+    entry_id: String,
+    snapshot_id: String,
+    note: String,
+) -> Result<SnapshotDto, String> {
+    let repository = state.repository.lock().map_err(|_| state_error())?;
+    repository
+        .update_snapshot_note(&entry_id, &snapshot_id, note)
+        .map(snapshot_dto)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
+pub fn delete_snapshot(
+    state: State<'_, AppState>,
+    entry_id: String,
+    snapshot_id: String,
+) -> Result<(), String> {
+    let repository = state.repository.lock().map_err(|_| state_error())?;
+    repository
+        .delete_snapshot(&entry_id, &snapshot_id)
         .map_err(|error| error.to_string())
 }
 

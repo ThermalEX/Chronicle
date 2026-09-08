@@ -968,6 +968,7 @@ impl LocalRepository {
             device_id: device_id.into(),
             device_name: self.device_identity()?.1,
             title: title.into(),
+            note: String::new(),
             created_at_ms,
             archive_name,
             object_hash,
@@ -980,6 +981,52 @@ impl LocalRepository {
         timeline.sort_by_key(|item| item.created_at_ms);
         self.refresh_catalog_entry(entry_id, &timeline)?;
         Ok(snapshot)
+    }
+
+    /// Updates the shared user note for one snapshot.
+    ///
+    /// # Errors
+    /// Returns an error when the entry or snapshot does not exist.
+    pub fn update_snapshot_note(
+        &self,
+        entry_id: &str,
+        snapshot_id: &str,
+        note: impl Into<String>,
+    ) -> Result<Snapshot> {
+        let mut timeline = self.list_snapshots(entry_id)?;
+        let snapshot = timeline
+            .iter_mut()
+            .find(|snapshot| snapshot.id == snapshot_id)
+            .ok_or_else(|| StorageError::SnapshotNotFound(snapshot_id.into()))?;
+        note.into().trim().clone_into(&mut snapshot.note);
+        let updated = snapshot.clone();
+        self.refresh_catalog_entry(entry_id, &timeline)?;
+        Ok(updated)
+    }
+
+    /// Permanently deletes one stored snapshot and its archive object.
+    ///
+    /// # Errors
+    /// Returns an error when the entry or snapshot does not exist, or its archive cannot be removed.
+    pub fn delete_snapshot(&self, entry_id: &str, snapshot_id: &str) -> Result<()> {
+        let timeline = self.list_snapshots(entry_id)?;
+        let snapshot = timeline
+            .iter()
+            .find(|snapshot| snapshot.id == snapshot_id)
+            .ok_or_else(|| StorageError::SnapshotNotFound(snapshot_id.into()))?;
+        let archive = self.entry_dir(entry_id)?.join(&snapshot.archive_name);
+        let staged = self.temp_dir().join(format!("delete-{snapshot_id}.7z"));
+        fs::rename(&archive, &staged)?;
+        let remaining = timeline
+            .into_iter()
+            .filter(|item| item.id != snapshot_id)
+            .collect::<Vec<_>>();
+        if let Err(error) = self.refresh_catalog_entry(entry_id, &remaining) {
+            let _ = fs::rename(&staged, &archive);
+            return Err(error);
+        }
+        fs::remove_file(staged)?;
+        Ok(())
     }
 
     /// Verifies a snapshot archive against its SHA-256 hash.
@@ -1840,5 +1887,35 @@ mod tests {
         assert_eq!(updated.sync_mode, SyncMode::Automatic);
         assert_eq!(updated.sources, entry.sources);
         assert_eq!(repository.list_snapshots(&entry.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn snapshot_notes_persist_and_deleting_a_snapshot_removes_its_archive() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("save.dat");
+        fs::write(&source, b"save").unwrap();
+        let repository = LocalRepository::open(workspace.path().join("Chronicle")).unwrap();
+        let entry = repository.add_entry(&source, Some("Save"), None).unwrap();
+        let snapshot = repository
+            .create_snapshot(&entry.id, "Boss 前", "test", false)
+            .unwrap();
+
+        let updated = repository
+            .update_snapshot_note(&entry.id, &snapshot.id, "进入第二阶段前")
+            .unwrap();
+        assert_eq!(updated.note, "进入第二阶段前");
+        assert_eq!(
+            repository.list_snapshots(&entry.id).unwrap()[0].note,
+            "进入第二阶段前"
+        );
+
+        let archive = repository
+            .entry_dir(&entry.id)
+            .unwrap()
+            .join(&snapshot.archive_name);
+        assert!(archive.is_file());
+        repository.delete_snapshot(&entry.id, &snapshot.id).unwrap();
+        assert!(repository.list_snapshots(&entry.id).unwrap().is_empty());
+        assert!(!archive.exists());
     }
 }

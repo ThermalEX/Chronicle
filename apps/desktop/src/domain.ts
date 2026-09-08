@@ -55,6 +55,7 @@ export type SnapshotRecord = {
   id: string;
   archiveId: string;
   title: string;
+  note?: string;
   createdAt: number;
   totalBytes: number;
   contentHash: string;

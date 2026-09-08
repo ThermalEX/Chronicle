@@ -45,6 +45,8 @@ pub fn run() {
             commands::empty_recycle_bin,
             commands::list_snapshots,
             commands::create_snapshot,
+            commands::update_snapshot_note,
+            commands::delete_snapshot,
             commands::verify_snapshot,
             commands::restore_snapshot,
             commands::load_settings,

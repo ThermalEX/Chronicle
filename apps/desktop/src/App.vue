@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import {
   Check, ChevronDown, ChevronLeft, ChevronRight, Clock3, CloudCog, File,
-  Folder, FolderArchive, FolderOpen, HardDrive, LockKeyhole, MoreHorizontal, Pencil, Plus, RotateCcw,
+  Folder, FolderArchive, FolderOpen, HardDrive, LockKeyhole, MoreHorizontal, Moon, Pencil, Plus, RotateCcw, Save,
   Search, Settings2, SlidersHorizontal, UploadCloud, X,
-  Trash2,
+  Sun, Trash2,
 } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import CloudSettingsDialog from "./components/CloudCenterDialog.vue";
@@ -20,9 +20,10 @@ import { diagnosticsRepository } from "./services/diagnostics";
 import { diagnosticFromError, type DiagnosticContext } from "./services/diagnosticsCore";
 import { compareArchiveNames, type ArchiveSortMode } from "./services/archiveSorting";
 import { selectArchivePanelCategory, selectCategoryPanel } from "./services/archiveWorkspace";
+import { applyAppearance, normalizeAppearance } from "./services/appearance";
 import { floatingMenuStyle, positionFloatingMenu } from "./services/floatingMenu";
 import { filterTimeline, type TimelineSort } from "./services/snapshotTimeline";
-import { appSettings, cloudSettings, initializeSettings, shortcutMatches } from "./services/settings";
+import { appSettings, cloudSettings, initializeSettings, saveAppSettings, shortcutMatches } from "./services/settings";
 
 type CategoryTreeNode = CategoryRecord & {
   nodeType: "category";
@@ -47,6 +48,7 @@ const selectedArchiveId = ref<string>();
 const selectedSnapshotId = ref<string>();
 const archivePanelCollapsed = ref(false);
 const snapshotDescription = ref("");
+const snapshotNote = ref("");
 const snapshotSearch = ref("");
 const snapshotSort = ref<TimelineSort>("newest");
 const timelineSortOptions: ThemedSelectOption[] = [
@@ -77,6 +79,7 @@ const syncingArchive = ref(false);
 const snapshotProgress = ref<SnapshotProgress>();
 const busyAction = ref<"snapshot" | "restore">();
 const savingTags = ref(false);
+const savingSnapshotNote = ref(false);
 const repositoryInfo = ref<RepositoryInfo>({ path: "", totalBytes: 0 });
 const editingArchive = ref<ArchiveRecord>();
 const archiveMenuOpen = ref(false);
@@ -217,6 +220,7 @@ async function refreshRepositoryInfo() {
 }
 
 async function handleSettingsChanged() {
+  applyAppearance(appSettings);
   await Promise.all([refreshArchives(), refreshCategories(), refreshRepositoryInfo()]);
   showNotice("设置已保存");
 }
@@ -513,6 +517,55 @@ async function restoreSnapshot() {
   }
 }
 
+async function saveSnapshotNote(): Promise<void> {
+  const archive = selectedArchive.value;
+  const snapshot = selectedSnapshot.value;
+  if (!archive || !snapshot || savingSnapshotNote.value) return;
+  savingSnapshotNote.value = true;
+  try {
+    const updated = await archiveRepository.updateSnapshotNote(archive.id, snapshot.id, snapshotNote.value);
+    snapshots.value = snapshots.value.map((item) => item.id === updated.id ? updated : item);
+    queueAutomaticUpload(archives.value.find((item) => item.id === archive.id));
+    showNotice("快照备注已保存");
+  } catch (error) {
+    reportError(error, { operation: "保存快照备注", archiveId: archive.id });
+  } finally {
+    savingSnapshotNote.value = false;
+  }
+}
+
+async function deleteSnapshot(snapshot: SnapshotRecord): Promise<void> {
+  const archive = selectedArchive.value;
+  if (!archive || busyAction.value) return;
+  const confirmed = await requestConfirmation(
+    "永久删除时间节点",
+    `将永久删除 ${formatTime(snapshot.createdAt)} 的快照文件及其备注，无法恢复。`,
+    "永久删除",
+    true,
+  );
+  if (!confirmed) return;
+  try {
+    await archiveRepository.deleteSnapshot(archive.id, snapshot.id);
+    await refreshArchives(archive.id);
+    await refreshSnapshots(archive.id);
+    await refreshRepositoryInfo();
+    queueAutomaticUpload(archives.value.find((item) => item.id === archive.id));
+    showNotice("时间节点已永久删除");
+  } catch (error) {
+    reportError(error, { operation: "删除时间节点", archiveId: archive.id });
+  }
+}
+
+async function toggleColorMode(): Promise<void> {
+  const appearance = normalizeAppearance(appSettings, true);
+  try {
+    await saveAppSettings({ ...appSettings, ...appearance });
+    applyAppearance(appSettings);
+  } catch (error) {
+    showNotice(readableError(error), "error");
+  }
+}
+
 function selectCategory(categoryId: string) {
   const panelState = selectCategoryPanel({ categoryId: selectedCategoryId.value, collapsed: archivePanelCollapsed.value }, categoryId);
   selectedCategoryId.value = panelState.categoryId;
@@ -730,10 +783,12 @@ function handleShortcut(event: KeyboardEvent) {
 }
 
 watch(selectedArchiveId, (archiveId) => { void refreshSnapshots(archiveId); });
+watch(selectedSnapshot, (snapshot) => { snapshotNote.value = snapshot?.note ?? ""; });
 onMounted(async () => {
   window.addEventListener("keydown", handleShortcut);
   try {
     await initializeSettings();
+    applyAppearance(appSettings);
     await refreshCategories();
     await refreshArchives();
     await refreshRepositoryInfo();
@@ -753,7 +808,7 @@ onBeforeUnmount(() => {
     <header class="titlebar">
       <div class="brand"><span class="brand-mark"><Clock3 :size="18" /></span><span>Chronicle</span></div>
       <div class="sync-state"><i></i>本地资料库可用</div>
-      <div class="toolbar"><button aria-label="云端设置" @click="cloudSettingsOpen = true"><CloudCog :size="18" /></button><button aria-label="应用设置" @click="settingsOpen = true"><Settings2 :size="18" /></button></div>
+      <div class="toolbar"><button :aria-label="appSettings.colorMode === 'dark' ? '切换到日间模式' : '切换到夜间模式'" @click="toggleColorMode"><Sun v-if="appSettings.colorMode === 'dark'" :size="18" /><Moon v-else :size="18" /></button><button aria-label="云端设置" @click="cloudSettingsOpen = true"><CloudCog :size="18" /></button><button aria-label="应用设置" @click="settingsOpen = true"><Settings2 :size="18" /></button></div>
     </header>
 
     <aside class="sidebar">
@@ -820,7 +875,7 @@ onBeforeUnmount(() => {
             <div class="section-title"><div><p class="label">版本历史</p><h3>时间节点</h3></div><button class="link-button" @click="showNotice('保留策略将在自动备份阶段接入', 'info')">管理保留策略</button></div>
             <div class="snapshot-create"><input v-model="snapshotDescription" maxlength="160" placeholder="输入新存档描述信息（可留空）" @keydown.enter.prevent="createSnapshotFromDetail" /><button class="accent" :disabled="busyAction !== undefined" @click="createSnapshotFromDetail"><Plus :size="16" />创建新快照</button></div>
             <div class="timeline-toolbar"><label><Search :size="15" /><input v-model="snapshotSearch" type="search" placeholder="搜索快照描述" /></label><ThemedSelect :model-value="snapshotSort" :options="timelineSortOptions" label="时间线排序" @update:model-value="updateTimelineSort" /></div>
-            <div v-if="visibleSnapshots.length" class="timeline-table"><div class="timeline-table-head"><span>备份时间</span><span>描述</span><span>位置 / 大小</span><span>操作</span></div><article v-for="snapshot in visibleSnapshots" :key="snapshot.id" :class="{ selected: selectedSnapshotId === snapshot.id }" tabindex="0" @click="selectedSnapshotId = snapshot.id" @keydown.enter="selectedSnapshotId = snapshot.id"><time>{{ formatTime(snapshot.createdAt) }}</time><span><b>{{ snapshot.title }}</b><small>{{ snapshotDetail(snapshot) }}</small></span><span>本机 · {{ formatBytes(snapshot.totalBytes) }}</span><div><button :disabled="busyAction !== undefined" @click.stop="selectedSnapshotId = snapshot.id; restoreSnapshot()"><RotateCcw :size="14" />恢复</button><button :disabled="syncingArchive" @click.stop="selectedSnapshotId = snapshot.id; syncSelectedArchive()"><UploadCloud :size="14" />同步</button></div></article></div>
+            <div v-if="visibleSnapshots.length" class="timeline-table"><div class="timeline-table-head"><span>备份时间</span><span>描述</span><span>位置 / 大小</span><span>操作</span></div><article v-for="snapshot in visibleSnapshots" :key="snapshot.id" :class="{ selected: selectedSnapshotId === snapshot.id }" tabindex="0" @click="selectedSnapshotId = snapshot.id" @keydown.enter="selectedSnapshotId = snapshot.id"><time>{{ formatTime(snapshot.createdAt) }}</time><span><b>{{ snapshot.title }}</b><small>{{ snapshot.note || snapshotDetail(snapshot) }}</small></span><span>本机 · {{ formatBytes(snapshot.totalBytes) }}</span><div><button :disabled="busyAction !== undefined" @click.stop="selectedSnapshotId = snapshot.id; restoreSnapshot()"><RotateCcw :size="14" />恢复</button><button :disabled="syncingArchive" @click.stop="selectedSnapshotId = snapshot.id; syncSelectedArchive()"><UploadCloud :size="14" />同步</button><button class="danger" :disabled="busyAction !== undefined" :aria-label="`删除 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="deleteSnapshot(snapshot)"><Trash2 :size="14" /></button></div></article></div>
             <div v-else class="timeline-empty"><Clock3 :size="25" /><b>还没有时间节点</b><p>创建首个备份后，可以从这里查看和恢复历史版本。</p><button :disabled="busyAction !== undefined" @click="createSnapshot('初始版本')">创建首个备份</button></div>
           </section>
 
@@ -829,6 +884,7 @@ onBeforeUnmount(() => {
               <div class="section-title"><div><p class="label">已选版本</p><h3>{{ formatTime(selectedSnapshot.createdAt) }}</h3></div><span class="verified"><Check :size="13" />完整</span></div>
               <dl><div><dt>类型</dt><dd>{{ selectedSnapshot.title }}</dd></div><div><dt>快照大小</dt><dd>{{ formatBytes(selectedSnapshot.totalBytes) }}</dd></div><div><dt>存储位置</dt><dd>仅本地</dd></div><div><dt>内容校验</dt><dd class="hash">{{ selectedSnapshot.contentHash.slice(0, 6) }}…{{ selectedSnapshot.contentHash.slice(-4) }}</dd></div></dl>
               <div class="changes"><p>内容变化</p><div><span><i class="green"></i>新增</span><b>{{ selectedSnapshot.changes.added }}</b></div><div><span><i class="amber"></i>修改</span><b>{{ selectedSnapshot.changes.modified }}</b></div><div><span><i class="red"></i>删除</span><b>{{ selectedSnapshot.changes.deleted }}</b></div></div>
+              <label class="snapshot-note"><span>备注</span><textarea v-model="snapshotNote" maxlength="500" placeholder="记录当前进度、目标或注意事项" @keydown.ctrl.enter.prevent="saveSnapshotNote"></textarea><button :disabled="savingSnapshotNote" @click="saveSnapshotNote"><Save :size="14" />{{ savingSnapshotNote ? '保存中' : '保存备注' }}</button></label>
               <button class="restore" :disabled="busyAction !== undefined" @click="restoreSnapshot"><RotateCcw :size="17" />{{ busyAction === 'restore' ? '正在恢复' : '恢复到这个时间节点' }}</button><p class="hint">恢复前会先创建当前状态的安全快照。</p>
             </template>
             <div v-else class="inspector-empty"><Clock3 :size="20" /><span>选择时间节点后显示详情</span></div>

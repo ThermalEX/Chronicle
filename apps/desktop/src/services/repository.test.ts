@@ -54,5 +54,14 @@ describe("desktop repository adapter", () => {
 
     await archiveRepository.openArchiveStorage("entry-1");
     expect(invoke).toHaveBeenLastCalledWith("open_entry_storage", { entryId: "entry-1" });
+
+    await archiveRepository.updateSnapshotNote("entry-1", "snapshot-1", "进入第二阶段前");
+    expect(invoke).toHaveBeenLastCalledWith("update_snapshot_note", {
+      entryId: "entry-1",
+      snapshotId: "snapshot-1",
+      note: "进入第二阶段前",
+    });
+    await archiveRepository.deleteSnapshot("entry-1", "snapshot-1");
+    expect(invoke).toHaveBeenLastCalledWith("delete_snapshot", { entryId: "entry-1", snapshotId: "snapshot-1" });
   });
 });
