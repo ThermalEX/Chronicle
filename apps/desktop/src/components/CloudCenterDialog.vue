@@ -6,7 +6,7 @@ import { cloudSettings, saveCloudSettings, type CloudSettings, type CloudSource 
 import { createBackdropDismissal } from "../services/dialogDismissal";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
-import { githubClassicPatUrl } from "../services/githubPat";
+import { githubClassicPatUrl, githubRepositoryName } from "../services/githubPat";
 
 const emit = defineEmits<{ close: []; saved: [] }>();
 const tab = ref<"repository" | "sources">("repository");
@@ -90,7 +90,7 @@ async function testSource(source: CloudSource): Promise<void> {
 }
 
 async function createGitHubRepository(source: CloudSource): Promise<void> {
-  const repositoryName = newRepositoryNames[source.id]?.trim() || "chronicle";
+  const repositoryName = newRepositoryNames[source.id]?.trim() || githubRepositoryName(source.id);
   busy.value = `create-repository:${source.id}`; error.value = ""; feedback.value = "";
   try {
     const created = await cloudRepository.createGitHubRepository(source, repositoryName, passwords[source.id] ?? "");
@@ -226,7 +226,7 @@ onMounted(() => { closeButton.value?.focus(); if (activeSource.value) void loadP
           <div v-if="!draft.sources.length" class="empty compact"><Server :size="28" /><h3>没有同步源</h3><p>Chronicle 支持保存多个云端配置，同时只启用其中一个。</p></div>
           <article v-for="source in draft.sources" v-else :key="source.id" class="source-card" :class="{ active: source.id === draft.activeSourceId }">
             <div class="source-title"><span><Server :size="17" /><b>{{ source.name }}</b><small>{{ source.provider === 'github' ? 'GitHub 仓库' : 'WebDAV' }}</small><small v-if="source.id === draft.activeSourceId">当前使用</small></span><button class="icon-danger" :aria-label="`删除 ${source.name}`" @click="removeSource(source)"><Trash2 :size="15" /></button></div>
-            <div v-if="source.provider === 'github'" class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>仓库</span><input v-model.trim="source.repository" type="text" placeholder="owner/repository" /></label><label><span>分支</span><input v-model.trim="source.branch" type="text" placeholder="main" /></label><label class="wide github-token-field"><span>访问令牌</span><div><input v-model="passwords[source.id]" type="password" autocomplete="current-password" placeholder="粘贴 GitHub 生成的访问令牌" /><a :href="githubClassicPatUrl()" target="_blank" rel="noreferrer"><ExternalLink :size="14" />在 GitHub 生成令牌</a></div><small>登录后直接生成带 repo 权限的令牌；GitHub 只显示一次，请复制后粘贴到这里。</small></label><label><span>新仓库名称</span><input v-model.trim="newRepositoryNames[source.id]" type="text" placeholder="chronicle" /></label><button class="create-repository-button" :disabled="Boolean(busy)" @click="createGitHubRepository(source)"><Plus :size="15" />创建私有仓库</button><label class="wide"><span>Chronicle 目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div>
+            <div v-if="source.provider === 'github'" class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>仓库</span><input v-model.trim="source.repository" type="text" placeholder="owner/repository" /></label><label><span>分支</span><input v-model.trim="source.branch" type="text" placeholder="main" /></label><label class="wide github-token-field"><span>访问令牌</span><div><input v-model="passwords[source.id]" type="password" autocomplete="current-password" placeholder="粘贴 GitHub 生成的访问令牌" /><a :href="githubClassicPatUrl()" target="_blank" rel="noreferrer"><ExternalLink :size="14" />在 GitHub 生成令牌</a></div><small>登录后直接生成带 repo 权限的令牌；GitHub 只显示一次，请复制后粘贴到这里。</small></label><label><span>新仓库名称</span><input v-model.trim="newRepositoryNames[source.id]" type="text" :placeholder="githubRepositoryName(source.id)" /></label><button class="create-repository-button" :disabled="Boolean(busy)" @click="createGitHubRepository(source)"><Plus :size="15" />创建私有仓库</button><label class="wide"><span>Chronicle 目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div>
             <div v-else class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>服务器地址</span><input v-model.trim="source.endpoint" type="url" placeholder="https://dav.example.com/remote.php/dav/files/user" /></label><label><span>用户名</span><input v-model.trim="source.username" type="text" autocomplete="username" /></label><label><span>密码</span><input v-model="passwords[source.id]" type="password" autocomplete="current-password" placeholder="留空表示使用已保存密码" /></label><label class="wide"><span>远端目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div>
             <button class="test-button" :disabled="Boolean(busy) || (source.provider === 'github' ? !source.repository || !source.branch : !source.endpoint || !source.username)" @click="testSource(source)">{{ busy === `test:${source.id}` ? '测试中…' : source.provider === 'github' ? '测试仓库访问' : '测试连接与读写' }}</button>
           </article>
