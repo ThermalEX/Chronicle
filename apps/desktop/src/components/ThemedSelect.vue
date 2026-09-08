@@ -79,6 +79,7 @@ watch(open, (visible, _, onCleanup) => {
       class="trigger"
       :disabled="disabled"
       :aria-label="label"
+      :title="label"
       aria-haspopup="listbox"
       :aria-expanded="open"
       @click="toggleOptions"

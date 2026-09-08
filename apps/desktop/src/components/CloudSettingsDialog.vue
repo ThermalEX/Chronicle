@@ -44,7 +44,7 @@ onMounted(() => closeButton.value?.focus());
 <template>
   <div class="dialog-backdrop" @pointerdown="backdrop.pointerDown" @pointerup="backdrop.pointerUp" @pointercancel="backdrop.pointerCancel">
     <section class="cloud-dialog" role="dialog" aria-modal="true" aria-labelledby="cloud-title">
-      <header><div class="heading-icon"><CloudCog :size="21" /></div><div><p>同步服务</p><h2 id="cloud-title">云端设置</h2></div><button ref="closeButton" aria-label="关闭云端设置" @click="emit('close')"><X :size="18" /></button></header>
+      <header><div class="heading-icon"><CloudCog :size="21" /></div><div><p>同步服务</p><h2 id="cloud-title">云端设置</h2></div><button ref="closeButton" aria-label="关闭云端设置" title="关闭云端设置" @click="emit('close')"><X :size="18" /></button></header>
       <main>
         <label class="enable-row"><span><b>启用 WebDAV 同步</b><small>在本地资料库和远端目录之间同步快照</small></span><input v-model="draft.enabled" type="checkbox" role="switch" /></label>
 

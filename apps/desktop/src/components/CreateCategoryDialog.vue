@@ -24,7 +24,7 @@ onMounted(() => input.value?.focus());
       <header>
         <span class="dialog-icon"><FolderPlus :size="20" /></span>
         <div><p>资料库分类</p><h2 id="category-dialog-title">{{ parentName ? '新建子分类' : '新建分类' }}</h2></div>
-        <button type="button" aria-label="关闭" @click="emit('close')"><X :size="18" /></button>
+        <button type="button" aria-label="关闭" title="关闭" @click="emit('close')"><X :size="18" /></button>
       </header>
       <main>
         <p v-if="parentName" class="parent-path">创建位置：{{ parentName }}</p>

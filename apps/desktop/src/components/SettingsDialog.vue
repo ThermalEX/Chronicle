@@ -196,7 +196,7 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
     <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <header>
         <div><p>CHRONICLE</p><h2 id="settings-title">设置</h2></div>
-        <button ref="closeButton" class="close-button" aria-label="关闭设置" @click="emit('close')"><X :size="18" /></button>
+        <button ref="closeButton" class="close-button" aria-label="关闭设置" title="关闭设置" @click="emit('close')"><X :size="18" /></button>
       </header>
 
       <div class="settings-layout">
@@ -224,7 +224,7 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
             <p v-if="diagnosticsError" class="recycle-error" role="alert">{{ diagnosticsError }}</p>
             <div v-if="diagnosticsBusy && !diagnostics.length" class="recycle-empty">正在读取错误记录…</div>
             <div v-else-if="!diagnostics.length" class="recycle-empty"><BellRing :size="24" /><b>暂无错误记录</b><span>后续失败操作会显示在这里。</span></div>
-            <div v-else class="diagnostics-list"><article v-for="entry in diagnostics" :key="entry.id"><span><b>{{ entry.operation }}</b><small>{{ new Date(entry.occurredAt).toLocaleString('zh-CN') }} · {{ entry.message }}</small><code>{{ entry.details }}</code></span><button :aria-label="`复制 ${entry.operation} 错误详情`" @click="copyDiagnostics(entry)"><ClipboardCopy :size="15" />复制</button></article></div>
+            <div v-else class="diagnostics-list"><article v-for="entry in diagnostics" :key="entry.id"><span><b>{{ entry.operation }}</b><small>{{ new Date(entry.occurredAt).toLocaleString('zh-CN') }} · {{ entry.message }}</small><code>{{ entry.details }}</code></span><button :aria-label="`复制 ${entry.operation} 错误详情`" :title="`复制 ${entry.operation} 错误详情`" @click="copyDiagnostics(entry)"><ClipboardCopy :size="15" />复制</button></article></div>
           </section>
 
           <section v-else-if="activeSection === 'backup'" aria-labelledby="backup-title">
@@ -234,7 +234,7 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
               <label class="setting-row select-row"><span><b>自动备份频率</b><small>仅在 Chronicle 运行时执行</small></span><ThemedSelect :model-value="draft.backupSchedule" :options="backupScheduleOptions" label="自动备份频率" @update:model-value="updateBackupSchedule" /></label>
               <div class="setting-row"><span><b>每个存档保留版本</b><small>默认保留全部版本；设置上限后清理最旧的普通备份</small></span><div class="retention-control"><label><input :checked="draft.retentionCount === null" type="checkbox" role="switch" @change="toggleRetentionLimit" /><span>无限制</span></label><input v-if="draft.retentionCount !== null" v-model.number="draft.retentionCount" aria-label="版本保留数量" class="number-input" type="number" min="1" max="999" /></div></div>
               <label class="setting-row"><span><b>启用回收站</b><small>删除的存档先移入回收站；关闭后直接永久删除</small></span><input v-model="draft.recycleBinEnabled" type="checkbox" role="switch" /></label>
-              <div class="setting-row recycle-path"><span><b>回收站位置</b><small>点击路径可在资源管理器中打开；右侧按钮用于选择新的位置</small></span><div><button class="recycle-location" type="button" :title="recycleLocation" :disabled="!isTauri()" @click="openRecycleBin">{{ recycleLocation }}</button><button aria-label="选择回收站文件夹" :disabled="!isTauri()" @click="chooseRecycleBinPath"><FolderOpen :size="15" /></button></div></div>
+              <div class="setting-row recycle-path"><span><b>回收站位置</b><small>点击路径可在资源管理器中打开；右侧按钮用于选择新的位置</small></span><div><button class="recycle-location" type="button" :title="recycleLocation" :disabled="!isTauri()" @click="openRecycleBin">{{ recycleLocation }}</button><button aria-label="选择回收站文件夹" title="选择回收站文件夹" :disabled="!isTauri()" @click="chooseRecycleBinPath"><FolderOpen :size="15" /></button></div></div>
               <p v-if="recycleLocationError" class="recycle-location-error" role="alert">{{ recycleLocationError }}</p>
             </div>
             <div class="path-card"><HardDrive :size="18" /><span><b>本地资料库</b><small>由 Chronicle 桌面应用数据目录管理</small></span><em>可用</em></div>
@@ -248,7 +248,7 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
             <div v-else class="recycle-list">
               <article v-for="item in recycleItems" :key="item.id">
                 <span class="recycle-icon"><Trash2 :size="17" /></span><span><b>{{ item.displayName }}</b><small>{{ item.kind === 'category' ? '分类' : '存档' }} · {{ item.entryCount }} 个存档 · {{ formatBytes(item.sizeBytes) }} · {{ new Date(item.deletedAt).toLocaleString() }}</small></span>
-                <div><button :disabled="recycleBusy" :aria-label="`恢复 ${item.displayName}`" @click="restoreItem(item)"><Undo2 :size="14" />恢复</button><button class="danger" :disabled="recycleBusy" :aria-label="`永久删除 ${item.displayName}`" @click="deleteItem(item)"><Trash2 :size="14" />删除</button></div>
+                <div><button :disabled="recycleBusy" :aria-label="`恢复 ${item.displayName}`" :title="`恢复 ${item.displayName}`" @click="restoreItem(item)"><Undo2 :size="14" />恢复</button><button class="danger" :disabled="recycleBusy" :aria-label="`永久删除 ${item.displayName}`" :title="`永久删除 ${item.displayName}`" @click="deleteItem(item)"><Trash2 :size="14" />删除</button></div>
               </article>
             </div>
           </section>

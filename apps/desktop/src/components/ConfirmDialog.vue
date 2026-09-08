@@ -20,7 +20,7 @@ onMounted(() => cancelButton.value?.focus());
 <template>
   <div class="confirm-backdrop" @pointerdown="backdrop.pointerDown" @pointerup="backdrop.pointerUp" @pointercancel="backdrop.pointerCancel">
     <section class="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message">
-      <header><span :class="{ destructive }"><AlertTriangle :size="20" /></span><div><p>需要确认</p><h2 id="confirm-title">{{ title }}</h2></div><button aria-label="关闭确认窗口" :disabled="busy" @click="emit('cancel')"><X :size="18" /></button></header>
+      <header><span :class="{ destructive }"><AlertTriangle :size="20" /></span><div><p>需要确认</p><h2 id="confirm-title">{{ title }}</h2></div><button aria-label="关闭确认窗口" title="关闭确认窗口" :disabled="busy" @click="emit('cancel')"><X :size="18" /></button></header>
       <p id="confirm-message" class="message">{{ message }}</p>
       <footer><button ref="cancelButton" class="cancel" :disabled="busy" @click="emit('cancel')">取消</button><button class="confirm" :class="{ destructive }" :disabled="busy" @click="emit('confirm')">{{ busy ? '处理中' : (confirmLabel || '确认') }}</button></footer>
     </section>

@@ -62,7 +62,7 @@ onMounted(() => nameInput.value?.focus());
     <form class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-title" @submit.prevent="submit">
       <header>
         <div><p>{{ editName ? '编辑存档' : '新建存档' }}</p><h2 id="create-title">{{ editName ? '修改存档设置' : '添加到 Chronicle' }}</h2></div>
-        <button type="button" aria-label="关闭新建存档" @click="emit('close')"><X :size="18" /></button>
+        <button type="button" aria-label="关闭新建存档" title="关闭新建存档" @click="emit('close')"><X :size="18" /></button>
       </header>
 
       <main>
@@ -83,7 +83,7 @@ onMounted(() => nameInput.value?.focus());
             <div v-for="source in sources" :key="source.id">
               <span class="source-icon"><Folder v-if="source.kind === 'folder'" :size="17" /><File v-else :size="17" /></span>
               <span><b>{{ source.name }}</b><small :title="source.path">{{ source.path }}</small></span>
-              <button type="button" :aria-label="`移除 ${source.name}`" :disabled="submitting" @click="emit('remove', source.id)"><Trash2 :size="15" /></button>
+              <button type="button" :aria-label="`移除 ${source.name}`" :title="`移除 ${source.name}`" :disabled="submitting" @click="emit('remove', source.id)"><Trash2 :size="15" /></button>
             </div>
           </div>
           <small v-else-if="attempted" class="field-error">请至少添加一个文件或文件夹</small>

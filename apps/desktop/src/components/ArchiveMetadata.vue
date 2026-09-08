@@ -44,12 +44,12 @@ function addTag(): void {
     <section aria-labelledby="tags-heading">
       <header><b id="tags-heading">标签</b><span>{{ archive.tags.length }} 个</span></header>
       <div class="tag-editor">
-        <span v-for="tag in archive.tags" :key="tag" class="tag-chip"><Tag :size="12" /><span>{{ tag }}</span><button type="button" :aria-label="`删除标签 ${tag}`" :disabled="savingTags" @click="emit('removeTag', tag)"><X :size="12" /></button></span>
+        <span v-for="tag in archive.tags" :key="tag" class="tag-chip"><Tag :size="12" /><span>{{ tag }}</span><button type="button" :aria-label="`删除标签 ${tag}`" :title="`删除标签 ${tag}`" :disabled="savingTags" @click="emit('removeTag', tag)"><X :size="12" /></button></span>
         <span v-if="!archive.tags.length" class="tag-empty">暂无标签</span>
         <form class="tag-input" @submit.prevent="addTag">
           <Tag :size="13" />
           <input v-model="tagInput" type="text" maxlength="30" placeholder="添加标签" aria-label="新标签名称" :disabled="savingTags" />
-          <button type="submit" aria-label="添加标签" :disabled="savingTags || !tagInput.trim()"><Plus :size="14" /></button>
+          <button type="submit" aria-label="添加标签" title="添加标签" :disabled="savingTags || !tagInput.trim()"><Plus :size="14" /></button>
         </form>
       </div>
     </section>
