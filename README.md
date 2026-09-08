@@ -29,13 +29,11 @@ Chronicle 是一个面向游戏存档、软件配置和任意文件夹的桌面�
 
 | 主工作区 | 云端设置 |
 | --- | --- |
-| 待放置：`docs/images/workspace.png` | 待放置：`docs/images/cloud-settings.png` |
+| ![主工作区](docs/images/workspace.png) | ![云端设置](docs/images/cloud-settings.png) |
 
 | 资料库管理 | 深色模式 |
 | --- | --- |
-| 待放置：`docs/images/library.png` | 待放置：`docs/images/dark-mode.png` |
-
-将对应 PNG 放入 `docs/images/` 后，把上表中的占位文本替换为 Markdown 图片即可。
+| ![资料库管理](docs/images/library.png) | ![深色模式](docs/images/dark-mode.png) |
 
 ## 技术栈
 
@@ -62,6 +60,11 @@ cd src-tauri
 cargo test
 cargo clippy -- -D warnings
 ```
+
+## Windows 发行版与资料库位置
+
+- **安装版**：NSIS 安装向导支持选择安装位置；资料库始终保存到 `%LOCALAPPDATA%\com.thermalex.chronicle\Chronicle`，避免在 `Program Files` 等安装目录写入用户数据。
+- **便携版**：解压后直接运行 `Chronicle.exe`。首次启动会在 EXE 同级创建 `Chronicle-data/` 作为新资料库；便携版不会读取、迁移或回退到 App Local Data。请保留 `Chronicle.exe`、`portable.marker` 与 `Chronicle-data/` 的同级关系。
 
 ## GitHub 同步权限
 
