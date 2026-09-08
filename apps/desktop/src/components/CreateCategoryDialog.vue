@@ -39,7 +39,7 @@ onMounted(() => input.value?.focus());
 </template>
 
 <style scoped>
-.dialog-backdrop { position: fixed; z-index: 55; inset: 0; display: grid; place-items: center; padding: 24px; background: #1024218a; backdrop-filter: blur(3px); }
+.dialog-backdrop { position: fixed; z-index: 55; inset: 0; display: grid; place-items: center; padding: 24px; background: #18181b99; backdrop-filter: blur(3px); }
 .category-dialog { width: min(440px, calc(100vw - 48px)); overflow: hidden; background: var(--surface); border: 1px solid var(--border-2); border-radius: 13px; box-shadow: 0 24px 80px #0d24205c; }
 header { display: grid; grid-template-columns: 40px 1fr 36px; align-items: center; gap: 11px; min-height: 72px; padding: 0 18px; border-bottom: 1px solid var(--border); }
 .dialog-icon { display: grid; place-items: center; width: 38px; height: 38px; color: var(--primary); background: var(--primary-soft); border-radius: 9px; }

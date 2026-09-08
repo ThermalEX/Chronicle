@@ -106,7 +106,7 @@ onMounted(() => nameInput.value?.focus());
 </template>
 
 <style scoped>
-.dialog-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 28px; background: #1024218a; backdrop-filter: blur(3px); }
+.dialog-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 28px; background: #18181b99; backdrop-filter: blur(3px); }
 .create-dialog { display: grid; grid-template-rows: 72px minmax(0, 1fr) 64px; width: min(720px, calc(100vw - 56px)); max-height: calc(100vh - 56px); overflow: hidden; background: var(--surface); border: 1px solid var(--border-2); border-radius: 13px; box-shadow: 0 24px 80px #0d24205c; }
 header, footer { display: flex; align-items: center; justify-content: space-between; padding: 0 22px; }
 header { border-bottom: 1px solid var(--border); } header p, header h2 { margin: 0; } header p { color: var(--primary); font-size: 9px; font-weight: 750; letter-spacing: .1em; } header h2 { margin-top: 4px; font-size: 19px; }

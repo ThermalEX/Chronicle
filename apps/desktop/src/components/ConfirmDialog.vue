@@ -28,7 +28,7 @@ onMounted(() => cancelButton.value?.focus());
 </template>
 
 <style scoped>
-.confirm-backdrop { position: fixed; z-index: 80; inset: 0; display: grid; place-items: center; padding: 24px; background: #1024218a; backdrop-filter: blur(3px); }
+.confirm-backdrop { position: fixed; z-index: 80; inset: 0; display: grid; place-items: center; padding: 24px; background: #18181b99; backdrop-filter: blur(3px); }
 .confirm-dialog { width: min(440px, calc(100vw - 48px)); overflow: hidden; background: #fff; border: 1px solid var(--border-2); border-radius: 12px; box-shadow: 0 24px 80px #0d24205c; }
 header { display: grid; grid-template-columns: 40px 1fr 38px; align-items: center; gap: 11px; padding: 17px 18px; border-bottom: 1px solid var(--border); }
 header > span { display: grid; place-items: center; width: 38px; height: 38px; color: #9a6700; background: #fff4d6; border-radius: 9px; }header > span.destructive { color: #b42318; background: #feeceb; }

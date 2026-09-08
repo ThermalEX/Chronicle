@@ -278,7 +278,7 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
 </template>
 
 <style scoped>
-.dialog-backdrop { position: fixed; z-index: 40; inset: 0; display: grid; place-items: center; padding: 32px; background: #1024218a; backdrop-filter: blur(3px); }
+.dialog-backdrop { position: fixed; z-index: 40; inset: 0; display: grid; place-items: center; padding: 32px; background: #18181b99; backdrop-filter: blur(3px); }
 .settings-dialog { display: grid; grid-template-rows: 70px minmax(0, 1fr) 66px; width: min(860px, calc(100vw - 64px)); height: min(650px, calc(100vh - 64px)); overflow: hidden; background: var(--surface); border: 1px solid var(--border-2); border-radius: 13px; box-shadow: 0 24px 80px #0d24205c; }
 header, footer { display: flex; align-items: center; justify-content: space-between; padding: 0 22px; }
 header { border-bottom: 1px solid var(--border); }
