@@ -23,7 +23,7 @@ import { selectArchivePanelCategory, selectCategoryPanel } from "./services/arch
 import { applyAppearance, normalizeAppearance } from "./services/appearance";
 import { floatingMenuStyle, positionFloatingMenu } from "./services/floatingMenu";
 import { filterTimeline, type TimelineSort } from "./services/snapshotTimeline";
-import { appSettings, cloudSettings, initializeSettings, saveAppSettings, shortcutMatches } from "./services/settings";
+import { appSettings, cloudLibraryIndicator, cloudSettings, initializeSettings, saveAppSettings, shortcutMatches } from "./services/settings";
 import { categoryBreadcrumb } from "./services/categoryBreadcrumb";
 
 type CategoryTreeNode = CategoryRecord & {
@@ -95,6 +95,7 @@ let confirmResolver: ((confirmed: boolean) => void) | undefined;
 const notice = ref<{ type: "success" | "error" | "info"; message: string }>();
 let noticeTimer: number | undefined;
 const automaticSyncTimers = new Map<string, number>();
+const cloudLibrary = computed(() => cloudLibraryIndicator(cloudSettings));
 
 function queueAutomaticUpload(archive?: ArchiveRecord): void {
   if (!archive || !isTauriRuntime || archive.storagePolicy !== "local_and_remote" || archive.syncMode !== "automatic" || !cloudSettings.activeSourceId) return;
@@ -808,8 +809,8 @@ onBeforeUnmount(() => {
 <template>
   <div class="app-shell">
     <header class="titlebar">
-      <div class="brand"><span class="brand-mark"><Clock3 :size="18" /></span><span>Chronicle</span></div>
-      <div class="sync-state"><i></i>本地资料库可用</div>
+      <div class="brand"><span>Chronicle</span></div>
+      <div class="sync-states"><div class="sync-state"><i></i>本地资料库可用</div><div class="sync-state" :class="{ unavailable: !cloudLibrary.available }"><i></i>{{ cloudLibrary.label }}</div></div>
       <div class="toolbar"><button class="toolbar-action mode-toggle" :class="{ 'is-dark': appSettings.colorMode === 'dark' }" :aria-label="appSettings.colorMode === 'dark' ? '切换到日间模式' : '切换到夜间模式'" :aria-pressed="appSettings.colorMode === 'dark'" @click="toggleColorMode"><Sun v-if="appSettings.colorMode === 'dark'" :size="17" /><Moon v-else :size="17" /></button><button class="toolbar-action" aria-label="云端设置" @click="cloudSettingsOpen = true"><CloudCog :size="17" /></button><button class="toolbar-action" aria-label="应用设置" @click="settingsOpen = true"><Settings2 :size="17" /></button></div>
     </header>
 

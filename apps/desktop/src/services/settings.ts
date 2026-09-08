@@ -45,6 +45,13 @@ export interface CloudSettings {
   retryLimit: number;
 }
 
+export function cloudLibraryIndicator(settings: Pick<CloudSettings, "enabled" | "activeSourceId" | "sources">): { available: boolean; label: string } {
+  if (!settings.enabled || !settings.sources.length) return { available: false, label: "云端资料库未启用" };
+  if (settings.sources.length > 1) return { available: true, label: `云端资料库：${settings.sources.length} 个同步源` };
+  const source = settings.sources.find((item) => item.id === settings.activeSourceId) ?? settings.sources[0];
+  return { available: true, label: `云端资料库：${source.name}` };
+}
+
 const APP_SETTINGS_KEY = "chronicle.app-settings.v2";
 const CLOUD_SETTINGS_KEY = "chronicle.cloud-settings.v2";
 

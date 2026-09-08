@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shortcutFromKeyboardEvent, shortcutMatches } from "./settings";
+import { cloudLibraryIndicator, shortcutFromKeyboardEvent, shortcutMatches, type CloudSettings } from "./settings";
 
 function keyEvent(key: string, options: Partial<KeyboardEvent> = {}): KeyboardEvent {
   return { key, ctrlKey: false, shiftKey: false, altKey: false, metaKey: false, ...options } as KeyboardEvent;
@@ -22,5 +22,24 @@ describe("shortcutFromKeyboardEvent", () => {
   it("ignores modifier-only and unmodified keys", () => {
     expect(shortcutFromKeyboardEvent(keyEvent("Control", { ctrlKey: true }))).toBeNull();
     expect(shortcutFromKeyboardEvent(keyEvent("b"))).toBeNull();
+  });
+});
+
+describe("cloudLibraryIndicator", () => {
+  const source = {
+    id: "github-1", name: "GitHub 资料库", provider: "github" as const, endpoint: "", username: "",
+    remotePath: "/Chronicle", credentialRef: "chronicle-github:github-1", repository: "owner/chronicle", branch: "main",
+  };
+  const base: Omit<CloudSettings, "enabled" | "sources"> = {
+    activeSourceId: source.id, maxConcurrentMetadataReads: 2, maxConcurrentTransfers: 2, requestDelayMs: 150, retryLimit: 5,
+  };
+
+  it("reports a configured cloud library by its source name", () => {
+    expect(cloudLibraryIndicator({ ...base, enabled: true, sources: [source] })).toEqual({ available: true, label: "云端资料库：GitHub 资料库" });
+  });
+
+  it("reports disabled and multiple cloud libraries without pretending they are available", () => {
+    expect(cloudLibraryIndicator({ ...base, enabled: false, sources: [source] })).toEqual({ available: false, label: "云端资料库未启用" });
+    expect(cloudLibraryIndicator({ ...base, enabled: true, sources: [source, { ...source, id: "webdav-1", name: "WebDAV" }] })).toEqual({ available: true, label: "云端资料库：2 个同步源" });
   });
 });

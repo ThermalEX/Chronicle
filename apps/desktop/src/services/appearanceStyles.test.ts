@@ -22,4 +22,8 @@ describe("appearance stylesheet", () => {
       : `:root[data-color-mode="dark"][data-color-theme="${theme}"]`;
     expect(rule(selector)).toContain("--icon:");
   });
+
+  it("uses the bright titlebar foreground for idle toolbar icons", () => {
+    expect(rule(".toolbar-action")).toContain("color: var(--titlebar-text)");
+  });
 });
