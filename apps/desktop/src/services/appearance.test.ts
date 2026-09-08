@@ -19,4 +19,11 @@ describe("appearance settings", () => {
       colorMode: "dark",
     });
   });
+
+  it("accepts the neutral gray theme", () => {
+    expect(normalizeAppearance({ colorTheme: "gray", colorMode: "dark" })).toEqual({
+      colorTheme: "gray",
+      colorMode: "dark",
+    });
+  });
 });

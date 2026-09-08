@@ -47,6 +47,7 @@ const colorThemeOptions: ThemedSelectOption[] = [
   { value: "violet", label: "紫罗兰" },
   { value: "amber", label: "琥珀" },
   { value: "rose", label: "玫红" },
+  { value: "gray", label: "灰色" },
 ];
 const colorModeOptions: ThemedSelectOption[] = [
   { value: "light", label: "日间模式" },

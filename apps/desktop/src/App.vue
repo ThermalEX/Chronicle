@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {
-  Check, ChevronDown, ChevronLeft, ChevronRight, Clock3, CloudCog, File,
+  Check, ChevronLeft, ChevronRight, Clock3, CloudCog, File,
   Folder, FolderArchive, FolderOpen, HardDrive, LockKeyhole, MoreHorizontal, Moon, Pencil, Plus, RotateCcw, Save,
   Search, Settings2, SlidersHorizontal, UploadCloud, X,
   Sun, Trash2,
@@ -810,7 +810,7 @@ onBeforeUnmount(() => {
     <header class="titlebar">
       <div class="brand"><span class="brand-mark"><Clock3 :size="18" /></span><span>Chronicle</span></div>
       <div class="sync-state"><i></i>本地资料库可用</div>
-      <div class="toolbar"><button :aria-label="appSettings.colorMode === 'dark' ? '切换到日间模式' : '切换到夜间模式'" @click="toggleColorMode"><Sun v-if="appSettings.colorMode === 'dark'" :size="18" /><Moon v-else :size="18" /></button><button aria-label="云端设置" @click="cloudSettingsOpen = true"><CloudCog :size="18" /></button><button aria-label="应用设置" @click="settingsOpen = true"><Settings2 :size="18" /></button></div>
+      <div class="toolbar"><button class="toolbar-action mode-toggle" :class="{ 'is-dark': appSettings.colorMode === 'dark' }" :aria-label="appSettings.colorMode === 'dark' ? '切换到日间模式' : '切换到夜间模式'" :aria-pressed="appSettings.colorMode === 'dark'" @click="toggleColorMode"><Sun v-if="appSettings.colorMode === 'dark'" :size="17" /><Moon v-else :size="17" /></button><button class="toolbar-action" aria-label="云端设置" @click="cloudSettingsOpen = true"><CloudCog :size="17" /></button><button class="toolbar-action" aria-label="应用设置" @click="settingsOpen = true"><Settings2 :size="17" /></button></div>
     </header>
 
     <aside class="sidebar">
@@ -843,7 +843,7 @@ onBeforeUnmount(() => {
       <div class="spacer"></div>
       <div v-if="draggedArchiveId || draggedCategoryId" class="trash-drop-zone" :class="{ active: trashDropActive }" @dragover="handleTrashDragOver" @dragleave="trashDropActive = false" @drop.prevent="dropInTrash"><Trash2 :size="19" /><span><b>{{ appSettings.recycleBinEnabled ? '移入回收站' : '永久删除' }}</b><small>拖到这里后松开</small></span></div>
       <section class="storage"><div><HardDrive :size="17" /><span>本地存储</span><b>{{ formatBytes(repositoryInfo.totalBytes) }}</b><button aria-label="打开本地资料库文件夹" title="打开本地资料库文件夹" @click="openRepositoryFolder"><FolderOpen :size="14" /></button></div><small :title="repositoryInfo.path">{{ repositoryInfo.path || 'Chronicle 本地资料库' }}</small></section>
-      <button class="account"><span class="avatar">T</span><span><b>ThermalEX</b><small>本机设备</small></span><ChevronDown :size="16" /></button>
+      <div class="account"><span class="avatar">T</span><span><b>ThermalEX</b><small>本机设备</small></span></div>
     </aside>
 
     <main class="workspace" :class="{ 'archive-panel-collapsed': archivePanelCollapsed }">
@@ -886,8 +886,9 @@ onBeforeUnmount(() => {
               <div class="section-title"><div><p class="label">已选版本</p><h3>{{ formatTime(selectedSnapshot.createdAt) }}</h3></div><span class="verified"><Check :size="13" />完整</span></div>
               <dl><div><dt>类型</dt><dd>{{ selectedSnapshot.title }}</dd></div><div><dt>快照大小</dt><dd>{{ formatBytes(selectedSnapshot.totalBytes) }}</dd></div><div><dt>存储位置</dt><dd>仅本地</dd></div><div><dt>内容校验</dt><dd class="hash">{{ selectedSnapshot.contentHash.slice(0, 6) }}…{{ selectedSnapshot.contentHash.slice(-4) }}</dd></div></dl>
               <div class="changes"><p>内容变化</p><div><span><i class="green"></i>新增</span><b>{{ selectedSnapshot.changes.added }}</b></div><div><span><i class="amber"></i>修改</span><b>{{ selectedSnapshot.changes.modified }}</b></div><div><span><i class="red"></i>删除</span><b>{{ selectedSnapshot.changes.deleted }}</b></div></div>
-              <label class="snapshot-note"><span>备注</span><textarea v-model="snapshotNote" maxlength="500" placeholder="记录当前进度、目标或注意事项" @keydown.ctrl.enter.prevent="saveSnapshotNote"></textarea><button :disabled="savingSnapshotNote" @click="saveSnapshotNote"><Save :size="14" />{{ savingSnapshotNote ? '保存中' : '保存备注' }}</button></label>
-              <button class="restore" :disabled="busyAction !== undefined" @click="restoreSnapshot"><RotateCcw :size="17" />{{ busyAction === 'restore' ? '正在恢复' : '恢复到这个时间节点' }}</button><p class="hint">恢复前会先创建当前状态的安全快照。</p>
+              <label class="snapshot-note"><span>备注</span><textarea v-model="snapshotNote" maxlength="500" placeholder="记录当前进度、目标或注意事项" @keydown.ctrl.enter.prevent="saveSnapshotNote"></textarea><button :disabled="savingSnapshotNote" @click="saveSnapshotNote"><Save :size="16" />{{ savingSnapshotNote ? '保存中' : '保存备注' }}</button></label>
+              <div class="inspector-divider" aria-hidden="true"></div>
+              <button class="restore" :disabled="busyAction !== undefined" @click="restoreSnapshot"><RotateCcw :size="16" />{{ busyAction === 'restore' ? '正在恢复' : '恢复到这个时间节点' }}</button><p class="hint">恢复前会先创建当前状态的安全快照。</p>
             </template>
             <div v-else class="inspector-empty"><Clock3 :size="20" /><span>选择时间节点后显示详情</span></div>
           </aside>

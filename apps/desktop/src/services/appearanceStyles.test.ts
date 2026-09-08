@@ -9,14 +9,14 @@ function rule(selector: string): string {
 }
 
 describe("appearance stylesheet", () => {
-  it.each(["indigo", "violet", "amber", "rose"])("gives %s its own structural light colors", (theme) => {
+  it.each(["indigo", "violet", "amber", "rose", "gray"])("gives %s its own structural light colors", (theme) => {
     const content = rule(`:root[data-color-theme="${theme}"]`);
     expect(content).toContain("--titlebar:");
     expect(content).toContain("--sidebar:");
     expect(content).toContain("--app-background:");
   });
 
-  it.each(["teal", "indigo", "violet", "amber", "rose"])("keeps %s dark-mode icons legible", (theme) => {
+  it.each(["teal", "indigo", "violet", "amber", "rose", "gray"])("keeps %s dark-mode icons legible", (theme) => {
     const selector = theme === "teal"
       ? ':root[data-color-mode="dark"]'
       : `:root[data-color-mode="dark"][data-color-theme="${theme}"]`;
