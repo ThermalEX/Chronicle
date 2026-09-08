@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {
-  ArchiveRestore, ArrowLeft, Check, ChevronDown, ChevronRight, Clock3, CloudCog, File, FileClock,
+  ArrowLeft, Check, ChevronDown, ChevronRight, Clock3, CloudCog, File,
   Folder, FolderArchive, FolderOpen, HardDrive, LockKeyhole, MoreHorizontal, Pencil, Plus, RotateCcw,
   Search, Settings2, SlidersHorizontal, UploadCloud, X,
   Trash2,
@@ -22,13 +22,6 @@ import { compareArchiveNames, type ArchiveSortMode } from "./services/archiveSor
 import { positionFloatingMenu } from "./services/floatingMenu";
 import { filterTimeline, type TimelineSort } from "./services/snapshotTimeline";
 import { appSettings, cloudSettings, initializeSettings, shortcutMatches } from "./services/settings";
-
-const categoryDefinitions = [
-  { name: "游戏", icon: ArchiveRestore },
-  { name: "创作", icon: FileClock },
-  { name: "工作", icon: Folder },
-  { name: "配置", icon: Settings2 },
-];
 
 type CategoryTreeNode = CategoryRecord & {
   nodeType: "category";
@@ -132,7 +125,7 @@ const categoryTreeNodes = computed<Array<CategoryTreeNode | ArchiveTreeNode>>(()
         nodeType: "category",
         depth,
         count: archives.value.filter((archive) => archive.categoryId && ids.has(archive.categoryId)).length,
-        icon: categoryDefinitions.find((item) => item.name === category.name)?.icon ?? Folder,
+        icon: Folder,
         hasChildren: categoryRecords.value.some((item) => item.parentId === category.id) || directArchives.length > 0,
       });
       if (!expandedCategoryIds.value.has(category.id)) return;
