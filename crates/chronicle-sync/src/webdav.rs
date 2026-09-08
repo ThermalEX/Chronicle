@@ -21,7 +21,7 @@ pub struct WebDavSource {
 
 #[cfg(test)]
 mod tests {
-    use super::{WebDavClient, WebDavSource};
+    use super::{WebDavClient, WebDavSource, requires_delete_before_overwrite};
     use crate::RequestPolicy;
 
     #[test]
@@ -42,6 +42,16 @@ mod tests {
         );
         assert_eq!(client.url(""), "https://dav.example.test/user/Chronicle");
     }
+
+    #[test]
+    fn only_jianguoyun_uses_the_non_atomic_overwrite_fallback() {
+        assert!(requires_delete_before_overwrite(
+            "https://dav.jianguoyun.com/dav/"
+        ));
+        assert!(!requires_delete_before_overwrite(
+            "https://dav.example.test/user/"
+        ));
+    }
 }
 
 #[derive(Debug, Error)]
@@ -61,6 +71,12 @@ pub enum WebDavError {
 }
 
 pub type Result<T> = std::result::Result<T, WebDavError>;
+
+fn requires_delete_before_overwrite(endpoint: &str) -> bool {
+    let endpoint = endpoint.trim_start().to_ascii_lowercase();
+    endpoint.starts_with("https://dav.jianguoyun.com/")
+        || endpoint.starts_with("http://dav.jianguoyun.com/")
+}
 
 /// Small `WebDAV` client with bounded retries and atomic temporary-object uploads.
 #[derive(Clone)]
@@ -179,10 +195,26 @@ impl WebDavClient {
         let destination = self.url(relative);
         let move_method = Method::from_bytes(b"MOVE")
             .map_err(|error| WebDavError::InvalidMethod(error.to_string()))?;
-        if let Err(error) = self
+        let move_result = self
             .request(move_method, &temporary, None, Some(destination))
             .await
-        {
+            .map(|_| ());
+        let move_result = match move_result {
+            Err(WebDavError::Status { status: 409, .. })
+                if requires_delete_before_overwrite(&self.source.endpoint) =>
+            {
+                // Jianguoyun accepts MOVE but rejects an overwrite MOVE with 409. The temporary
+                // object is already complete, so only this provider takes the delete-and-retry path.
+                self.delete(relative).await?;
+                let move_method = Method::from_bytes(b"MOVE")
+                    .map_err(|error| WebDavError::InvalidMethod(error.to_string()))?;
+                self.request(move_method, &temporary, None, Some(self.url(relative)))
+                    .await
+                    .map(|_| ())
+            }
+            result => result,
+        };
+        if let Err(error) = move_result {
             let _ = self.delete(&temporary).await;
             return Err(error);
         }
@@ -237,6 +269,8 @@ impl WebDavClient {
         let move_method = Method::from_bytes(b"MOVE")
             .map_err(|error| WebDavError::InvalidMethod(error.to_string()))?;
         self.request(move_method, &probe, None, Some(self.url(&moved)))
+            .await?;
+        self.put_atomic(&moved, b"chronicle-updated".to_vec())
             .await?;
         self.delete(&moved).await
     }
