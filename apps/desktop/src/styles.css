@@ -17,7 +17,7 @@
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; min-width: 1024px; min-height: 720px; overflow: hidden; }
+body { margin: 0; min-width: 720px; min-height: 560px; overflow: hidden; }
 button, input, select { font: inherit; }
 button { color: inherit; border: 0; cursor: pointer; }
 button:disabled { cursor: wait; opacity: .62; }
@@ -209,9 +209,32 @@ kbd { padding: 2px 5px; color: var(--text-3); background: #edf1ef; border: 1px s
 
 @keyframes pulse { 50% { opacity: .45; transform: scale(.75); } }
 @media (max-width: 1180px) {
-  .detail-content { grid-template-columns: minmax(360px, 1fr) 238px; }
-  .detail-header p { max-width: 260px; }
+  .app-shell { grid-template-columns: 200px minmax(0, 1fr); }
+  .titlebar { grid-template-columns: 200px 1fr auto; }
+  .workspace { grid-template-columns: minmax(220px, 250px) minmax(0, 1fr); }
+  .detail-content { display: block; overflow-y: auto; }
+  .timeline-area { padding: 16px 14px; overflow: visible; }
+  .inspector { padding: 16px 14px; border-top: 1px solid var(--border); border-left: 0; }
+  .detail-header { min-height: 66px; padding: 10px 14px; }
+  .detail-icon { display: none; }
+  .detail-header h2 { max-width: 170px; }
+  .detail-header p { max-width: 180px; }
+  .actions { gap: 5px; margin-left: 8px; }
   .secondary { width: 38px; padding: 0; font-size: 0; }
+  .timeline-table-head, .timeline-table article { grid-template-columns: 112px minmax(0, 1fr) 78px 68px; gap: 8px; padding: 0 10px; }
+  .timeline-table article > div button { width: 30px; padding: 0; font-size: 0; }
+}
+@media (max-width: 860px) {
+  body { min-width: 640px; }
+  .app-shell { grid-template-columns: 176px minmax(0, 1fr); }
+  .titlebar { grid-template-columns: 176px 1fr auto; }
+  .sidebar { padding: 12px 8px 8px; }
+  .workspace { grid-template-columns: minmax(190px, 220px) minmax(0, 1fr); }
+  .timeline-toolbar { align-items: stretch; flex-direction: column; }
+  .timeline-toolbar > label { width: 100%; }
+  .timeline-toolbar .themed-select { width: 100%; }
+  .snapshot-create { grid-template-columns: minmax(0, 1fr); }
+  .snapshot-create .accent { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
