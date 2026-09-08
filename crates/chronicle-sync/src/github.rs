@@ -178,11 +178,13 @@ impl GitHubClient {
     }
 
     fn api(&self, suffix: &str) -> String {
-        format!(
-            "https://api.github.com/repos/{}/{}",
-            self.source.repository,
-            suffix.trim_start_matches('/')
-        )
+        let root = format!("https://api.github.com/repos/{}", self.source.repository);
+        let suffix = suffix.trim_start_matches('/');
+        if suffix.is_empty() {
+            root
+        } else {
+            format!("{root}/{suffix}")
+        }
     }
 
     fn scoped_path(&self, path: &str) -> Result<String> {
@@ -463,6 +465,25 @@ mod tests {
             "Chronicle/catalog.json"
         );
         assert!(client.scoped_path("../settings.json").is_err());
+    }
+
+    #[test]
+    fn repository_endpoint_has_no_trailing_slash() {
+        let client = GitHubClient::new(
+            GitHubSource {
+                repository: "owner/repository".into(),
+                branch: "main".into(),
+                remote_path: "/Chronicle".into(),
+                token: "token".into(),
+            },
+            RequestPolicy::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            client.api(""),
+            "https://api.github.com/repos/owner/repository"
+        );
     }
 
     #[test]
