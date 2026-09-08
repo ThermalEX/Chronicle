@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {
-  ArrowLeft, Check, ChevronDown, ChevronRight, Clock3, CloudCog, File,
+  Check, ChevronDown, ChevronLeft, ChevronRight, Clock3, CloudCog, File,
   Folder, FolderArchive, FolderOpen, HardDrive, LockKeyhole, MoreHorizontal, Pencil, Plus, RotateCcw,
   Search, Settings2, SlidersHorizontal, UploadCloud, X,
   Trash2,
@@ -19,6 +19,7 @@ import { cloudRepository } from "./services/cloud";
 import { diagnosticsRepository } from "./services/diagnostics";
 import { diagnosticFromError, type DiagnosticContext } from "./services/diagnosticsCore";
 import { compareArchiveNames, type ArchiveSortMode } from "./services/archiveSorting";
+import { selectArchivePanelCategory, selectCategoryPanel } from "./services/archiveWorkspace";
 import { floatingMenuStyle, positionFloatingMenu } from "./services/floatingMenu";
 import { filterTimeline, type TimelineSort } from "./services/snapshotTimeline";
 import { appSettings, cloudSettings, initializeSettings, shortcutMatches } from "./services/settings";
@@ -44,7 +45,7 @@ const snapshots = ref<SnapshotRecord[]>([]);
 const selectedCategoryId = ref("all");
 const selectedArchiveId = ref<string>();
 const selectedSnapshotId = ref<string>();
-const archiveDetailOpen = ref(false);
+const archivePanelCollapsed = ref(false);
 const snapshotDescription = ref("");
 const snapshotSearch = ref("");
 const snapshotSort = ref<TimelineSort>("newest");
@@ -513,20 +514,22 @@ async function restoreSnapshot() {
 }
 
 function selectCategory(categoryId: string) {
-  selectedCategoryId.value = categoryId;
+  const panelState = selectCategoryPanel({ categoryId: selectedCategoryId.value, collapsed: archivePanelCollapsed.value }, categoryId);
+  selectedCategoryId.value = panelState.categoryId;
+  archivePanelCollapsed.value = panelState.collapsed;
   activeTreeNodeId.value = `category:${categoryId}`;
-  selectedArchiveId.value = filteredArchives.value[0]?.id;
-  archiveDetailOpen.value = false;
+  if (!panelState.collapsed) selectedArchiveId.value = filteredArchives.value[0]?.id;
 }
 
 function selectArchive(archiveId: string) {
   selectedArchiveId.value = archiveId;
   activeTreeNodeId.value = `archive:${archiveId}`;
-  archiveDetailOpen.value = true;
 }
 
 function selectArchiveFromTree(archive: ArchiveRecord) {
-  selectedCategoryId.value = archive.categoryId ?? "all";
+  const panelState = selectArchivePanelCategory(archive.categoryId);
+  selectedCategoryId.value = panelState.categoryId;
+  archivePanelCollapsed.value = panelState.collapsed;
   selectArchive(archive.id);
 }
 
@@ -786,8 +789,8 @@ onBeforeUnmount(() => {
       <button class="account"><span class="avatar">T</span><span><b>ThermalEX</b><small>本机设备</small></span><ChevronDown :size="16" /></button>
     </aside>
 
-    <main class="workspace" :class="{ 'archive-workspace-open': archiveDetailOpen }">
-      <section v-if="!archiveDetailOpen" class="archive-panel" aria-labelledby="archives-title">
+    <main class="workspace" :class="{ 'archive-panel-collapsed': archivePanelCollapsed }">
+      <section v-show="!archivePanelCollapsed" class="archive-panel" aria-labelledby="archives-title">
         <div class="panel-title"><div><p class="label">{{ selectedCategoryName }}</p><h1 id="archives-title">存档</h1></div><div class="sort-control"><button class="icon-button" aria-label="排列方式" :aria-expanded="sortMenuOpen" @click="sortMenuOpen = !sortMenuOpen"><SlidersHorizontal :size="18" /></button><div v-if="sortMenuOpen" class="sort-menu"><button :class="{ active: sortMode === 'newest' }" @click="sortMode = 'newest'; sortMenuOpen = false">时间 新–旧</button><button :class="{ active: sortMode === 'oldest' }" @click="sortMode = 'oldest'; sortMenuOpen = false">时间 旧–新</button><button :class="{ active: sortMode === 'nameAsc' }" @click="sortMode = 'nameAsc'; sortMenuOpen = false">名称 A–Z</button><button :class="{ active: sortMode === 'nameDesc' }" @click="sortMode = 'nameDesc'; sortMenuOpen = false">名称 Z–A</button></div></div></div>
         <label class="search"><Search :size="17" /><input ref="searchInput" v-model="searchTerm" type="search" placeholder="搜索名称、来源或标签" /><kbd>Ctrl K</kbd></label>
         <div class="archive-list" :aria-busy="loading">
@@ -798,11 +801,13 @@ onBeforeUnmount(() => {
           <div v-if="!loading && !archives.length" class="empty-state"><span class="empty-icon"><FolderArchive :size="26" /></span><b>添加第一个存档</b><p>把一个或多个文件、文件夹组合为可查询和恢复的时间线。</p><button @click="openCreateArchive"><Plus :size="16" />添加存档</button></div>
           <div v-else-if="!loading && !filteredArchives.length" class="empty"><Search :size="22" /><span>没有找到匹配的存档</span></div>
         </div>
+        <button class="archive-panel-toggle" type="button" aria-label="收起存档列表" :aria-expanded="true" @click="archivePanelCollapsed = true"><ChevronLeft :size="16" /></button>
       </section>
+      <button v-if="archivePanelCollapsed" class="archive-panel-toggle collapsed" type="button" aria-label="展开存档列表" :aria-expanded="false" @click="archivePanelCollapsed = false"><ChevronRight :size="16" /></button>
 
-      <section v-if="selectedArchive" class="detail-panel" :class="{ 'archive-workspace': archiveDetailOpen }" aria-labelledby="detail-title">
+      <section v-if="selectedArchive" class="detail-panel" aria-labelledby="detail-title">
         <header class="detail-header">
-          <div class="identity"><button v-if="archiveDetailOpen" class="back-button" aria-label="返回存档列表" @click="archiveDetailOpen = false"><ArrowLeft :size="17" /></button><span class="detail-icon"><Folder v-if="selectedArchive.kind === 'folder'" /><File v-else-if="selectedArchive.kind === 'file'" /><FolderArchive v-else /></span><div class="title-line"><h2 id="detail-title">{{ selectedArchive.name }}</h2></div></div>
+          <div class="identity"><span class="detail-icon"><Folder v-if="selectedArchive.kind === 'folder'" /><File v-else-if="selectedArchive.kind === 'file'" /><FolderArchive v-else /></span><div class="title-line"><h2 id="detail-title">{{ selectedArchive.name }}</h2></div></div>
           <div class="actions"><button class="secondary" :disabled="syncingArchive" @click="syncSelectedArchive"><UploadCloud :size="17" />{{ syncingArchive ? '同步中' : '同步' }}</button><button class="accent" :disabled="busyAction !== undefined" @click="createSnapshotFromDetail"><Plus :size="17" />{{ busyAction === 'snapshot' ? '创建中' : '创建备份' }}</button><div class="more-control"><button class="icon-button" aria-label="更多操作" :aria-expanded="archiveMenuOpen" @click="archiveMenuOpen = !archiveMenuOpen"><MoreHorizontal :size="19" /></button><div v-if="archiveMenuOpen" class="archive-actions-menu"><button @click="openSelectedArchiveSources"><FolderOpen :size="15" />打开来源</button><button @click="openSelectedArchiveStorage"><HardDrive :size="15" />打开资料库</button><button @click="openEditArchive"><Pencil :size="15" />编辑存档</button><button class="danger" @click="selectedArchive && deleteArchive(selectedArchive)"><Trash2 :size="15" />删除存档</button></div></div></div>
         </header>
 
