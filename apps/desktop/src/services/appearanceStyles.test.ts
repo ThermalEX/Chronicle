@@ -26,4 +26,8 @@ describe("appearance stylesheet", () => {
   it("uses the bright titlebar foreground for idle toolbar icons", () => {
     expect(rule(".toolbar-action")).toContain("color: var(--titlebar-text)");
   });
+
+  it("keeps the active mode icon white on every theme", () => {
+    expect(rule(".toolbar-action.mode-toggle.is-dark")).toContain("color: #ffffff");
+  });
 });

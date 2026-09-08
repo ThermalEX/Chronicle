@@ -107,7 +107,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .toolbar-action, .icon-button { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; background: transparent; border-radius: 6px; }
 .toolbar-action { color: var(--titlebar-text); }
 .toolbar-action:hover { color: var(--on-primary); background: color-mix(in srgb, var(--titlebar-text) 16%, transparent); }
-.toolbar-action.mode-toggle.is-dark { color: var(--on-primary); background: color-mix(in srgb, var(--primary) 28%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 40%, transparent); }
+.toolbar-action.mode-toggle.is-dark { color: #ffffff; background: color-mix(in srgb, var(--primary) 28%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 40%, transparent); }
 
 .sidebar { display: flex; flex-direction: column; min-height: 0; padding: 16px 12px 12px; background: var(--sidebar); border-right: 1px solid var(--border-2); }
 .add-control { position: relative; }
