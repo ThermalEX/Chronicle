@@ -31,6 +31,7 @@ pub fn run() {
             commands::list_entries,
             commands::repository_info,
             commands::open_repository_folder,
+            commands::open_entry_sources,
             commands::open_recycle_bin,
             commands::add_entry,
             commands::update_entry,

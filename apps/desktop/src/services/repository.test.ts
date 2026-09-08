@@ -48,5 +48,8 @@ describe("desktop repository adapter", () => {
     expect(invoke).toHaveBeenLastCalledWith("list_recycle_items");
     await archiveRepository.restoreRecycleItem("trash-1");
     expect(invoke).toHaveBeenLastCalledWith("restore_recycle_item", { itemId: "trash-1" });
+
+    await archiveRepository.openArchiveSources("entry-1");
+    expect(invoke).toHaveBeenLastCalledWith("open_entry_sources", { entryId: "entry-1" });
   });
 });

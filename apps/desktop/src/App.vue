@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {
-  ArchiveRestore, Check, ChevronDown, ChevronRight, Clock3, CloudCog, File, FileClock,
+  ArchiveRestore, ArrowLeft, Check, ChevronDown, ChevronRight, Clock3, CloudCog, File, FileClock,
   Folder, FolderArchive, FolderOpen, HardDrive, LockKeyhole, MoreHorizontal, Pencil, Plus, RotateCcw,
   Search, Settings2, SlidersHorizontal, UploadCloud, X,
   Trash2,
@@ -19,6 +19,7 @@ import { cloudRepository } from "./services/cloud";
 import { diagnosticsRepository } from "./services/diagnostics";
 import { diagnosticFromError, type DiagnosticContext } from "./services/diagnosticsCore";
 import { compareArchiveNames, type ArchiveSortMode } from "./services/archiveSorting";
+import { filterTimeline, type TimelineSort } from "./services/snapshotTimeline";
 import { appSettings, cloudSettings, initializeSettings, shortcutMatches } from "./services/settings";
 
 const categoryDefinitions = [
@@ -49,6 +50,14 @@ const snapshots = ref<SnapshotRecord[]>([]);
 const selectedCategoryId = ref("all");
 const selectedArchiveId = ref<string>();
 const selectedSnapshotId = ref<string>();
+const archiveDetailOpen = ref(false);
+const snapshotDescription = ref("");
+const snapshotSearch = ref("");
+const snapshotSort = ref<TimelineSort>("newest");
+const timelineSortOptions: ThemedSelectOption[] = [
+  { value: "newest", label: "时间 新–旧" },
+  { value: "oldest", label: "时间 旧–新" },
+];
 const searchTerm = ref("");
 const searchInput = ref<HTMLInputElement>();
 const loading = ref(true);
@@ -145,6 +154,7 @@ const filteredArchives = computed(() => {
 });
 const selectedArchive = computed(() => archives.value.find((archive) => archive.id === selectedArchiveId.value));
 const selectedSnapshot = computed(() => snapshots.value.find((snapshot) => snapshot.id === selectedSnapshotId.value));
+const visibleSnapshots = computed(() => filterTimeline(snapshots.value, snapshotSearch.value, snapshotSort.value));
 const progressPercent = computed(() => {
   if (!snapshotProgress.value?.total) return 0;
   return Math.round(snapshotProgress.value.current / snapshotProgress.value.total * 100);
@@ -217,6 +227,16 @@ async function openRepositoryFolder() {
     await archiveRepository.openRepositoryFolder();
   } catch (error) {
     reportError(error, { operation: "打开资料库" });
+  }
+}
+
+async function openSelectedArchiveSources(): Promise<void> {
+  const archive = selectedArchive.value;
+  if (!archive) return;
+  try {
+    await archiveRepository.openArchiveSources(archive.id);
+  } catch (error) {
+    reportError(error, { operation: "打开存档来源", archiveId: archive.id });
   }
 }
 
@@ -466,16 +486,28 @@ function selectCategory(categoryId: string) {
   selectedCategoryId.value = categoryId;
   activeTreeNodeId.value = `category:${categoryId}`;
   selectedArchiveId.value = filteredArchives.value[0]?.id;
+  archiveDetailOpen.value = false;
 }
 
 function selectArchive(archiveId: string) {
   selectedArchiveId.value = archiveId;
   activeTreeNodeId.value = `archive:${archiveId}`;
+  archiveDetailOpen.value = true;
 }
 
 function selectArchiveFromTree(archive: ArchiveRecord) {
   selectedCategoryId.value = archive.categoryId ?? "all";
   selectArchive(archive.id);
+}
+
+function createSnapshotFromDetail(): void {
+  const title = snapshotDescription.value.trim() || "手动备份";
+  snapshotDescription.value = "";
+  void createSnapshot(title);
+}
+
+function updateTimelineSort(value: string | null): void {
+  if (value === "newest" || value === "oldest") snapshotSort.value = value;
 }
 
 function openCategoryDialog() {
@@ -724,8 +756,8 @@ onBeforeUnmount(() => {
       <button class="account"><span class="avatar">T</span><span><b>ThermalEX</b><small>本机设备</small></span><ChevronDown :size="16" /></button>
     </aside>
 
-    <main class="workspace">
-      <section class="archive-panel" aria-labelledby="archives-title">
+    <main class="workspace" :class="{ 'archive-workspace-open': archiveDetailOpen }">
+      <section v-if="!archiveDetailOpen" class="archive-panel" aria-labelledby="archives-title">
         <div class="panel-title"><div><p class="label">{{ selectedCategoryName }}</p><h1 id="archives-title">存档</h1></div><div class="sort-control"><button class="icon-button" aria-label="排列方式" :aria-expanded="sortMenuOpen" @click="sortMenuOpen = !sortMenuOpen"><SlidersHorizontal :size="18" /></button><div v-if="sortMenuOpen" class="sort-menu"><button :class="{ active: sortMode === 'newest' }" @click="sortMode = 'newest'; sortMenuOpen = false">时间 新–旧</button><button :class="{ active: sortMode === 'oldest' }" @click="sortMode = 'oldest'; sortMenuOpen = false">时间 旧–新</button><button :class="{ active: sortMode === 'nameAsc' }" @click="sortMode = 'nameAsc'; sortMenuOpen = false">名称 A–Z</button><button :class="{ active: sortMode === 'nameDesc' }" @click="sortMode = 'nameDesc'; sortMenuOpen = false">名称 Z–A</button></div></div></div>
         <label class="search"><Search :size="17" /><input ref="searchInput" v-model="searchTerm" type="search" placeholder="搜索名称、来源或标签" /><kbd>Ctrl K</kbd></label>
         <div class="archive-list" :aria-busy="loading">
@@ -738,10 +770,10 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section v-if="selectedArchive" class="detail-panel" aria-labelledby="detail-title">
+      <section v-if="selectedArchive" class="detail-panel" :class="{ 'archive-workspace': archiveDetailOpen }" aria-labelledby="detail-title">
         <header class="detail-header">
-          <div class="identity"><span class="detail-icon"><Folder v-if="selectedArchive.kind === 'folder'" /><File v-else-if="selectedArchive.kind === 'file'" /><FolderArchive v-else /></span><div class="title-line"><h2 id="detail-title">{{ selectedArchive.name }}</h2></div></div>
-          <div class="actions"><button class="secondary" :disabled="syncingArchive" @click="syncSelectedArchive"><UploadCloud :size="17" />{{ syncingArchive ? '同步中' : '同步' }}</button><button class="accent" :disabled="busyAction !== undefined" @click="createSnapshot()"><Plus :size="17" />{{ busyAction === 'snapshot' ? '创建中' : '创建备份' }}</button><div class="more-control"><button class="icon-button" aria-label="更多操作" :aria-expanded="archiveMenuOpen" @click="archiveMenuOpen = !archiveMenuOpen"><MoreHorizontal :size="19" /></button><div v-if="archiveMenuOpen" class="archive-actions-menu"><button @click="openEditArchive"><Pencil :size="15" />编辑存档</button><button class="danger" @click="selectedArchive && deleteArchive(selectedArchive)"><Trash2 :size="15" />删除存档</button></div></div></div>
+          <div class="identity"><button v-if="archiveDetailOpen" class="back-button" aria-label="返回存档列表" @click="archiveDetailOpen = false"><ArrowLeft :size="17" /></button><span class="detail-icon"><Folder v-if="selectedArchive.kind === 'folder'" /><File v-else-if="selectedArchive.kind === 'file'" /><FolderArchive v-else /></span><div class="title-line"><h2 id="detail-title">{{ selectedArchive.name }}</h2></div></div>
+          <div class="actions"><button class="secondary" :disabled="syncingArchive" @click="syncSelectedArchive"><UploadCloud :size="17" />{{ syncingArchive ? '同步中' : '同步' }}</button><button class="accent" :disabled="busyAction !== undefined" @click="createSnapshotFromDetail"><Plus :size="17" />{{ busyAction === 'snapshot' ? '创建中' : '创建备份' }}</button><div class="more-control"><button class="icon-button" aria-label="更多操作" :aria-expanded="archiveMenuOpen" @click="archiveMenuOpen = !archiveMenuOpen"><MoreHorizontal :size="19" /></button><div v-if="archiveMenuOpen" class="archive-actions-menu"><button @click="openSelectedArchiveSources"><FolderOpen :size="15" />打开来源</button><button @click="openRepositoryFolder"><HardDrive :size="15" />打开资料库</button><button @click="openEditArchive"><Pencil :size="15" />编辑存档</button><button class="danger" @click="selectedArchive && deleteArchive(selectedArchive)"><Trash2 :size="15" />删除存档</button></div></div></div>
         </header>
 
         <ArchiveMetadata :archive="selectedArchive" :saving-tags="savingTags" @add-tag="addArchiveTag" @remove-tag="removeArchiveTag" />
@@ -751,9 +783,9 @@ onBeforeUnmount(() => {
         <div class="detail-content">
           <section class="timeline-area">
             <div class="section-title"><div><p class="label">版本历史</p><h3>时间节点</h3></div><button class="link-button" @click="showNotice('保留策略将在自动备份阶段接入', 'info')">管理保留策略</button></div>
-            <div v-if="snapshots.length" class="timeline">
-              <button v-for="snapshot in snapshots" :key="snapshot.id" class="snapshot" :class="{ selected: selectedSnapshotId === snapshot.id }" @click="selectedSnapshotId = snapshot.id"><span class="rail"><i></i></span><span class="snapshot-copy"><span><b>{{ snapshot.title }}</b><time>{{ formatTime(snapshot.createdAt) }}</time></span><small>{{ snapshotDetail(snapshot) }}</small><em><HardDrive :size="13" />仅本地 · {{ snapshot.files.length }} 个文件</em></span><strong>{{ formatBytes(snapshot.totalBytes) }}</strong></button>
-            </div>
+            <div class="snapshot-create"><input v-model="snapshotDescription" maxlength="160" placeholder="输入新存档描述信息（可留空）" @keydown.enter.prevent="createSnapshotFromDetail" /><button class="accent" :disabled="busyAction !== undefined" @click="createSnapshotFromDetail"><Plus :size="16" />创建新快照</button></div>
+            <div class="timeline-toolbar"><label><Search :size="15" /><input v-model="snapshotSearch" type="search" placeholder="搜索快照描述" /></label><ThemedSelect :model-value="snapshotSort" :options="timelineSortOptions" label="时间线排序" @update:model-value="updateTimelineSort" /></div>
+            <div v-if="visibleSnapshots.length" class="timeline-table"><div class="timeline-table-head"><span>备份时间</span><span>描述</span><span>位置 / 大小</span><span>操作</span></div><article v-for="snapshot in visibleSnapshots" :key="snapshot.id" :class="{ selected: selectedSnapshotId === snapshot.id }" tabindex="0" @click="selectedSnapshotId = snapshot.id" @keydown.enter="selectedSnapshotId = snapshot.id"><time>{{ formatTime(snapshot.createdAt) }}</time><span><b>{{ snapshot.title }}</b><small>{{ snapshotDetail(snapshot) }}</small></span><span>本机 · {{ formatBytes(snapshot.totalBytes) }}</span><div><button :disabled="busyAction !== undefined" @click.stop="selectedSnapshotId = snapshot.id; restoreSnapshot()"><RotateCcw :size="14" />恢复</button><button :disabled="syncingArchive" @click.stop="selectedSnapshotId = snapshot.id; syncSelectedArchive()"><UploadCloud :size="14" />同步</button></div></article></div>
             <div v-else class="timeline-empty"><Clock3 :size="25" /><b>还没有时间节点</b><p>创建首个备份后，可以从这里查看和恢复历史版本。</p><button :disabled="busyAction !== undefined" @click="createSnapshot('初始版本')">创建首个备份</button></div>
           </section>
 

@@ -276,6 +276,41 @@ pub fn open_repository_folder(state: State<'_, AppState>) -> Result<(), String> 
 }
 
 #[tauri::command(async)]
+pub fn open_entry_sources(state: State<'_, AppState>, entry_id: String) -> Result<(), String> {
+    let repository = state.repository.lock().map_err(|_| state_error())?;
+    let entry = repository
+        .get_entry(&entry_id)
+        .map_err(|error| error.to_string())?;
+    drop(repository);
+    let source = entry
+        .sources
+        .first()
+        .ok_or_else(|| "该存档没有本机来源".to_owned())?;
+    let path = PathBuf::from(&source.path);
+    if !path.exists() {
+        return Err("该存档的本机来源已不存在".into());
+    }
+    #[cfg(target_os = "windows")]
+    let mut command = Command::new("explorer");
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(target_os = "linux")]
+    let mut command = Command::new("xdg-open");
+    #[cfg(target_os = "windows")]
+    if path.is_file() {
+        command.arg("/select,").arg(path);
+    } else {
+        command.arg(path);
+    }
+    #[cfg(not(target_os = "windows"))]
+    command.arg(path);
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
 pub fn open_recycle_bin(
     state: State<'_, AppState>,
     recycle_bin_path: Option<String>,
