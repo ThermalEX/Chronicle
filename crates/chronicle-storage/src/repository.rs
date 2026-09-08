@@ -752,6 +752,15 @@ impl LocalRepository {
         Ok(entry)
     }
 
+    /// Returns the directory containing this entry's immutable snapshot archives.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the requested entry does not exist.
+    pub fn entry_storage_path(&self, entry_id: &str) -> Result<PathBuf> {
+        self.entry_dir(entry_id)
+    }
+
     /// Lists all category nodes stored in the repository catalog.
     ///
     /// # Errors

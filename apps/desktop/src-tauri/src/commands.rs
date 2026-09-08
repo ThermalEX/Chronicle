@@ -276,6 +276,26 @@ pub fn open_repository_folder(state: State<'_, AppState>) -> Result<(), String> 
 }
 
 #[tauri::command(async)]
+pub fn open_entry_storage(state: State<'_, AppState>, entry_id: String) -> Result<(), String> {
+    let repository = state.repository.lock().map_err(|_| state_error())?;
+    let path = repository
+        .entry_storage_path(&entry_id)
+        .map_err(|error| error.to_string())?;
+    drop(repository);
+    #[cfg(target_os = "windows")]
+    let mut command = Command::new("explorer");
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(target_os = "linux")]
+    let mut command = Command::new("xdg-open");
+    command
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
 pub fn open_entry_sources(state: State<'_, AppState>, entry_id: String) -> Result<(), String> {
     let repository = state.repository.lock().map_err(|_| state_error())?;
     let entry = repository

@@ -135,6 +135,10 @@ export class BrowserArchiveRepository {
     throw new Error("浏览器模式没有可打开的资料库文件夹");
   }
 
+  async openArchiveStorage(): Promise<void> {
+    throw new Error("浏览器模式没有可打开的存档资料库文件夹");
+  }
+
   async openArchiveSources(): Promise<void> {
     throw new Error("浏览器模式无法打开原始来源");
   }

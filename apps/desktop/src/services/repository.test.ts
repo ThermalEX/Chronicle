@@ -51,5 +51,8 @@ describe("desktop repository adapter", () => {
 
     await archiveRepository.openArchiveSources("entry-1");
     expect(invoke).toHaveBeenLastCalledWith("open_entry_sources", { entryId: "entry-1" });
+
+    await archiveRepository.openArchiveStorage("entry-1");
+    expect(invoke).toHaveBeenLastCalledWith("open_entry_storage", { entryId: "entry-1" });
   });
 });

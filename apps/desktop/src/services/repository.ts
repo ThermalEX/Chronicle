@@ -27,6 +27,7 @@ export interface ArchiveRepository {
   setArchiveTags(archiveId: string, tags: string[]): Promise<void>;
   getRepositoryInfo(): Promise<RepositoryInfo>;
   openRepositoryFolder(): Promise<void>;
+  openArchiveStorage(archiveId: string): Promise<void>;
   openArchiveSources(archiveId: string): Promise<void>;
   openRecycleBin(recycleBinPath?: string): Promise<void>;
   listRecycleItems(): Promise<RecycleItem[]>;
@@ -118,6 +119,10 @@ class TauriArchiveRepository implements ArchiveRepository {
 
   openRepositoryFolder(): Promise<void> {
     return invoke("open_repository_folder");
+  }
+
+  openArchiveStorage(archiveId: string): Promise<void> {
+    return invoke("open_entry_storage", { entryId: archiveId });
   }
 
   openArchiveSources(archiveId: string): Promise<void> {

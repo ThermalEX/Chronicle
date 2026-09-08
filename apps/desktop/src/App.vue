@@ -230,6 +230,16 @@ async function openRepositoryFolder() {
   }
 }
 
+async function openSelectedArchiveStorage() {
+  const archive = selectedArchive.value;
+  if (!archive) return;
+  try {
+    await archiveRepository.openArchiveStorage(archive.id);
+  } catch (error) {
+    showNotice(readableError(error), "error");
+  }
+}
+
 async function openSelectedArchiveSources(): Promise<void> {
   const archive = selectedArchive.value;
   if (!archive) return;
@@ -773,7 +783,7 @@ onBeforeUnmount(() => {
       <section v-if="selectedArchive" class="detail-panel" :class="{ 'archive-workspace': archiveDetailOpen }" aria-labelledby="detail-title">
         <header class="detail-header">
           <div class="identity"><button v-if="archiveDetailOpen" class="back-button" aria-label="返回存档列表" @click="archiveDetailOpen = false"><ArrowLeft :size="17" /></button><span class="detail-icon"><Folder v-if="selectedArchive.kind === 'folder'" /><File v-else-if="selectedArchive.kind === 'file'" /><FolderArchive v-else /></span><div class="title-line"><h2 id="detail-title">{{ selectedArchive.name }}</h2></div></div>
-          <div class="actions"><button class="secondary" :disabled="syncingArchive" @click="syncSelectedArchive"><UploadCloud :size="17" />{{ syncingArchive ? '同步中' : '同步' }}</button><button class="accent" :disabled="busyAction !== undefined" @click="createSnapshotFromDetail"><Plus :size="17" />{{ busyAction === 'snapshot' ? '创建中' : '创建备份' }}</button><div class="more-control"><button class="icon-button" aria-label="更多操作" :aria-expanded="archiveMenuOpen" @click="archiveMenuOpen = !archiveMenuOpen"><MoreHorizontal :size="19" /></button><div v-if="archiveMenuOpen" class="archive-actions-menu"><button @click="openSelectedArchiveSources"><FolderOpen :size="15" />打开来源</button><button @click="openRepositoryFolder"><HardDrive :size="15" />打开资料库</button><button @click="openEditArchive"><Pencil :size="15" />编辑存档</button><button class="danger" @click="selectedArchive && deleteArchive(selectedArchive)"><Trash2 :size="15" />删除存档</button></div></div></div>
+          <div class="actions"><button class="secondary" :disabled="syncingArchive" @click="syncSelectedArchive"><UploadCloud :size="17" />{{ syncingArchive ? '同步中' : '同步' }}</button><button class="accent" :disabled="busyAction !== undefined" @click="createSnapshotFromDetail"><Plus :size="17" />{{ busyAction === 'snapshot' ? '创建中' : '创建备份' }}</button><div class="more-control"><button class="icon-button" aria-label="更多操作" :aria-expanded="archiveMenuOpen" @click="archiveMenuOpen = !archiveMenuOpen"><MoreHorizontal :size="19" /></button><div v-if="archiveMenuOpen" class="archive-actions-menu"><button @click="openSelectedArchiveSources"><FolderOpen :size="15" />打开来源</button><button @click="openSelectedArchiveStorage"><HardDrive :size="15" />打开资料库</button><button @click="openEditArchive"><Pencil :size="15" />编辑存档</button><button class="danger" @click="selectedArchive && deleteArchive(selectedArchive)"><Trash2 :size="15" />删除存档</button></div></div></div>
         </header>
 
         <ArchiveMetadata :archive="selectedArchive" :saving-tags="savingTags" @add-tag="addArchiveTag" @remove-tag="removeArchiveTag" />
