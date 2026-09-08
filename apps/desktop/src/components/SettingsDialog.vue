@@ -12,6 +12,8 @@ import type { RecycleItem } from "../domain";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import ShortcutRecorder from "./ShortcutRecorder.vue";
 import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
+import appIcon from "../assets/icon.png";
+import { appMetadata } from "../services/appMetadata";
 
 const emit = defineEmits<{ close: []; saved: [] }>();
 const activeSection = ref<"software" | "notifications" | "backup" | "recycle" | "hotkeys" | "about">("software");
@@ -262,7 +264,7 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
 
           <section v-else aria-labelledby="about-title">
             <div class="section-heading"><h3 id="about-title">关于</h3><p>本地优先的通用文件时间节点管理器。</p></div>
-            <div class="about-card"><span class="about-logo"><Settings2 :size="24" /></span><div><h4>Chronicle</h4><p>版本 0.1.0</p></div></div>
+            <div class="about-card"><img class="about-logo" :src="appIcon" alt="Chronicle 图标" /><div><h4>{{ appMetadata.name }}</h4><p>版本 {{ appMetadata.version }}</p><p>作者 {{ appMetadata.author }}</p></div></div>
             <dl class="about-list"><div><dt>存储引擎</dt><dd>Rust · 7z · SHA-256</dd></div><div><dt>桌面框架</dt><dd>Tauri 2 · Vue 3</dd></div><div><dt>许可证</dt><dd>尚未指定</dd></div></dl>
             <a href="https://github.com/ThermalEX/Chronicle" target="_blank" rel="noreferrer">查看 GitHub 仓库</a>
           </section>
@@ -311,7 +313,7 @@ main { min-width: 0; overflow-y: auto; padding: 28px 32px 36px; }
 .path-card span { display: flex; flex-direction: column; gap: 3px; color: #263431; }
 .path-card b { font-size: 11px; }.path-card small { color: var(--text-3); font-size: 9px; }.path-card em { color: var(--primary); font-size: 10px; font-style: normal; font-weight: 650; }
 .about-card { display: flex; align-items: center; gap: 14px; padding: 18px; background: var(--subtle); border: 1px solid var(--border); border-radius: 10px; }
-.about-logo { display: grid; place-items: center; width: 48px; height: 48px; color: #fff; background: #153b37; border-radius: 11px; }
+.about-logo { width: 48px; height: 48px; object-fit: cover; border-radius: 11px; }
 .about-card h4, .about-card p { margin: 0; }.about-card h4 { font-size: 16px; }.about-card p { margin-top: 4px; color: var(--text-3); font-size: 10px; }
 .about-list { margin: 18px 0; }.about-list div { display: flex; justify-content: space-between; padding: 11px 2px; border-bottom: 1px solid var(--border); font-size: 11px; }.about-list dt { color: var(--text-3); }.about-list dd { margin: 0; }
 main a { color: var(--primary); font-size: 11px; font-weight: 650; text-decoration: none; }

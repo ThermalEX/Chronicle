@@ -1,5 +1,8 @@
 mod cloud;
 mod commands;
+mod storage_root;
+#[cfg(test)]
+mod storage_root_tests;
 
 use std::{io, sync::Mutex};
 
@@ -20,7 +23,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let repository_root = app.path().app_local_data_dir()?.join("Chronicle");
+            let executable = std::env::current_exe()?;
+            let repository_root = storage_root::resolve_repository_root(
+                &executable,
+                &app.path().app_local_data_dir()?,
+            )?;
             let repository = LocalRepository::open(repository_root)
                 .map_err(|error| io::Error::other(error.to_string()))?;
             app.manage(AppState {
