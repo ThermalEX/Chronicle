@@ -8,6 +8,12 @@ export type FloatingMenuPosition = {
   minWidth: number;
 };
 
+export type FloatingMenuStyle = {
+  top: string;
+  left: string;
+  minWidth: string;
+};
+
 const MENU_GAP = 5;
 const VIEWPORT_MARGIN = 8;
 
@@ -28,4 +34,13 @@ export function positionFloatingMenu(
   );
 
   return { top, left, minWidth: trigger.width };
+}
+
+/** Converts menu geometry into CSS values accepted by the browser. */
+export function floatingMenuStyle(position: FloatingMenuPosition): FloatingMenuStyle {
+  return {
+    top: `${position.top}px`,
+    left: `${position.left}px`,
+    minWidth: `${position.minWidth}px`,
+  };
 }

@@ -19,7 +19,7 @@ import { cloudRepository } from "./services/cloud";
 import { diagnosticsRepository } from "./services/diagnostics";
 import { diagnosticFromError, type DiagnosticContext } from "./services/diagnosticsCore";
 import { compareArchiveNames, type ArchiveSortMode } from "./services/archiveSorting";
-import { positionFloatingMenu } from "./services/floatingMenu";
+import { floatingMenuStyle, positionFloatingMenu } from "./services/floatingMenu";
 import { filterTimeline, type TimelineSort } from "./services/snapshotTimeline";
 import { appSettings, cloudSettings, initializeSettings, shortcutMatches } from "./services/settings";
 
@@ -83,7 +83,7 @@ const trashDropActive = ref(false);
 const treeMenu = ref<{ kind: "archive" | "category"; id: string }>();
 const treeMenuAnchor = ref<DOMRect>();
 const treeMenuStyle = computed(() => treeMenuAnchor.value
-  ? positionFloatingMenu(treeMenuAnchor.value, { width: 168, height: 96 }, { width: window.innerWidth, height: window.innerHeight })
+  ? floatingMenuStyle(positionFloatingMenu(treeMenuAnchor.value, { width: 168, height: 96 }, { width: window.innerWidth, height: window.innerHeight }))
   : undefined);
 const confirmRequest = ref<{ title: string; message: string; confirmLabel: string; destructive: boolean }>();
 let confirmResolver: ((confirmed: boolean) => void) | undefined;

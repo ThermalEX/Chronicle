@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { positionFloatingMenu } from "./floatingMenu";
+import { floatingMenuStyle, positionFloatingMenu } from "./floatingMenu";
 
 describe("positionFloatingMenu", () => {
+  it("converts numeric geometry into browser-valid pixel values", () => {
+    expect(floatingMenuStyle({ top: 95, left: 32, minWidth: 148 })).toEqual({
+      top: "95px",
+      left: "32px",
+      minWidth: "148px",
+    });
+  });
+
   it("opens upward when a menu below its trigger would leave the viewport", () => {
     expect(positionFloatingMenu(
       { top: 40, right: 180, bottom: 74, left: 32, width: 148, height: 34 },
