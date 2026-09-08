@@ -57,6 +57,7 @@ pub fn run() {
             commands::create_category,
             commands::move_category,
             cloud::save_cloud_credential,
+            cloud::create_github_repository,
             cloud::test_cloud_source,
             cloud::cloud_preview,
             cloud::cloud_sync_entry,

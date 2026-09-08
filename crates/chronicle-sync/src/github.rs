@@ -41,6 +41,8 @@ pub enum GitHubError {
     Json(#[from] serde_json::Error),
     #[error("GitHub repository must use owner/repository format")]
     InvalidRepository,
+    #[error("GitHub repository name is invalid")]
+    InvalidNewRepositoryName,
     #[error("GitHub remote path is invalid")]
     InvalidPath,
     #[error("GitHub single-file limit is 100 MB: {path}")]
@@ -48,6 +50,26 @@ pub enum GitHubError {
 }
 
 pub type Result<T> = std::result::Result<T, GitHubError>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreatedGitHubRepository {
+    pub repository: String,
+    pub branch: String,
+}
+
+fn valid_new_repository_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty()
+        || name.len() > 100
+        || name == "."
+        || name == ".."
+        || name.contains(['/', '\\'])
+        || name.chars().any(char::is_control)
+    {
+        return Err(GitHubError::InvalidNewRepositoryName);
+    }
+    Ok(name.to_owned())
+}
 
 #[derive(Clone)]
 pub struct GitHubClient {
@@ -57,6 +79,72 @@ pub struct GitHubClient {
 }
 
 impl GitHubClient {
+    /// Creates an initialized private repository for the authenticated GitHub account.
+    ///
+    /// An initial commit makes the returned default branch immediately usable by the Git Data API.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the requested name is unsafe, the GitHub request fails, or GitHub
+    /// rejects the authenticated account's repository creation request.
+    pub async fn create_private_repository(
+        token: &str,
+        repository_name: &str,
+        policy: RequestPolicy,
+    ) -> Result<CreatedGitHubRepository> {
+        let repository_name = valid_new_repository_name(repository_name)?;
+        let client = Client::builder().timeout(Duration::from_mins(1)).build()?;
+        for attempt in 0..=policy.retry_limit {
+            if policy.request_delay_ms > 0 {
+                sleep(Duration::from_millis(policy.request_delay_ms)).await;
+            }
+            let response = client
+                .post("https://api.github.com/user/repos")
+                .header(header::ACCEPT, "application/vnd.github+json")
+                .header(header::USER_AGENT, "Chronicle")
+                .bearer_auth(token)
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .json(&json!({
+                    "name": repository_name,
+                    "description": "Chronicle backup library",
+                    "private": true,
+                    "auto_init": true,
+                }))
+                .send()
+                .await?;
+            let status = response.status();
+            if status.is_success() {
+                let value: Value = response.json().await?;
+                let repository = value
+                    .get("full_name")
+                    .and_then(Value::as_str)
+                    .filter(|name| name.split('/').filter(|part| !part.is_empty()).count() == 2)
+                    .ok_or(GitHubError::InvalidRepository)?
+                    .to_owned();
+                let branch = value
+                    .get("default_branch")
+                    .and_then(Value::as_str)
+                    .filter(|branch| !branch.trim().is_empty())
+                    .ok_or(GitHubError::InvalidPath)?
+                    .to_owned();
+                return Ok(CreatedGitHubRepository { repository, branch });
+            }
+            if (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
+                && attempt < policy.retry_limit
+            {
+                sleep(Duration::from_millis(200 * 2_u64.pow(attempt.into()))).await;
+                continue;
+            }
+            let message = response.text().await.unwrap_or_default();
+            return Err(GitHubError::Status {
+                status: status.as_u16(),
+                operation: "POST /user/repos".into(),
+                message,
+            });
+        }
+        unreachable!("retry loop always returns")
+    }
+
     /// Creates a client after validating repository, branch, and root-directory input.
     ///
     /// # Errors
@@ -355,7 +443,7 @@ impl GitHubClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{GitHubClient, GitHubSource};
+    use super::{GitHubClient, GitHubSource, valid_new_repository_name};
     use crate::RequestPolicy;
 
     #[test]
@@ -386,5 +474,13 @@ mod tests {
             token: "token".into(),
         };
         assert!(GitHubClient::new(source, RequestPolicy::default()).is_err());
+    }
+
+    #[test]
+    fn accepts_a_safe_new_repository_name() {
+        assert!(valid_new_repository_name("chronicle").is_ok());
+        assert!(valid_new_repository_name("Chronicle Backups").is_ok());
+        assert!(valid_new_repository_name("../outside").is_err());
+        assert!(valid_new_repository_name("").is_err());
     }
 }

@@ -105,6 +105,13 @@ pub struct SyncResultDto {
     message: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedGitHubRepositoryDto {
+    repository: String,
+    branch: String,
+}
+
 fn storage_error() -> String {
     "Chronicle 本地仓库状态不可用".into()
 }
@@ -368,6 +375,33 @@ pub async fn test_cloud_source(source: CloudSourceInput, password: String) -> Re
             .await
             .map_err(|error| error.to_string())
     }
+}
+
+#[tauri::command(async)]
+pub async fn create_github_repository(
+    source: CloudSourceInput,
+    repository_name: String,
+    password: String,
+) -> Result<CreatedGitHubRepositoryDto, String> {
+    if source.provider != "github" {
+        return Err("该同步源不是 GitHub 仓库".into());
+    }
+    let password = if password.is_empty() {
+        credential(&source)?
+    } else {
+        password
+    };
+    let repository = GitHubClient::create_private_repository(
+        &password,
+        &repository_name,
+        RequestPolicy::default(),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(CreatedGitHubRepositoryDto {
+        repository: repository.repository,
+        branch: repository.branch,
+    })
 }
 
 #[tauri::command(async)]

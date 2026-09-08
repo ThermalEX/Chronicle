@@ -29,4 +29,16 @@ describe("cloud repository adapter", () => {
       sourceId: "github-1", credentialRef: "chronicle-github:github-1", password: "github_pat_secret", provider: "github",
     });
   });
+
+  it("asks the desktop backend to create a private GitHub repository", async () => {
+    const { cloudRepository } = await import("./cloud");
+    const source = {
+      id: "github-1", name: "GitHub", provider: "github" as const, endpoint: "", username: "",
+      remotePath: "/Chronicle", credentialRef: "chronicle-github:github-1", repository: "", branch: "main",
+    };
+    await cloudRepository.createGitHubRepository(source, "chronicle", "github_pat_secret");
+    expect(invoke).toHaveBeenCalledWith("create_github_repository", {
+      source, repositoryName: "chronicle", password: "github_pat_secret",
+    });
+  });
 });

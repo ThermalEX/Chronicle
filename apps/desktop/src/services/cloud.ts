@@ -15,6 +15,7 @@ export type RemoteItem = {
 
 export type CloudPreview = { sourceName: string; libraryId?: string; items: RemoteItem[] };
 export type CloudSyncResult = { status: "uploaded" | "downloaded" | "current" | "conflict"; message: string };
+export type CreatedGitHubRepository = { repository: string; branch: string };
 
 function desktopOnly(): never { throw new Error("云同步仅在 Chronicle 桌面端可用"); }
 
@@ -22,6 +23,10 @@ export const cloudRepository = {
   saveCredential(source: CloudSource, password: string): Promise<void> {
     if (!isTauri()) desktopOnly();
     return invoke("save_cloud_credential", { sourceId: source.id, credentialRef: source.credentialRef, password, provider: source.provider });
+  },
+  createGitHubRepository(source: CloudSource, repositoryName: string, password: string): Promise<CreatedGitHubRepository> {
+    if (!isTauri()) desktopOnly();
+    return invoke("create_github_repository", { source, repositoryName, password });
   },
   test(source: CloudSource, password: string): Promise<void> {
     if (!isTauri()) desktopOnly();
