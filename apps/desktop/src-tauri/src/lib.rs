@@ -18,6 +18,7 @@ pub(crate) struct AppState {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let repository_root = app.path().app_local_data_dir()?.join("Chronicle");
             let repository = LocalRepository::open(repository_root)
