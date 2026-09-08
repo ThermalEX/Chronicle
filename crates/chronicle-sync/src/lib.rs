@@ -3,7 +3,10 @@
 mod github;
 mod webdav;
 
-pub use github::{CreatedGitHubRepository, GitHubChange, GitHubClient, GitHubError, GitHubSource, MAX_GITHUB_FILE_BYTES};
+pub use github::{
+    CreatedGitHubRepository, GitHubChange, GitHubClient, GitHubError, GitHubSource,
+    MAX_GITHUB_FILE_BYTES,
+};
 pub use webdav::{WebDavClient, WebDavError, WebDavSource};
 
 /// How a synchronization job was started.
