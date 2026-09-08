@@ -275,6 +275,28 @@ fn snapshot_ids_from_timeline(timeline: &Value) -> Vec<String> {
         .collect()
 }
 
+fn missing_snapshot_archives(
+    local_snapshots: &[Value],
+    remote_snapshot_ids: &[String],
+) -> Result<Vec<String>, String> {
+    local_snapshots
+        .iter()
+        .filter(|snapshot| {
+            snapshot
+                .get("id")
+                .and_then(Value::as_str)
+                .is_none_or(|id| !remote_snapshot_ids.iter().any(|remote_id| remote_id == id))
+        })
+        .map(|snapshot| {
+            snapshot
+                .get("archive_name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| "本地时间线缺少压缩包名称".to_owned())
+        })
+        .collect()
+}
+
 fn save_sync_state(
     root: &Path,
     source_id: &str,
@@ -473,6 +495,18 @@ async fn ensure_remote_layout(client: &WebDavClient) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+fn updated_library(root: &Path) -> Result<Value, String> {
+    let library_path = root.join("library.json");
+    let mut library = if library_path.is_file() {
+        read_json::<Value>(&library_path)?
+    } else {
+        serde_json::json!({ "formatVersion": 2, "libraryId": Uuid::new_v4().to_string() })
+    };
+    library["updatedAtMs"] = Value::from(unix_millis());
+    write_json_atomic(&library_path, &library)?;
+    Ok(library)
 }
 
 async fn ensure_remote_library(client: &WebDavClient, root: &Path) -> Result<Value, String> {
@@ -853,6 +887,66 @@ async fn github_merge_remote_snapshots(
     write_json_atomic(&root.join("catalog.json"), &catalog)
 }
 
+async fn github_upload_missing_snapshots(
+    client: &GitHubClient,
+    root: &Path,
+    source_id: &str,
+    entry_id: &str,
+    remote_catalog: Option<Value>,
+    remote_snapshot_ids: &[String],
+) -> Result<(), String> {
+    let local_catalog: Value = read_json(&root.join("catalog.json"))?;
+    let entry: CatalogEntry = serde_json::from_value(
+        local_catalog
+            .get("entries")
+            .and_then(Value::as_array)
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|entry| entry.get("id").and_then(Value::as_str) == Some(entry_id))
+            })
+            .cloned()
+            .ok_or_else(|| "本地存档不存在".to_owned())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let folder = checked_folder(&entry.folder)?;
+    let local_dir = root.join("archives").join(folder);
+    let mut changes = missing_snapshot_archives(&entry.snapshots, remote_snapshot_ids)?
+        .into_iter()
+        .map(|archive_name| {
+            let path = local_dir.join(&archive_name);
+            Ok(GitHubChange {
+                path: format!("archives/{folder}/{archive_name}"),
+                contents: Some(fs::read(path).map_err(|error| error.to_string())?),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut catalog = remote_catalog.unwrap_or_else(|| {
+        serde_json::json!({ "format_version": 4, "updated_at_ms": unix_millis(), "categories": [], "entries": [] })
+    });
+    merge_catalog_entry(&mut catalog, &local_catalog, entry_id)?;
+    catalog["updated_at_ms"] = Value::from(unix_millis());
+    let library = updated_library(root)?;
+    changes.push(GitHubChange {
+        path: "catalog.json".into(),
+        contents: Some(serde_json::to_vec_pretty(&catalog).map_err(|error| error.to_string())?),
+    });
+    changes.push(GitHubChange {
+        path: "library.json".into(),
+        contents: Some(serde_json::to_vec_pretty(&library).map_err(|error| error.to_string())?),
+    });
+    client
+        .commit_changes(&format!("Sync Chronicle archive {}", entry.name), changes)
+        .await
+        .map_err(|error| error.to_string())?;
+    save_sync_state(
+        root,
+        source_id,
+        entry_id,
+        &snapshot_ids_from_timeline(&Value::Array(entry.snapshots)),
+    )
+}
+
 async fn github_sync_entry(
     client: &GitHubClient,
     root: &Path,
@@ -860,18 +954,23 @@ async fn github_sync_entry(
     entry_id: &str,
 ) -> Result<SyncResultDto, String> {
     let local: Catalog = read_json(&root.join("catalog.json"))?;
-    let remote: Option<Catalog> = match client.get_json("catalog.json").await {
+    let remote_catalog = match client.get_json::<Value>("catalog.json").await {
         Ok(value) => Some(value),
         Err(GitHubError::NotFound(_)) => None,
         Err(error) => return Err(error.to_string()),
     };
+    let remote: Option<Catalog> = remote_catalog
+        .clone()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| error.to_string())?;
     let local_entry = local.entries.iter().find(|entry| entry.id == entry_id);
     let remote_entry = remote
         .as_ref()
         .and_then(|catalog| catalog.entries.iter().find(|entry| entry.id == entry_id));
     match (local_entry, remote_entry) {
         (Some(_), None) => {
-            github_overwrite_upload(client, root, source_id, entry_id).await?;
+            github_upload_missing_snapshots(client, root, source_id, entry_id, None, &[]).await?;
             Ok(SyncResultDto {
                 status: "uploaded".into(),
                 message: "已上传本地存档到 GitHub".into(),
@@ -909,14 +1008,30 @@ async fn github_sync_entry(
             let remote_only = remote_ids.iter().any(|id| !local_ids.contains(id));
             if local_only && remote_only {
                 github_merge_remote_snapshots(client, root, local_entry, remote_entry).await?;
-                github_overwrite_upload(client, root, source_id, entry_id).await?;
+                github_upload_missing_snapshots(
+                    client,
+                    root,
+                    source_id,
+                    entry_id,
+                    remote_catalog,
+                    &remote_ids,
+                )
+                .await?;
                 return Ok(SyncResultDto {
                     status: "uploaded".into(),
                     message: "已合并 GitHub 与本地互不冲突的时间节点".into(),
                 });
             }
             if local_only {
-                github_overwrite_upload(client, root, source_id, entry_id).await?;
+                github_upload_missing_snapshots(
+                    client,
+                    root,
+                    source_id,
+                    entry_id,
+                    remote_catalog,
+                    &remote_ids,
+                )
+                .await?;
                 return Ok(SyncResultDto {
                     status: "uploaded".into(),
                     message: "已上传 GitHub 缺少的时间节点".into(),
@@ -1109,22 +1224,90 @@ async fn upload_catalog_and_library(
     };
     merge_catalog_entry(&mut catalog, &local_catalog, entry_id)?;
     catalog["updated_at_ms"] = Value::from(unix_millis());
+    upload_catalog_and_library_value(client, root, &catalog).await
+}
+
+async fn upload_catalog_and_library_value(
+    client: &WebDavClient,
+    root: &Path,
+    catalog: &Value,
+) -> Result<(), String> {
     client
-        .put_json("catalog.json", &catalog)
+        .put_json("catalog.json", catalog)
         .await
         .map_err(|error| error.to_string())?;
-    let library_path = root.join("library.json");
-    let mut library = if library_path.is_file() {
-        read_json::<Value>(&library_path)?
-    } else {
-        serde_json::json!({ "formatVersion": 2, "libraryId": Uuid::new_v4().to_string() })
-    };
-    library["updatedAtMs"] = Value::from(unix_millis());
-    write_json_atomic(&library_path, &library)?;
+    let library = updated_library(root)?;
     client
         .put_json("library.json", &library)
         .await
         .map_err(|error| error.to_string())
+}
+
+async fn upload_missing_webdav_snapshots(
+    client: &WebDavClient,
+    root: &Path,
+    source_id: &str,
+    entry_id: &str,
+    remote_catalog: Option<Value>,
+    remote_snapshot_ids: &[String],
+    remote_entry_exists: bool,
+) -> Result<(), String> {
+    let local_catalog: Value = read_json(&root.join("catalog.json"))?;
+    let entry: CatalogEntry = serde_json::from_value(
+        local_catalog
+            .get("entries")
+            .and_then(Value::as_array)
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|entry| entry.get("id").and_then(Value::as_str) == Some(entry_id))
+            })
+            .cloned()
+            .ok_or_else(|| "本地存档不存在".to_owned())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let folder = checked_folder(&entry.folder)?;
+    let remote_folder = format!("archives/{folder}");
+    if !remote_entry_exists {
+        if remote_catalog.is_none() {
+            ensure_remote_layout(client).await?;
+        }
+        client
+            .ensure_collection(&remote_folder)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let archives = missing_snapshot_archives(&entry.snapshots, remote_snapshot_ids)?;
+    let local_dir = root.join("archives").join(folder);
+    let upload_result: Result<(), String> = async {
+        for archive_name in &archives {
+            client
+                .upload_file(&format!("{remote_folder}/{archive_name}"), &local_dir.join(archive_name))
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        let mut catalog = remote_catalog.unwrap_or_else(|| {
+            serde_json::json!({ "format_version": 4, "updated_at_ms": unix_millis(), "categories": [], "entries": [] })
+        });
+        merge_catalog_entry(&mut catalog, &local_catalog, entry_id)?;
+        catalog["updated_at_ms"] = Value::from(unix_millis());
+        upload_catalog_and_library_value(client, root, &catalog).await
+    }
+    .await;
+    if let Err(error) = upload_result {
+        for archive_name in &archives {
+            let _ = client
+                .delete(&format!("{remote_folder}/{archive_name}"))
+                .await;
+        }
+        return Err(error);
+    }
+    save_sync_state(
+        root,
+        source_id,
+        entry_id,
+        &snapshot_ids_from_timeline(&Value::Array(entry.snapshots)),
+    )
 }
 
 #[tauri::command(async)]
@@ -1407,6 +1590,7 @@ async fn merge_remote_snapshots(
 }
 
 #[tauri::command(async)]
+#[allow(clippy::too_many_lines)]
 pub async fn cloud_sync_entry(
     state: State<'_, AppState>,
     source_id: String,
@@ -1423,18 +1607,32 @@ pub async fn cloud_sync_entry(
     }
     let (client, _, root) = configured_client(&state, &source_id)?;
     let local: Catalog = read_json(&root.join("catalog.json"))?;
-    let remote: Option<Catalog> = match client.get_json("catalog.json").await {
+    let remote_catalog = match client.get_json::<Value>("catalog.json").await {
         Ok(value) => Some(value),
         Err(WebDavError::NotFound(_)) => None,
         Err(error) => return Err(error.to_string()),
     };
+    let remote: Option<Catalog> = remote_catalog
+        .clone()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| error.to_string())?;
     let local_entry = local.entries.iter().find(|entry| entry.id == entry_id);
     let remote_entry = remote
         .as_ref()
         .and_then(|catalog| catalog.entries.iter().find(|entry| entry.id == entry_id));
     match (local_entry, remote_entry) {
         (Some(_), None) => {
-            cloud_overwrite_upload(state, source_id, entry_id).await?;
+            upload_missing_webdav_snapshots(
+                &client,
+                &root,
+                &source_id,
+                &entry_id,
+                remote_catalog,
+                &[],
+                false,
+            )
+            .await?;
             Ok(SyncResultDto {
                 status: "uploaded".into(),
                 message: "已上传本地存档".into(),
@@ -1477,14 +1675,32 @@ pub async fn cloud_sync_entry(
             let remote_only = remote_ids.iter().any(|id| !local_ids.contains(id));
             if local_only && remote_only {
                 merge_remote_snapshots(&client, &root, local_entry, remote_entry).await?;
-                cloud_overwrite_upload(state, source_id, entry_id).await?;
+                upload_missing_webdav_snapshots(
+                    &client,
+                    &root,
+                    &source_id,
+                    &entry_id,
+                    remote_catalog,
+                    &remote_ids,
+                    true,
+                )
+                .await?;
                 return Ok(SyncResultDto {
                     status: "uploaded".into(),
                     message: "已合并两端互不冲突的时间节点".into(),
                 });
             }
             if local_only {
-                cloud_overwrite_upload(state, source_id, entry_id).await?;
+                upload_missing_webdav_snapshots(
+                    &client,
+                    &root,
+                    &source_id,
+                    &entry_id,
+                    remote_catalog,
+                    &remote_ids,
+                    true,
+                )
+                .await?;
                 return Ok(SyncResultDto {
                     status: "uploaded".into(),
                     message: "已上传本地新增时间节点".into(),
@@ -1640,7 +1856,7 @@ pub async fn cloud_set_entry_sync_mode(
 mod tests {
     use serde_json::json;
 
-    use super::merge_catalog_entry;
+    use super::{merge_catalog_entry, missing_snapshot_archives};
 
     #[test]
     fn scoped_catalog_upload_does_not_add_unsynced_local_entries() {
@@ -1667,5 +1883,18 @@ mod tests {
         assert!(entries.iter().any(|entry| entry["id"] == "selected"));
         assert!(!entries.iter().any(|entry| entry["id"] == "local-only"));
         assert_eq!(remote["categories"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn upload_plan_contains_only_snapshots_missing_from_remote() {
+        let local = vec![
+            json!({ "id": "already-there", "archive_name": "old.7z" }),
+            json!({ "id": "new", "archive_name": "new.7z" }),
+        ];
+
+        assert_eq!(
+            missing_snapshot_archives(&local, &["already-there".into()]).unwrap(),
+            vec!["new.7z"]
+        );
     }
 }
