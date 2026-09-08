@@ -21,7 +21,7 @@ function desktopOnly(): never { throw new Error("云同步仅在 Chronicle 桌�
 export const cloudRepository = {
   saveCredential(source: CloudSource, password: string): Promise<void> {
     if (!isTauri()) desktopOnly();
-    return invoke("save_cloud_credential", { sourceId: source.id, credentialRef: source.credentialRef, password });
+    return invoke("save_cloud_credential", { sourceId: source.id, credentialRef: source.credentialRef, password, provider: source.provider });
   },
   test(source: CloudSource, password: string): Promise<void> {
     if (!isTauri()) desktopOnly();

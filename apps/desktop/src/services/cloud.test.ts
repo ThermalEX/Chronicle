@@ -18,4 +18,15 @@ describe("cloud repository adapter", () => {
     await cloudRepository.delete("source-1", ["entry-1", "entry-2"]);
     expect(invoke).toHaveBeenCalledWith("cloud_delete_entries", { sourceId: "source-1", entryIds: ["entry-1", "entry-2"] });
   });
+
+  it("stores a GitHub token through the provider-specific credential command", async () => {
+    const { cloudRepository } = await import("./cloud");
+    await cloudRepository.saveCredential({
+      id: "github-1", name: "GitHub", provider: "github", endpoint: "", username: "",
+      remotePath: "/Chronicle", credentialRef: "chronicle-github:github-1", repository: "owner/repository", branch: "main",
+    }, "github_pat_secret");
+    expect(invoke).toHaveBeenCalledWith("save_cloud_credential", {
+      sourceId: "github-1", credentialRef: "chronicle-github:github-1", password: "github_pat_secret", provider: "github",
+    });
+  });
 });

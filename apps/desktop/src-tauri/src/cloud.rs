@@ -7,7 +7,10 @@ use std::{
 };
 
 use chronicle_core::SyncMode;
-use chronicle_sync::{RequestPolicy, WebDavClient, WebDavError, WebDavSource};
+use chronicle_sync::{
+    GitHubChange, GitHubClient, GitHubError, GitHubSource, RequestPolicy, WebDavClient,
+    WebDavError, WebDavSource,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -18,6 +21,7 @@ use walkdir::WalkDir;
 use crate::AppState;
 
 const CREDENTIAL_SERVICE: &str = "Chronicle WebDAV";
+const GITHUB_CREDENTIAL_SERVICE: &str = "Chronicle GitHub";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,6 +33,14 @@ pub struct CloudSourceInput {
     username: String,
     remote_path: String,
     credential_ref: String,
+    #[serde(default)]
+    repository: String,
+    #[serde(default = "default_branch")]
+    branch: String,
+}
+
+fn default_branch() -> String {
+    "main".into()
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -157,10 +169,32 @@ fn credential(source: &CloudSourceInput) -> Result<String, String> {
     } else {
         &source.credential_ref
     };
-    keyring::Entry::new(CREDENTIAL_SERVICE, account)
+    let service = if source.provider == "github" {
+        GITHUB_CREDENTIAL_SERVICE
+    } else {
+        CREDENTIAL_SERVICE
+    };
+    keyring::Entry::new(service, account)
         .map_err(|error| error.to_string())?
         .get_password()
         .map_err(|_| "该同步源尚未保存密码".to_owned())
+}
+
+fn github_client(
+    source: &CloudSourceInput,
+    token: String,
+    request_policy: RequestPolicy,
+) -> Result<GitHubClient, String> {
+    GitHubClient::new(
+        GitHubSource {
+            repository: source.repository.clone(),
+            branch: source.branch.clone(),
+            remote_path: source.remote_path.clone(),
+            token,
+        },
+        request_policy,
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn client(
@@ -253,10 +287,10 @@ fn save_sync_state(
     write_json_atomic(&path, &state)
 }
 
-fn configured_client(
+fn configured_source(
     state: &State<'_, AppState>,
     source_id: &str,
-) -> Result<(WebDavClient, CloudSourceInput, PathBuf), String> {
+) -> Result<(CloudSourceInput, PathBuf, RequestPolicy), String> {
     let repository = state.repository.lock().map_err(|_| storage_error())?;
     let settings = repository
         .load_settings()
@@ -264,7 +298,27 @@ fn configured_client(
     let root = repository.root().to_path_buf();
     drop(repository);
     let source = source_from_settings(&settings, source_id)?;
-    let client = client(&source, credential(&source)?, policy(&settings))?;
+    Ok((source, root, policy(&settings)))
+}
+
+fn configured_client(
+    state: &State<'_, AppState>,
+    source_id: &str,
+) -> Result<(WebDavClient, CloudSourceInput, PathBuf), String> {
+    let (source, root, request_policy) = configured_source(state, source_id)?;
+    let client = client(&source, credential(&source)?, request_policy)?;
+    Ok((client, source, root))
+}
+
+fn configured_github_client(
+    state: &State<'_, AppState>,
+    source_id: &str,
+) -> Result<(GitHubClient, CloudSourceInput, PathBuf), String> {
+    let (source, root, request_policy) = configured_source(state, source_id)?;
+    if source.provider != "github" {
+        return Err("该同步源不是 GitHub 仓库".into());
+    }
+    let client = github_client(&source, credential(&source)?, request_policy)?;
     Ok((client, source, root))
 }
 
@@ -273,14 +327,19 @@ pub async fn save_cloud_credential(
     source_id: String,
     credential_ref: String,
     password: String,
+    provider: String,
 ) -> Result<(), String> {
     let account = if credential_ref.is_empty() {
         source_id.as_str()
     } else {
         credential_ref.as_str()
     };
-    let entry =
-        keyring::Entry::new(CREDENTIAL_SERVICE, account).map_err(|error| error.to_string())?;
+    let service = if provider == "github" {
+        GITHUB_CREDENTIAL_SERVICE
+    } else {
+        CREDENTIAL_SERVICE
+    };
+    let entry = keyring::Entry::new(service, account).map_err(|error| error.to_string())?;
     if password.is_empty() {
         entry.delete_credential().map_err(|error| error.to_string())
     } else {
@@ -297,11 +356,18 @@ pub async fn test_cloud_source(source: CloudSourceInput, password: String) -> Re
     } else {
         password
     };
-    let test_client = client(&source, password, RequestPolicy::default())?;
-    test_client
-        .test_capabilities()
-        .await
-        .map_err(|error| error.to_string())
+    if source.provider == "github" {
+        github_client(&source, password, RequestPolicy::default())?
+            .test_access()
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        let test_client = client(&source, password, RequestPolicy::default())?;
+        test_client
+            .test_capabilities()
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[tauri::command(async)]
@@ -309,6 +375,11 @@ pub async fn cloud_preview(
     state: State<'_, AppState>,
     source_id: String,
 ) -> Result<CloudPreviewDto, String> {
+    let (source, _, _) = configured_source(&state, &source_id)?;
+    if source.provider == "github" {
+        let (client, source, root) = configured_github_client(&state, &source_id)?;
+        return github_preview(&client, source, &root).await;
+    }
     let (client, source, root) = configured_client(&state, &source_id)?;
     let library = ensure_remote_library(&client, &root).await?;
     let catalog: Option<Catalog> = match client.get_json("catalog.json").await {
@@ -410,6 +481,515 @@ async fn ensure_remote_library(client: &WebDavClient, root: &Path) -> Result<Val
         }
         Err(error) => Err(error.to_string()),
     }
+}
+
+async fn ensure_github_library(client: &GitHubClient, root: &Path) -> Result<Value, String> {
+    match client.get_json("library.json").await {
+        Ok(value) => Ok(value),
+        Err(GitHubError::NotFound(_)) => {
+            let library_path = root.join("library.json");
+            let mut library = if library_path.is_file() {
+                read_json::<Value>(&library_path)?
+            } else {
+                serde_json::json!({ "formatVersion": 2, "libraryId": Uuid::new_v4().to_string() })
+            };
+            library["updatedAtMs"] = Value::from(unix_millis());
+            write_json_atomic(&library_path, &library)?;
+            client
+                .commit_changes(
+                    "Initialize Chronicle repository",
+                    vec![
+                        GitHubChange { path: "library.json".into(), contents: Some(serde_json::to_vec_pretty(&library).map_err(|error| error.to_string())?) },
+                        GitHubChange { path: "catalog.json".into(), contents: Some(serde_json::to_vec_pretty(&serde_json::json!({ "format_version": 4, "updated_at_ms": unix_millis(), "categories": [], "entries": [] })).map_err(|error| error.to_string())?) },
+                    ],
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(library)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+async fn github_preview(
+    client: &GitHubClient,
+    source: CloudSourceInput,
+    root: &Path,
+) -> Result<CloudPreviewDto, String> {
+    let library = ensure_github_library(client, root).await?;
+    let catalog: Option<Catalog> = match client.get_json("catalog.json").await {
+        Ok(value) => Some(value),
+        Err(GitHubError::NotFound(_)) => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut items = vec![
+        RemoteItemDto {
+            id: "config:library".into(),
+            name: "library.json".into(),
+            kind: "config".into(),
+            protected: true,
+            snapshot_count: 0,
+            size_bytes: 0,
+            updated_at: library.get("updatedAtMs").and_then(Value::as_u64),
+            sync_mode: "manual".into(),
+        },
+        RemoteItemDto {
+            id: "config:catalog".into(),
+            name: "catalog.json".into(),
+            kind: "config".into(),
+            protected: true,
+            snapshot_count: 0,
+            size_bytes: 0,
+            updated_at: None,
+            sync_mode: "manual".into(),
+        },
+    ];
+    if let Some(catalog) = catalog {
+        items.extend(catalog.entries.into_iter().map(|entry| RemoteItemDto {
+            id: entry.id,
+            name: entry.name,
+            kind: "archive".into(),
+            protected: false,
+            snapshot_count: entry.snapshot_count,
+            size_bytes: entry.stored_bytes,
+            updated_at: entry.last_snapshot_at_ms,
+            sync_mode: entry.sync_mode.as_str().unwrap_or("manual").to_owned(),
+        }));
+    }
+    Ok(CloudPreviewDto {
+        source_name: source.name,
+        library_id: library
+            .get("libraryId")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        items,
+    })
+}
+
+async fn github_overwrite_upload(
+    client: &GitHubClient,
+    root: &Path,
+    source_id: &str,
+    entry_id: &str,
+) -> Result<(), String> {
+    let local_catalog: Value = read_json(&root.join("catalog.json"))?;
+    let entry: CatalogEntry = serde_json::from_value(
+        local_catalog
+            .get("entries")
+            .and_then(Value::as_array)
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|entry| entry.get("id").and_then(Value::as_str) == Some(entry_id))
+            })
+            .cloned()
+            .ok_or_else(|| "本地存档不存在".to_owned())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut remote_catalog: Value = match client.get_json("catalog.json").await {
+        Ok(value) => value,
+        Err(GitHubError::NotFound(_)) => {
+            serde_json::json!({ "format_version": 4, "updated_at_ms": unix_millis(), "categories": [], "entries": [] })
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    merge_catalog_entry(&mut remote_catalog, &local_catalog, entry_id)?;
+    remote_catalog["updated_at_ms"] = Value::from(unix_millis());
+    let folder = checked_folder(&entry.folder)?;
+    let local_dir = root.join("archives").join(folder);
+    let mut changes = Vec::new();
+    for item in WalkDir::new(&local_dir).min_depth(1) {
+        let item = item.map_err(|error| error.to_string())?;
+        if !item.file_type().is_file() {
+            continue;
+        }
+        let relative = item
+            .path()
+            .strip_prefix(&local_dir)
+            .map_err(|error| error.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        changes.push(GitHubChange {
+            path: format!("archives/{folder}/{relative}"),
+            contents: Some(fs::read(item.path()).map_err(|error| error.to_string())?),
+        });
+    }
+    let library_path = root.join("library.json");
+    let mut library = if library_path.is_file() {
+        read_json::<Value>(&library_path)?
+    } else {
+        serde_json::json!({ "formatVersion": 2, "libraryId": Uuid::new_v4().to_string() })
+    };
+    library["updatedAtMs"] = Value::from(unix_millis());
+    write_json_atomic(&library_path, &library)?;
+    changes.push(GitHubChange {
+        path: "catalog.json".into(),
+        contents: Some(
+            serde_json::to_vec_pretty(&remote_catalog).map_err(|error| error.to_string())?,
+        ),
+    });
+    changes.push(GitHubChange {
+        path: "library.json".into(),
+        contents: Some(serde_json::to_vec_pretty(&library).map_err(|error| error.to_string())?),
+    });
+    client
+        .commit_changes(&format!("Sync Chronicle archive {}", entry.name), changes)
+        .await
+        .map_err(|error| error.to_string())?;
+    save_sync_state(
+        root,
+        source_id,
+        entry_id,
+        &snapshot_ids_from_timeline(&Value::Array(entry.snapshots)),
+    )
+}
+
+async fn github_overwrite_download(
+    client: &GitHubClient,
+    root: &Path,
+    source_id: &str,
+    entry_id: &str,
+) -> Result<(), String> {
+    let remote_catalog_value: Value = client
+        .get_json("catalog.json")
+        .await
+        .map_err(|error| error.to_string())?;
+    let remote_catalog: Catalog =
+        serde_json::from_value(remote_catalog_value.clone()).map_err(|error| error.to_string())?;
+    let remote_entry = remote_catalog
+        .entries
+        .iter()
+        .find(|entry| entry.id == entry_id)
+        .ok_or_else(|| "远端存档不存在".to_owned())?;
+    let folder = checked_folder(&remote_entry.folder)?;
+    let staging = root
+        .join(".tmp")
+        .join(format!("github-download-{}", Uuid::new_v4()));
+    fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
+    for snapshot in &remote_entry.snapshots {
+        let archive_name = snapshot
+            .get("archive_name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "远端时间线缺少压缩包名称".to_owned())?;
+        let expected_hash = snapshot
+            .get("object_hash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "远端时间线缺少校验值".to_owned())?;
+        let target = staging.join(archive_name);
+        fs::write(
+            &target,
+            client
+                .download_file(&format!("archives/{folder}/{archive_name}"))
+                .await
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        if hash_file(&target)? != expected_hash {
+            let _ = fs::remove_dir_all(&staging);
+            return Err("远端快照校验失败，本地内容未更改".into());
+        }
+    }
+    let target = root.join("archives").join(folder);
+    let backup = root
+        .join(".tmp")
+        .join(format!("github-old-{}", Uuid::new_v4()));
+    if target.exists() {
+        fs::rename(&target, &backup).map_err(|error| error.to_string())?;
+    }
+    if let Err(error) = fs::rename(&staging, &target) {
+        if backup.exists() {
+            let _ = fs::rename(&backup, &target);
+        }
+        return Err(error.to_string());
+    }
+    let local_catalog_path = root.join("catalog.json");
+    let mut local_catalog: Value = read_json(&local_catalog_path)?;
+    let entries = local_catalog
+        .get_mut("entries")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "本地清单格式无效".to_owned())?;
+    entries.retain(|entry| entry.get("id").and_then(Value::as_str) != Some(entry_id));
+    let summary = remote_catalog_value
+        .get("entries")
+        .and_then(Value::as_array)
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(entry_id))
+        })
+        .cloned()
+        .ok_or_else(|| "远端清单缺少存档".to_owned())?;
+    entries.push(summary);
+    if let Err(error) = write_json_atomic(&local_catalog_path, &local_catalog) {
+        let _ = fs::remove_dir_all(&target);
+        if backup.exists() {
+            let _ = fs::rename(&backup, &target);
+        }
+        return Err(error);
+    }
+    if backup.exists() {
+        fs::remove_dir_all(backup).map_err(|error| error.to_string())?;
+    }
+    save_sync_state(
+        root,
+        source_id,
+        entry_id,
+        &snapshot_ids_from_timeline(&Value::Array(remote_entry.snapshots.clone())),
+    )
+}
+
+async fn github_merge_remote_snapshots(
+    client: &GitHubClient,
+    root: &Path,
+    local_entry: &CatalogEntry,
+    remote_entry: &CatalogEntry,
+) -> Result<(), String> {
+    let local_folder = checked_folder(&local_entry.folder)?;
+    let remote_folder = checked_folder(&remote_entry.folder)?;
+    let entry_dir = root.join("archives").join(local_folder);
+    fs::create_dir_all(&entry_dir).map_err(|error| error.to_string())?;
+    let mut local_timeline = Value::Array(local_entry.snapshots.clone());
+    let local_ids = snapshot_ids_from_timeline(&local_timeline);
+    let local_array = local_timeline
+        .as_array_mut()
+        .ok_or_else(|| "本地时间线格式无效".to_owned())?;
+
+    for snapshot in remote_entry.snapshots.iter().filter(|snapshot| {
+        !local_ids
+            .iter()
+            .any(|id| Some(id.as_str()) == snapshot.get("id").and_then(Value::as_str))
+    }) {
+        let archive_name = snapshot
+            .get("archive_name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "远端时间线缺少压缩包名称".to_owned())?;
+        let expected_hash = snapshot
+            .get("object_hash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "远端时间线缺少校验值".to_owned())?;
+        let temporary = root
+            .join(".tmp")
+            .join(format!("github-merge-{}", Uuid::new_v4()));
+        fs::create_dir_all(temporary.parent().unwrap_or(root))
+            .map_err(|error| error.to_string())?;
+        fs::write(
+            &temporary,
+            client
+                .download_file(&format!("archives/{remote_folder}/{archive_name}"))
+                .await
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        if hash_file(&temporary)? != expected_hash {
+            let _ = fs::remove_file(&temporary);
+            return Err("远端快照校验失败，本地时间线未更改".into());
+        }
+        fs::rename(&temporary, entry_dir.join(archive_name)).map_err(|error| error.to_string())?;
+        local_array.push(snapshot.clone());
+    }
+    local_array.sort_by_key(|item| {
+        item.get("created_at_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or_default()
+    });
+    let snapshot_count = local_array.len() as u64;
+    let stored_bytes = local_array
+        .iter()
+        .filter_map(|item| item.get("size_bytes").and_then(Value::as_u64))
+        .sum::<u64>();
+    let last_snapshot = local_array
+        .iter()
+        .filter_map(|item| item.get("created_at_ms").and_then(Value::as_u64))
+        .max()
+        .unwrap_or_default();
+    let mut catalog: Value = read_json(&root.join("catalog.json"))?;
+    let summary = catalog
+        .get_mut("entries")
+        .and_then(Value::as_array_mut)
+        .and_then(|entries| {
+            entries
+                .iter_mut()
+                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(&local_entry.id))
+        })
+        .ok_or_else(|| "本地清单缺少存档".to_owned())?;
+    summary["snapshot_count"] = Value::from(snapshot_count);
+    summary["stored_bytes"] = Value::from(stored_bytes);
+    summary["last_snapshot_at_ms"] = Value::from(last_snapshot);
+    summary["snapshots"] = local_timeline;
+    write_json_atomic(&root.join("catalog.json"), &catalog)
+}
+
+async fn github_sync_entry(
+    client: &GitHubClient,
+    root: &Path,
+    source_id: &str,
+    entry_id: &str,
+) -> Result<SyncResultDto, String> {
+    let local: Catalog = read_json(&root.join("catalog.json"))?;
+    let remote: Option<Catalog> = match client.get_json("catalog.json").await {
+        Ok(value) => Some(value),
+        Err(GitHubError::NotFound(_)) => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    let local_entry = local.entries.iter().find(|entry| entry.id == entry_id);
+    let remote_entry = remote
+        .as_ref()
+        .and_then(|catalog| catalog.entries.iter().find(|entry| entry.id == entry_id));
+    match (local_entry, remote_entry) {
+        (Some(_), None) => {
+            github_overwrite_upload(client, root, source_id, entry_id).await?;
+            Ok(SyncResultDto {
+                status: "uploaded".into(),
+                message: "已上传本地存档到 GitHub".into(),
+            })
+        }
+        (None, Some(_)) => {
+            github_overwrite_download(client, root, source_id, entry_id).await?;
+            Ok(SyncResultDto {
+                status: "downloaded".into(),
+                message: "已从 GitHub 下载存档".into(),
+            })
+        }
+        (Some(local_entry), Some(remote_entry)) => {
+            let local_ids =
+                snapshot_ids_from_timeline(&Value::Array(local_entry.snapshots.clone()));
+            let remote_ids =
+                snapshot_ids_from_timeline(&Value::Array(remote_entry.snapshots.clone()));
+            let mut local_metadata =
+                serde_json::to_value(local_entry).map_err(|error| error.to_string())?;
+            let mut remote_metadata =
+                serde_json::to_value(remote_entry).map_err(|error| error.to_string())?;
+            for metadata in [&mut local_metadata, &mut remote_metadata] {
+                metadata["snapshots"] = Value::Array(Vec::new());
+                metadata["snapshot_count"] = Value::from(0);
+                metadata["stored_bytes"] = Value::from(0);
+                metadata["last_snapshot_at_ms"] = Value::Null;
+            }
+            if local_metadata != remote_metadata {
+                return Ok(SyncResultDto {
+                    status: "conflict".into(),
+                    message: "本地和 GitHub 的存档设置不同，请选择覆盖方向".into(),
+                });
+            }
+            let local_only = local_ids.iter().any(|id| !remote_ids.contains(id));
+            let remote_only = remote_ids.iter().any(|id| !local_ids.contains(id));
+            if local_only && remote_only {
+                github_merge_remote_snapshots(client, root, local_entry, remote_entry).await?;
+                github_overwrite_upload(client, root, source_id, entry_id).await?;
+                return Ok(SyncResultDto {
+                    status: "uploaded".into(),
+                    message: "已合并 GitHub 与本地互不冲突的时间节点".into(),
+                });
+            }
+            if local_only {
+                github_overwrite_upload(client, root, source_id, entry_id).await?;
+                return Ok(SyncResultDto {
+                    status: "uploaded".into(),
+                    message: "已上传 GitHub 缺少的时间节点".into(),
+                });
+            }
+            if remote_only {
+                github_overwrite_download(client, root, source_id, entry_id).await?;
+                return Ok(SyncResultDto {
+                    status: "downloaded".into(),
+                    message: "已下载 GitHub 新增时间节点".into(),
+                });
+            }
+            Ok(SyncResultDto {
+                status: "current".into(),
+                message: "本地与 GitHub 已经一致".into(),
+            })
+        }
+        (None, None) => Err("本地和 GitHub 均找不到该存档".into()),
+    }
+}
+
+async fn github_delete_entries(client: &GitHubClient, entry_ids: &[String]) -> Result<(), String> {
+    let mut catalog: Value = client
+        .get_json("catalog.json")
+        .await
+        .map_err(|error| error.to_string())?;
+    let entries = catalog
+        .get("entries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut changes = Vec::new();
+    for entry in entries.iter().filter(|entry| {
+        entry
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| entry_ids.iter().any(|candidate| candidate == id))
+    }) {
+        let folder = entry
+            .get("folder")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "远端存档缺少目录".to_owned())?;
+        for snapshot in entry
+            .get("snapshots")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let archive_name = snapshot
+                .get("archive_name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "远端时间线缺少压缩包名称".to_owned())?;
+            changes.push(GitHubChange {
+                path: format!("archives/{folder}/{archive_name}"),
+                contents: None,
+            });
+        }
+    }
+    if let Some(entries) = catalog.get_mut("entries").and_then(Value::as_array_mut) {
+        entries.retain(|entry| {
+            !entry
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| entry_ids.iter().any(|candidate| candidate == id))
+        });
+    }
+    changes.push(GitHubChange {
+        path: "catalog.json".into(),
+        contents: Some(serde_json::to_vec_pretty(&catalog).map_err(|error| error.to_string())?),
+    });
+    client
+        .commit_changes("Delete Chronicle archives", changes)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn github_set_entry_sync_mode(
+    client: &GitHubClient,
+    entry_id: &str,
+    sync_mode: &str,
+) -> Result<(), String> {
+    let mut catalog: Value = client
+        .get_json("catalog.json")
+        .await
+        .map_err(|error| error.to_string())?;
+    let entry = catalog
+        .get_mut("entries")
+        .and_then(Value::as_array_mut)
+        .and_then(|entries| {
+            entries
+                .iter_mut()
+                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(entry_id))
+        })
+        .ok_or_else(|| "远端存档不存在".to_owned())?;
+    entry["sync_mode"] = Value::String(sync_mode.to_owned());
+    client
+        .commit_changes(
+            "Update Chronicle sync mode",
+            vec![GitHubChange {
+                path: "catalog.json".into(),
+                contents: Some(
+                    serde_json::to_vec_pretty(&catalog).map_err(|error| error.to_string())?,
+                ),
+            }],
+        )
+        .await
+        .map_err(|error| error.to_string())
 }
 
 fn merge_catalog_entry(
@@ -519,6 +1099,15 @@ pub async fn cloud_overwrite_upload(
     source_id: String,
     entry_id: String,
 ) -> Result<(), String> {
+    let (configured_source, root, request_policy) = configured_source(&state, &source_id)?;
+    if configured_source.provider == "github" {
+        let client = github_client(
+            &configured_source,
+            credential(&configured_source)?,
+            request_policy,
+        )?;
+        return github_overwrite_upload(&client, &root, &source_id, &entry_id).await;
+    }
     let (client, _, root) = configured_client(&state, &source_id)?;
     ensure_remote_layout(&client).await?;
     let catalog: Catalog = read_json(&root.join("catalog.json"))?;
@@ -604,6 +1193,15 @@ pub async fn cloud_overwrite_download(
     source_id: String,
     entry_id: String,
 ) -> Result<(), String> {
+    let (configured_source, root, request_policy) = configured_source(&state, &source_id)?;
+    if configured_source.provider == "github" {
+        let client = github_client(
+            &configured_source,
+            credential(&configured_source)?,
+            request_policy,
+        )?;
+        return github_overwrite_download(&client, &root, &source_id, &entry_id).await;
+    }
     let (client, _, root) = configured_client(&state, &source_id)?;
     let remote_catalog_value: Value = client
         .get_json("catalog.json")
@@ -780,6 +1378,15 @@ pub async fn cloud_sync_entry(
     source_id: String,
     entry_id: String,
 ) -> Result<SyncResultDto, String> {
+    let (configured_source, root, request_policy) = configured_source(&state, &source_id)?;
+    if configured_source.provider == "github" {
+        let client = github_client(
+            &configured_source,
+            credential(&configured_source)?,
+            request_policy,
+        )?;
+        return github_sync_entry(&client, &root, &source_id, &entry_id).await;
+    }
     let (client, _, root) = configured_client(&state, &source_id)?;
     let local: Catalog = read_json(&root.join("catalog.json"))?;
     let remote: Option<Catalog> = match client.get_json("catalog.json").await {
@@ -871,6 +1478,15 @@ pub async fn cloud_delete_entries(
     source_id: String,
     entry_ids: Vec<String>,
 ) -> Result<(), String> {
+    let (configured_source, _, request_policy) = configured_source(&state, &source_id)?;
+    if configured_source.provider == "github" {
+        let client = github_client(
+            &configured_source,
+            credential(&configured_source)?,
+            request_policy,
+        )?;
+        return github_delete_entries(&client, &entry_ids).await;
+    }
     let (client, _, _) = configured_client(&state, &source_id)?;
     let mut catalog_value: Value = client
         .get_json("catalog.json")
@@ -931,6 +1547,27 @@ pub async fn cloud_set_entry_sync_mode(
 ) -> Result<(), String> {
     if !matches!(sync_mode.as_str(), "manual" | "automatic") {
         return Err("不支持的同步方式".into());
+    }
+    let (configured_source, _, request_policy) = configured_source(&state, &source_id)?;
+    if configured_source.provider == "github" {
+        let client = github_client(
+            &configured_source,
+            credential(&configured_source)?,
+            request_policy,
+        )?;
+        github_set_entry_sync_mode(&client, &entry_id, &sync_mode).await?;
+        let parsed_mode = if sync_mode == "automatic" {
+            SyncMode::Automatic
+        } else {
+            SyncMode::Manual
+        };
+        state
+            .repository
+            .lock()
+            .map_err(|_| storage_error())?
+            .set_entry_sync_mode(&entry_id, parsed_mode)
+            .map_err(|error| error.to_string())?;
+        return Ok(());
     }
     let (client, _, _) = configured_client(&state, &source_id)?;
     let mut catalog: Value = client

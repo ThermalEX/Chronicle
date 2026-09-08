@@ -57,6 +57,14 @@ function addSource(): void {
   tab.value = "sources";
 }
 
+function addGitHubSource(): void {
+  const id = crypto.randomUUID();
+  draft.sources.push({ id, name: `GitHub ${draft.sources.length + 1}`, provider: "github", endpoint: "", username: "", remotePath: "/Chronicle", credentialRef: `chronicle-github:${id}`, repository: "", branch: "main" });
+  draft.activeSourceId = id;
+  draft.enabled = true;
+  tab.value = "sources";
+}
+
 async function persist(): Promise<void> {
   draft.enabled = Boolean(draft.activeSourceId && draft.sources.length);
   await saveCloudSettings({ ...draft, sources: draft.sources.map((source) => ({ ...source })) });
@@ -199,12 +207,13 @@ onMounted(() => { closeButton.value?.focus(); if (activeSource.value) void loadP
         </section>
 
         <section v-else class="sources-page">
-          <div class="source-toolbar"><label><span>当前同步源</span><ThemedSelect :model-value="draft.activeSourceId" :options="sourceOptions" label="当前同步源" @update:model-value="selectActiveSource" /></label><button @click="addSource"><Plus :size="15" />添加 WebDAV</button><button disabled title="后续版本开放">GitHub（预留）</button></div>
+          <div class="source-toolbar"><label><span>当前同步源</span><ThemedSelect :model-value="draft.activeSourceId" :options="sourceOptions" label="当前同步源" @update:model-value="selectActiveSource" /></label><button @click="addSource"><Plus :size="15" />添加 WebDAV</button><button @click="addGitHubSource"><Plus :size="15" />添加 GitHub</button></div>
           <div v-if="!draft.sources.length" class="empty compact"><Server :size="28" /><h3>没有同步源</h3><p>Chronicle 支持保存多个云端配置，同时只启用其中一个。</p></div>
           <article v-for="source in draft.sources" v-else :key="source.id" class="source-card" :class="{ active: source.id === draft.activeSourceId }">
-            <div class="source-title"><span><Server :size="17" /><b>{{ source.name }}</b><small v-if="source.id === draft.activeSourceId">当前使用</small></span><button class="icon-danger" :aria-label="`删除 ${source.name}`" @click="removeSource(source)"><Trash2 :size="15" /></button></div>
-            <div class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>服务器地址</span><input v-model.trim="source.endpoint" type="url" placeholder="https://dav.example.com/remote.php/dav/files/user" /></label><label><span>用户名</span><input v-model.trim="source.username" type="text" autocomplete="username" /></label><label><span>密码</span><input v-model="passwords[source.id]" type="password" autocomplete="current-password" placeholder="留空表示使用已保存密码" /></label><label class="wide"><span>远端目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div>
-            <button class="test-button" :disabled="Boolean(busy) || !source.endpoint || !source.username" @click="testSource(source)">{{ busy === `test:${source.id}` ? '测试中…' : '测试连接与读写' }}</button>
+            <div class="source-title"><span><Server :size="17" /><b>{{ source.name }}</b><small>{{ source.provider === 'github' ? 'GitHub 仓库' : 'WebDAV' }}</small><small v-if="source.id === draft.activeSourceId">当前使用</small></span><button class="icon-danger" :aria-label="`删除 ${source.name}`" @click="removeSource(source)"><Trash2 :size="15" /></button></div>
+            <div v-if="source.provider === 'github'" class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>仓库</span><input v-model.trim="source.repository" type="text" placeholder="owner/repository" /></label><label><span>分支</span><input v-model.trim="source.branch" type="text" placeholder="main" /></label><label><span>访问令牌</span><input v-model="passwords[source.id]" type="password" autocomplete="current-password" placeholder="Fine-grained Token" /></label><label class="wide"><span>Chronicle 目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div>
+            <div v-else class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>服务器地址</span><input v-model.trim="source.endpoint" type="url" placeholder="https://dav.example.com/remote.php/dav/files/user" /></label><label><span>用户名</span><input v-model.trim="source.username" type="text" autocomplete="username" /></label><label><span>密码</span><input v-model="passwords[source.id]" type="password" autocomplete="current-password" placeholder="留空表示使用已保存密码" /></label><label class="wide"><span>远端目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div>
+            <button class="test-button" :disabled="Boolean(busy) || (source.provider === 'github' ? !source.repository || !source.branch : !source.endpoint || !source.username)" @click="testSource(source)">{{ busy === `test:${source.id}` ? '测试中…' : source.provider === 'github' ? '测试仓库访问' : '测试连接与读写' }}</button>
           </article>
           <fieldset><legend>请求控制</legend><label><span>元数据并发</span><input v-model.number="draft.maxConcurrentMetadataReads" type="number" min="1" max="4" /></label><label><span>传输并发</span><input v-model.number="draft.maxConcurrentTransfers" type="number" min="1" max="4" /></label><label><span>请求间隔（毫秒）</span><input v-model.number="draft.requestDelayMs" type="number" min="0" max="5000" step="50" /></label><label><span>重试次数</span><input v-model.number="draft.retryLimit" type="number" min="1" max="10" /></label></fieldset>
         </section>

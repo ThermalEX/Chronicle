@@ -28,6 +28,8 @@ export interface CloudSource {
   username: string;
   remotePath: string;
   credentialRef: string;
+  repository?: string;
+  branch?: string;
 }
 
 export interface CloudSettings {
