@@ -96,7 +96,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
   border-bottom: 1px solid var(--titlebar-hover);
   user-select: none;
 }
-.brand { display: flex; align-items: center; gap: 10px; padding: 0 18px; font-weight: 680; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 0 18px; color: var(--titlebar-text); font-weight: 680; }
 .sync-states { justify-self: center; display: flex; align-items: center; gap: 18px; min-width: 0; }
 .sync-state { display: flex; align-items: center; gap: 8px; color: var(--titlebar-text); font-size: 12px; white-space: nowrap; }
 .sync-state i { width: 7px; height: 7px; background: #78c2b8; border-radius: 50%; }

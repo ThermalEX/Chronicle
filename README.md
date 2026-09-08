@@ -1,4 +1,16 @@
-# Chronicle
+<p align="center">
+  <img src="docs/images/icon.png" width="144" alt="Chronicle 图标" />
+</p>
+
+<h1 align="center">Chronicle</h1>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white" alt="Tauri 2" />
+  <img src="https://img.shields.io/badge/Vue-3-42B883?logo=vuedotjs&logoColor=white" alt="Vue 3" />
+  <img src="https://img.shields.io/badge/Rust-1.85%2B-000000?logo=rust&logoColor=white" alt="Rust" />
+  <img src="https://img.shields.io/badge/Snapshots-7z-5B8C85" alt="7z 快照" />
+  <img src="https://img.shields.io/badge/Sync-WebDAV%20%2B%20GitHub-64748B" alt="WebDAV 和 GitHub 同步" />
+</p>
 
 Chronicle 是一个面向游戏存档、软件配置和任意文件夹的桌面时间线备份工具。它以本地资料库为基础，把每次备份保存为可恢复的 `.7z` 快照，并可同步到 WebDAV 或 GitHub 仓库。
 
