@@ -27,6 +27,7 @@ import { floatingMenuStyle, positionFloatingMenu } from "./services/floatingMenu
 import { filterTimeline, type TimelineSort } from "./services/snapshotTimeline";
 import { appSettings, cloudLibraryIndicator, cloudSettings, initializeSettings, saveAppSettings, shortcutMatches, type CloudHealth } from "./services/settings";
 import { categoryBreadcrumb } from "./services/categoryBreadcrumb";
+import { formatCurrentTime, millisecondsUntilNextMinute } from "./services/currentTime";
 
 type CategoryTreeNode = CategoryRecord & {
   nodeType: "category";
@@ -101,11 +102,20 @@ const cloudHealth = ref<CloudHealth>({ status: "unchecked" });
 const cloudHealthDialogOpen = ref(false);
 const cloudHealthCheckRunning = ref(false);
 const cloudHealthCheckItems = ref<CloudHealthCheckItem[]>([]);
+const currentTime = ref(formatCurrentTime(new Date()));
+let clockTimer: number | undefined;
 const cloudLibrary = computed(() => cloudLibraryIndicator(cloudSettings, cloudHealth.value));
 const cloudStateClass = computed(() => {
   if (!cloudSettings.enabled || !cloudSettings.sources.length) return "unavailable";
   return cloudHealth.value.status === "unavailable" ? "failed" : cloudHealth.value.status;
 });
+
+function refreshCurrentTime(): void {
+  const now = new Date();
+  currentTime.value = formatCurrentTime(now);
+  window.clearTimeout(clockTimer);
+  clockTimer = window.setTimeout(refreshCurrentTime, millisecondsUntilNextMinute(now));
+}
 
 async function checkCloudSources(showDialog = false): Promise<void> {
   if (!cloudSettings.enabled || !cloudSettings.sources.length) {
@@ -255,9 +265,14 @@ async function refreshRepositoryInfo() {
 
 async function handleSettingsChanged() {
   applyAppearance(appSettings);
-  cloudHealth.value = { status: "unchecked" };
   await Promise.all([refreshArchives(), refreshCategories(), refreshRepositoryInfo()]);
   showNotice("设置已保存");
+}
+
+function handleCloudSettingsChanged(): void {
+  cloudHealth.value = { status: "unchecked" };
+  cloudHealthCheckItems.value = [];
+  showNotice("云端设置已保存");
 }
 
 async function openRepositoryFolder() {
@@ -821,6 +836,7 @@ watch(selectedArchiveId, (archiveId) => { void refreshSnapshots(archiveId); });
 watch(selectedSnapshot, (snapshot) => { snapshotNote.value = snapshot?.note ?? ""; });
 onMounted(async () => {
   window.addEventListener("keydown", handleShortcut);
+  refreshCurrentTime();
   try {
     await initializeSettings();
     applyAppearance(appSettings);
@@ -835,6 +851,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleShortcut);
   window.clearTimeout(noticeTimer);
+  window.clearTimeout(clockTimer);
   automaticSyncTimers.forEach((timer) => window.clearTimeout(timer));
 });
 </script>
@@ -842,7 +859,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="app-shell">
     <header class="titlebar">
-      <div class="brand"><span>Chronicle</span></div>
+      <div class="brand"><time :datetime="currentTime">{{ currentTime }}</time></div>
       <div class="sync-states"><button class="sync-state sync-state-button" title="打开本地资料库" @click="openRepositoryFolder"><i></i>本地资料库可用</button><button class="sync-state sync-state-button" :class="cloudStateClass" :title="cloudHealth.reason || '检测云端资料库'" @click="openCloudHealthDialog"><i :class="{ pulse: cloudHealth.status === 'checking' }"></i>{{ cloudLibrary.label }}</button></div>
       <div class="toolbar"><button class="toolbar-action mode-toggle" :class="{ 'is-dark': appSettings.colorMode === 'dark' }" :aria-label="appSettings.colorMode === 'dark' ? '切换到日间模式' : '切换到夜间模式'" :title="appSettings.colorMode === 'dark' ? '切换到日间模式' : '切换到夜间模式'" :aria-pressed="appSettings.colorMode === 'dark'" @click="toggleColorMode"><Sun v-if="appSettings.colorMode === 'dark'" :size="17" /><Moon v-else :size="17" /></button><button class="toolbar-action" aria-label="云端设置" title="云端设置" @click="cloudSettingsOpen = true"><CloudCog :size="17" /></button><button class="toolbar-action" aria-label="应用设置" title="应用设置" @click="settingsOpen = true"><Settings2 :size="17" /></button></div>
     </header>
@@ -934,7 +951,7 @@ onBeforeUnmount(() => {
 
     <div v-if="notice" class="toast" :class="notice.type" role="status"><span>{{ notice.message }}</span><button aria-label="关闭通知" title="关闭通知" @click="notice = undefined"><X :size="15" /></button></div>
     <SettingsDialog v-if="settingsOpen" @close="settingsOpen = false" @saved="handleSettingsChanged" />
-    <CloudSettingsDialog v-if="cloudSettingsOpen" @close="cloudSettingsOpen = false" @saved="showNotice('云端设置已保存')" />
+    <CloudSettingsDialog v-if="cloudSettingsOpen" @close="cloudSettingsOpen = false" @saved="handleCloudSettingsChanged" />
     <CloudHealthDialog v-if="cloudHealthDialogOpen" :items="cloudHealthCheckItems" :running="cloudHealthCheckRunning" @close="cloudHealthDialogOpen = false" />
     <CreateCategoryDialog
       v-if="categoryDialogOpen"
