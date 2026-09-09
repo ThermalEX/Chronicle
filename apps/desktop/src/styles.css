@@ -274,7 +274,7 @@ kbd { padding: 2px 5px; color: var(--text-3); background: var(--hover); border: 
 .restore { width: 100%; margin-top: 0; color: #fff; background: var(--primary); font-size: 11px; }
 .hint { margin: 8px 4px 0; color: var(--text-3); font-size: 9px; line-height: 1.5; text-align: center; }
 .inspector-empty { display: flex; align-items: center; gap: 8px; color: var(--text-3); font-size: 11px; }
-.toast { position: fixed; z-index: 200; right: 20px; bottom: 20px; display: flex; align-items: center; gap: 14px; max-width: 380px; min-height: 44px; padding: 9px 9px 9px 14px; color: #fff; background: #253c38; border-radius: 8px; box-shadow: 0 10px 30px #102b2730; font-size: 12px; }
+.toast { position: fixed; z-index: 200; right: 20px; bottom: 20px; display: flex; align-items: center; gap: 14px; max-width: 380px; min-height: 44px; padding: 9px 9px 9px 14px; color: #fff; background: #17834a; border-radius: 8px; box-shadow: 0 10px 30px #102b2730; font-size: 12px; }
 .toast.error { background: #7f1d1d; }
 .toast.info { background: #1e3a5f; }
 .toast button { display: grid; place-items: center; width: 28px; height: 28px; color: inherit; background: transparent; border-radius: 5px; }

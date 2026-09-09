@@ -73,7 +73,7 @@ const APP_SETTINGS_KEY = "chronicle.app-settings.v2";
 const CLOUD_SETTINGS_KEY = "chronicle.cloud-settings.v2";
 
 export interface SettingsDocument {
-  formatVersion: 4;
+  formatVersion: 3;
   app: AppSettings;
   cloud: CloudSettings;
 }
@@ -167,7 +167,7 @@ export const cloudSettings = reactive<CloudSettings>(normalizedCloud());
 
 function settingsDocument(): SettingsDocument {
   return {
-    formatVersion: 4,
+    formatVersion: 3,
     app: { ...appSettings },
     cloud: { ...cloudSettings, sources: cloudSettings.sources.map((source) => ({ ...source })) },
   };
@@ -178,7 +178,7 @@ export async function initializeSettings(): Promise<void> {
     const saved = await invoke<Partial<SettingsDocument> & { cloud?: LegacyCloudSettings }>("load_settings");
     Object.assign(appSettings, defaultAppSettings, saved.app ?? {}, normalizeAppearance(saved.app ?? {}));
     Object.assign(cloudSettings, normalizedCloud(saved.cloud));
-    if (saved.formatVersion !== 4) await persistSettings();
+    if (saved.formatVersion !== 3) await persistSettings();
     return;
   }
   const savedApp = loadSettings(APP_SETTINGS_KEY, defaultAppSettings);
@@ -208,7 +208,7 @@ export async function saveCloudSettings(value: CloudSettings): Promise<void> {
     }
   }
   if (isTauri()) {
-    await invoke("save_settings", { settings: { formatVersion: 4, app: { ...appSettings }, cloud: normalized } });
+    await invoke("save_settings", { settings: { formatVersion: 3, app: { ...appSettings }, cloud: normalized } });
   } else {
     localStorage.setItem(CLOUD_SETTINGS_KEY, JSON.stringify(normalized));
   }

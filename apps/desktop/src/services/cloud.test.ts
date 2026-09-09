@@ -32,7 +32,7 @@ describe("cloud repository adapter", () => {
     expect(cloudSettings.enabled).toBe(false);
   });
 
-  it("saves credentials before a v4 settings document with no secret values", async () => {
+  it("saves credentials before a v3 settings document with no secret values", async () => {
     const { saveCloudConfiguration } = await import("./cloud");
     const { cloudSettings } = await import("./settings");
     const source = { id: "dal-2", name: "S3", provider: "opendal" as const, endpoint: "", username: "", remotePath: "/Chronicle", credentialRef: "dal-2", scheme: "s3", config: { bucket: "bucket" }, secretKeys: ["secret_access_key"] };
@@ -40,7 +40,7 @@ describe("cloud repository adapter", () => {
     await saveCloudConfiguration({ ...cloudSettings, enabled: true, sources: [source] }, [{ source, secrets: { secret_access_key: "never-persist-here" } }]);
     expect(invoke.mock.calls.map((call) => call[0])).toEqual(["save_opendal_credential", "save_settings"]);
     const settings = invoke.mock.calls[1][1].settings;
-    expect(settings.formatVersion).toBe(4);
+    expect(settings.formatVersion).toBe(3);
     expect(JSON.stringify(settings)).not.toContain("never-persist-here");
   });
 
