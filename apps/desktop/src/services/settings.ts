@@ -46,11 +46,13 @@ export interface CloudSource {
   scheme?: string;
   config?: Record<string, string>;
   secretKeys?: string[];
+  syncEnabled?: boolean;
 }
 
 export interface CloudSettings {
   enabled: boolean;
-  activeSourceId: string | null;
+  /** @deprecated Temporary compatibility field while callers migrate to source.syncEnabled. */
+  activeSourceId?: string | null;
   sources: CloudSource[];
   maxConcurrentMetadataReads: number;
   maxConcurrentTransfers: number;
@@ -59,7 +61,7 @@ export interface CloudSettings {
 }
 
 export function cloudLibraryIndicator(
-  settings: Pick<CloudSettings, "enabled" | "activeSourceId" | "sources">,
+  settings: Pick<CloudSettings, "enabled" | "sources">,
   health: CloudHealth = { status: "unchecked" },
 ): { available: boolean; label: string } {
   if (!settings.enabled || !settings.sources.length) return { available: false, label: "云端资料库未启用" };
@@ -107,6 +109,7 @@ const defaultCloudSettings: CloudSettings = {
 };
 
 type LegacyCloudSettings = Partial<CloudSettings> & {
+  activeSourceId?: string | null;
   endpoint?: string;
   username?: string;
   remotePath?: string;
@@ -114,6 +117,7 @@ type LegacyCloudSettings = Partial<CloudSettings> & {
 
 export function normalizedCloud(value?: LegacyCloudSettings): CloudSettings {
   const raw = value ?? {};
+  const legacyActiveSourceId = raw.activeSourceId ?? null;
   let sources = Array.isArray(raw.sources) ? raw.sources.map((source) => {
     const provider = String(source.provider);
     return {
@@ -121,9 +125,9 @@ export function normalizedCloud(value?: LegacyCloudSettings): CloudSettings {
       provider: (provider === "github" ? "legacy_github" : provider === "webdav" ? "legacy_webdav" : provider) as CloudProvider,
       ...(source.config ? { config: { ...source.config } } : {}),
       ...(source.secretKeys ? { secretKeys: [...source.secretKeys] } : {}),
+      syncEnabled: typeof source.syncEnabled === "boolean" ? source.syncEnabled : source.id === legacyActiveSourceId,
     };
   }) : [];
-  let activeSourceId = raw.activeSourceId ?? null;
   if (!sources.length && raw.endpoint) {
     const id = crypto.randomUUID();
     sources = [{
@@ -134,20 +138,23 @@ export function normalizedCloud(value?: LegacyCloudSettings): CloudSettings {
       username: raw.username ?? "",
       remotePath: raw.remotePath || "/Chronicle",
       credentialRef: `chronicle-webdav:${id}`,
+      syncEnabled: true,
     }];
-    activeSourceId = id;
   }
-  if (!sources.some((source) => source.id === activeSourceId)) activeSourceId = sources[0]?.id ?? null;
   const requestedDelay = Number(raw.requestDelayMs ?? 150);
   return {
     enabled: Boolean(raw.enabled && sources.length),
-    activeSourceId,
+    activeSourceId: sources.find((source) => source.syncEnabled)?.id ?? null,
     sources,
     maxConcurrentMetadataReads: Math.max(1, Math.min(4, Number(raw.maxConcurrentMetadataReads) || 2)),
     maxConcurrentTransfers: Math.max(1, Math.min(4, Number(raw.maxConcurrentTransfers) || 2)),
     requestDelayMs: Math.max(0, Math.min(5000, Number.isFinite(requestedDelay) ? requestedDelay : 150)),
     retryLimit: Math.max(1, Math.min(10, Number(raw.retryLimit) || 5)),
   };
+}
+
+export function enabledCloudSources(settings: Pick<CloudSettings, "enabled" | "sources">): CloudSource[] {
+  return settings.enabled ? settings.sources.filter((source) => source.syncEnabled) : [];
 }
 
 function loadSettings<T extends object>(key: string, defaults: T): T {

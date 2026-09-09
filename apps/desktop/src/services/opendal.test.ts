@@ -53,7 +53,7 @@ describe("OpenDAL configuration", () => {
   it("migrates v2 source identity, branch and every path without mutation", () => {
     const legacy = { ...source(), provider: "github", repository: "owner/repo", branch: "custom/branch", remotePath: "/existing/path" };
     const migrated = normalizedCloud({ enabled: true, activeSourceId: legacy.id, sources: [legacy] as unknown as CloudSource[] });
-    expect(migrated.sources[0]).toEqual({ ...legacy, provider: "legacy_github" });
+    expect(migrated.sources[0]).toEqual({ ...legacy, provider: "legacy_github", syncEnabled: true });
     expect(legacy.provider).toBe("github");
     expect(normalizedCloud({ sources: [{ ...legacy, provider: "webdav" }] as unknown as CloudSource[] }).sources[0].provider).toBe("legacy_webdav");
   });
