@@ -954,7 +954,7 @@ onBeforeUnmount(() => {
 
           <aside class="inspector activity-panel" :class="{ expanded: activityPanelOpen && Boolean(selectedSnapshot) }">
             <template v-if="selectedSnapshot && activityPanelOpen">
-              <div class="section-title"><div><p class="label">已选版本</p><h3>{{ formatTime(selectedSnapshot.createdAt) }}</h3></div><span class="verified"><Check :size="13" />完整</span></div>
+              <div class="section-title"><div><p class="label">已选版本</p><h3>{{ formatTime(selectedSnapshot.createdAt) }}</h3></div><span class="verified"><Check :size="13" />完整</span><button class="inspector-close" aria-label="关闭时间节点详情" title="关闭时间节点详情" @click="activityPanelOpen = false"><X :size="16" /></button></div>
               <dl><div><dt>类型</dt><dd>{{ selectedSnapshot.title }}</dd></div><div><dt>快照大小</dt><dd>{{ formatBytes(selectedSnapshot.totalBytes) }}</dd></div><div><dt>存储位置</dt><dd>仅本地</dd></div><div><dt>内容校验</dt><dd class="hash">{{ selectedSnapshot.contentHash.slice(0, 6) }}…{{ selectedSnapshot.contentHash.slice(-4) }}</dd></div></dl>
               <div class="changes"><p>内容变化</p><div><span><i class="green"></i>新增</span><b>{{ selectedSnapshot.changes.added }}</b></div><div><span><i class="amber"></i>修改</span><b>{{ selectedSnapshot.changes.modified }}</b></div><div><span><i class="red"></i>删除</span><b>{{ selectedSnapshot.changes.deleted }}</b></div></div>
               <label class="snapshot-note"><span>备注</span><textarea v-model="snapshotNote" maxlength="500" placeholder="记录当前进度、目标或注意事项" @keydown.ctrl.enter.prevent="saveSnapshotNote"></textarea><button :disabled="savingSnapshotNote" @click="saveSnapshotNote"><Save :size="16" />{{ savingSnapshotNote ? '保存中' : '保存备注' }}</button></label>
