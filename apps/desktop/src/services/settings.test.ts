@@ -34,12 +34,18 @@ describe("cloudLibraryIndicator", () => {
     activeSourceId: source.id, maxConcurrentMetadataReads: 2, maxConcurrentTransfers: 2, requestDelayMs: 150, retryLimit: 5,
   };
 
-  it("reports a configured cloud library by its source name", () => {
-    expect(cloudLibraryIndicator({ ...base, enabled: true, sources: [source] })).toEqual({ available: true, label: "云端资料库：GitHub 资料库" });
+  it("reports an untested configured cloud library as pending", () => {
+    expect(cloudLibraryIndicator({ ...base, enabled: true, sources: [source] })).toEqual({ available: false, label: "云端资料库：未检测" });
   });
 
   it("reports disabled and multiple cloud libraries without pretending they are available", () => {
     expect(cloudLibraryIndicator({ ...base, enabled: false, sources: [source] })).toEqual({ available: false, label: "云端资料库未启用" });
-    expect(cloudLibraryIndicator({ ...base, enabled: true, sources: [source, { ...source, id: "webdav-1", name: "WebDAV" }] })).toEqual({ available: true, label: "云端资料库：2 个同步源" });
+    expect(cloudLibraryIndicator({ ...base, enabled: true, sources: [source, { ...source, id: "webdav-1", name: "WebDAV" }] })).toEqual({ available: false, label: "云端资料库：未检测" });
+  });
+
+  it("reports checked sources and identifies the first unavailable source", () => {
+    const settings = { ...base, enabled: true, sources: [source, { ...source, id: "webdav-1", name: "WebDAV" }] };
+    expect((cloudLibraryIndicator as any)(settings, { status: "available" })).toEqual({ available: true, label: "云端资料库：2 个同步源可用" });
+    expect((cloudLibraryIndicator as any)(settings, { status: "unavailable", sourceName: "WebDAV" })).toEqual({ available: false, label: "云端资料库：WebDAV 无法使用" });
   });
 });

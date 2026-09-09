@@ -23,7 +23,7 @@ import { selectArchivePanelCategory, selectCategoryPanel } from "./services/arch
 import { applyAppearance, normalizeAppearance } from "./services/appearance";
 import { floatingMenuStyle, positionFloatingMenu } from "./services/floatingMenu";
 import { filterTimeline, type TimelineSort } from "./services/snapshotTimeline";
-import { appSettings, cloudLibraryIndicator, cloudSettings, initializeSettings, saveAppSettings, shortcutMatches } from "./services/settings";
+import { appSettings, cloudLibraryIndicator, cloudSettings, initializeSettings, saveAppSettings, shortcutMatches, type CloudHealth } from "./services/settings";
 import { categoryBreadcrumb } from "./services/categoryBreadcrumb";
 
 type CategoryTreeNode = CategoryRecord & {
@@ -95,7 +95,29 @@ let confirmResolver: ((confirmed: boolean) => void) | undefined;
 const notice = ref<{ type: "success" | "error" | "info"; message: string }>();
 let noticeTimer: number | undefined;
 const automaticSyncTimers = new Map<string, number>();
-const cloudLibrary = computed(() => cloudLibraryIndicator(cloudSettings));
+const cloudHealth = ref<CloudHealth>({ status: "unchecked" });
+const cloudLibrary = computed(() => cloudLibraryIndicator(cloudSettings, cloudHealth.value));
+const cloudStateClass = computed(() => {
+  if (!cloudSettings.enabled || !cloudSettings.sources.length) return "unavailable";
+  return cloudHealth.value.status === "unavailable" ? "failed" : cloudHealth.value.status;
+});
+
+async function checkCloudSources(): Promise<void> {
+  if (!cloudSettings.enabled || !cloudSettings.sources.length) {
+    cloudHealth.value = { status: "unchecked" };
+    return;
+  }
+  cloudHealth.value = { status: "checking" };
+  for (const source of cloudSettings.sources) {
+    try {
+      await cloudRepository.test(source, "");
+    } catch (error) {
+      cloudHealth.value = { status: "unavailable", sourceName: source.name, reason: readableError(error) };
+      return;
+    }
+  }
+  cloudHealth.value = { status: "available" };
+}
 
 function queueAutomaticUpload(archive?: ArchiveRecord): void {
   if (!archive || !isTauriRuntime || archive.storagePolicy !== "local_and_remote" || archive.syncMode !== "automatic" || !cloudSettings.activeSourceId) return;
@@ -224,6 +246,7 @@ async function refreshRepositoryInfo() {
 
 async function handleSettingsChanged() {
   applyAppearance(appSettings);
+  cloudHealth.value = { status: "unchecked" };
   await Promise.all([refreshArchives(), refreshCategories(), refreshRepositoryInfo()]);
   showNotice("设置已保存");
 }
@@ -795,6 +818,7 @@ onMounted(async () => {
     await refreshCategories();
     await refreshArchives();
     await refreshRepositoryInfo();
+    if (appSettings.checkCloudOnLaunch && isTauriRuntime) void checkCloudSources();
   }
   catch (error) { showNotice(readableError(error), "error"); }
   finally { loading.value = false; }
@@ -810,7 +834,7 @@ onBeforeUnmount(() => {
   <div class="app-shell">
     <header class="titlebar">
       <div class="brand"><span>Chronicle</span></div>
-      <div class="sync-states"><div class="sync-state"><i></i>本地资料库可用</div><div class="sync-state" :class="{ unavailable: !cloudLibrary.available }"><i></i>{{ cloudLibrary.label }}</div></div>
+      <div class="sync-states"><div class="sync-state"><i></i>本地资料库可用</div><div class="sync-state" :class="cloudStateClass" :title="cloudHealth.reason"><i :class="{ pulse: cloudHealth.status === 'checking' }"></i>{{ cloudLibrary.label }}</div></div>
       <div class="toolbar"><button class="toolbar-action mode-toggle" :class="{ 'is-dark': appSettings.colorMode === 'dark' }" :aria-label="appSettings.colorMode === 'dark' ? '切换到日间模式' : '切换到夜间模式'" :title="appSettings.colorMode === 'dark' ? '切换到日间模式' : '切换到夜间模式'" :aria-pressed="appSettings.colorMode === 'dark'" @click="toggleColorMode"><Sun v-if="appSettings.colorMode === 'dark'" :size="17" /><Moon v-else :size="17" /></button><button class="toolbar-action" aria-label="云端设置" title="云端设置" @click="cloudSettingsOpen = true"><CloudCog :size="17" /></button><button class="toolbar-action" aria-label="应用设置" title="应用设置" @click="settingsOpen = true"><Settings2 :size="17" /></button></div>
     </header>
 

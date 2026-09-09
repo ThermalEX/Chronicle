@@ -5,7 +5,7 @@ import type { CloudSource } from "../services/settings";
 import { configureOpenDal, openDalTemplates, publicConfigKeys, validateAdvancedKey } from "../services/opendal";
 import ThemedSelect from "./ThemedSelect.vue";
 
-const props = defineProps<{ source: CloudSource; secrets: Record<string, string>; disabled?: boolean }>();
+const props = defineProps<{ source: CloudSource; secrets: Record<string, string>; credentialSaved?: boolean; disabled?: boolean }>();
 const fieldName = ref("");
 const fieldSecret = ref(true);
 const fieldError = ref("");
@@ -43,7 +43,7 @@ function removeField(key: string): void {
     <p v-if="source.scheme === 'github'" class="wide hint">此模板只使用仓库默认分支。需要自定义分支、建仓或批量提交时，请选择 GitHub 兼容源。</p>
     <p v-if="source.scheme === 'webdav'" class="wide hint">坚果云请优先使用 WebDAV 兼容源，以保留覆盖上传回退行为。</p>
     <label v-for="key in publicFields" :key="key"><span>{{ key }} <small>公开配置</small></span><div class="field-row"><input v-model.trim="source.config![key]" :disabled="disabled" type="text" :aria-label="`${key} 公开配置`" /><button :disabled="disabled" type="button" :title="`移除 ${key}`" :aria-label="`移除 ${key}`" @click="removeField(key)"><Trash2 :size="14" /></button></div></label>
-    <label v-for="key in source.secretKeys ?? []" :key="key"><span>{{ key }} <small>机密 · Windows 凭据管理器</small></span><div class="field-row"><textarea v-if="key === 'credential' && source.scheme === 'gcs'" v-model="secrets[key]" :disabled="disabled" autocomplete="new-password" :aria-label="`${key} 机密配置`" placeholder="粘贴服务账号 JSON，留空保留已保存值" /><input v-else v-model="secrets[key]" :disabled="disabled" type="password" autocomplete="new-password" :aria-label="`${key} 机密配置`" placeholder="留空保留已保存值" /><button :disabled="disabled" type="button" :title="`移除 ${key}`" :aria-label="`移除 ${key}`" @click="removeField(key)"><Trash2 :size="14" /></button></div><small v-if="key === 'credential' && source.scheme === 'gcs'">粘贴服务账号 JSON 内容；不会读取本机凭据文件。</small></label>
+    <label v-for="key in source.secretKeys ?? []" :key="key"><span>{{ key }} <small>机密 · Windows 凭据管理器</small></span><div class="field-row"><textarea v-if="key === 'credential' && source.scheme === 'gcs'" v-model="secrets[key]" :disabled="disabled" autocomplete="new-password" :aria-label="`${key} 机密配置`" :placeholder="credentialSaved ? '已保存，留空保留' : '粘贴服务账号 JSON'" /><input v-else v-model="secrets[key]" :disabled="disabled" type="password" autocomplete="new-password" :aria-label="`${key} 机密配置`" :placeholder="credentialSaved ? '已保存，留空保留' : '请输入机密值'" /><button :disabled="disabled" type="button" :title="`移除 ${key}`" :aria-label="`移除 ${key}`" @click="removeField(key)"><Trash2 :size="14" /></button></div><small v-if="key === 'credential' && source.scheme === 'gcs'">粘贴服务账号 JSON 内容；不会读取本机凭据文件。</small></label>
     <details class="wide"><summary>高级键值配置</summary><p class="hint">仅支持当前已编译服务的配置键。新增字段默认作为机密保存；未知字段不能设为公开。</p><div class="advanced-row"><label><span>字段名</span><input v-model.trim="fieldName" :disabled="disabled" :aria-invalid="Boolean(fieldError)" type="text" placeholder="例如 session_token" /></label><label class="secret-toggle"><input v-model="fieldSecret" :disabled="disabled || !canBePublic" type="checkbox" />机密值</label><button :disabled="disabled" type="button" @click="addField"><Plus :size="14" />添加字段</button></div><p v-if="fieldError" class="field-error" role="alert">{{ fieldError }}</p></details>
   </div>
 </template>
@@ -55,7 +55,9 @@ small, .hint { color: var(--text-3); font-size: 11px; line-height: 1.6; }
 .wide { grid-column: 1 / -1; }
 .hint { margin: 0; }
 input[type="text"], input[type="password"], textarea { width: 100%; box-sizing: border-box; min-width: 0; height: 36px; border: 1px solid var(--border-2); border-radius: 6px; background: var(--field); color: var(--text); padding: 7px 10px; font: inherit; resize: vertical; }
-.field-row { display: flex; gap: 6px; }
+.field-row { display: flex; align-items: flex-start; gap: 6px; }
+.field-row > :first-child { flex: 1 1 auto; }
+.field-row > button { flex: 0 0 36px; width: 36px; height: 36px; padding: 0; }
 button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; color: var(--text); background: var(--field); border: 1px solid var(--border-2); border-radius: 6px; padding: 7px; cursor: pointer; }
 summary { font-size: 12px; cursor: pointer; color: var(--text); padding-bottom: 8px; }
 .advanced-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin-top: 8px; }

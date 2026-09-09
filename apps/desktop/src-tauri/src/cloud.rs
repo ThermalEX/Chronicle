@@ -119,6 +119,15 @@ pub struct CreatedGitHubRepositoryDto {
     branch: String,
 }
 
+/// Deliberately contains no credential value; the renderer only needs to know
+/// whether an existing source has a credential in Windows Credential Manager.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudSourceStatusDto {
+    source_id: String,
+    credential_saved: bool,
+}
+
 fn storage_error() -> String {
     "Chronicle 本地仓库状态不可用".into()
 }
@@ -201,6 +210,40 @@ fn raw_credential(source: &CloudSourceInput) -> Result<String, String> {
         .map_err(|error| error.to_string())?
         .get_password()
         .map_err(|_| "该同步源尚未保存密码".to_owned())
+}
+
+#[tauri::command(async)]
+pub async fn cloud_source_statuses(
+    state: State<'_, AppState>,
+) -> Result<Vec<CloudSourceStatusDto>, String> {
+    let settings = state
+        .repository
+        .lock()
+        .map_err(|_| storage_error())?
+        .load_settings()
+        .map_err(|error| error.to_string())?;
+    let source_ids = settings
+        .pointer("/cloud/sources")
+        .and_then(Value::as_array)
+        .map(|sources| {
+            sources
+                .iter()
+                .filter_map(|source| source.get("id").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    source_ids
+        .iter()
+        .map(|source_id| {
+            let source = source_from_settings(&settings, source_id)?;
+            let credential_saved = raw_credential(&source).is_ok();
+            Ok(CloudSourceStatusDto {
+                source_id: source.id,
+                credential_saved,
+            })
+        })
+        .collect()
 }
 
 fn github_client(

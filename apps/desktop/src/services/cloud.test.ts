@@ -78,6 +78,13 @@ describe("cloud repository adapter", () => {
     });
   });
 
+  it("loads only credential-presence flags for configured sources", async () => {
+    const { cloudRepository } = await import("./cloud");
+    invoke.mockResolvedValueOnce([{ sourceId: "github-1", credentialSaved: true }]);
+    await expect(cloudRepository.sourceStatuses()).resolves.toEqual([{ sourceId: "github-1", credentialSaved: true }]);
+    expect(invoke).toHaveBeenCalledWith("cloud_source_statuses");
+  });
+
   it("asks the desktop backend to create a private GitHub repository", async () => {
     const { cloudRepository } = await import("./cloud");
     const source = {

@@ -16,10 +16,15 @@ export type RemoteItem = {
 export type CloudPreview = { sourceName: string; libraryId?: string; items: RemoteItem[] };
 export type CloudSyncResult = { status: "uploaded" | "downloaded" | "current" | "conflict"; message: string };
 export type CreatedGitHubRepository = { repository: string; branch: string };
+export type CloudSourceStatus = { sourceId: string; credentialSaved: boolean };
 
 function desktopOnly(): never { throw new Error("云同步仅在 Chronicle 桌面端可用"); }
 
 export const cloudRepository = {
+  sourceStatuses(): Promise<CloudSourceStatus[]> {
+    if (!isTauri()) desktopOnly();
+    return invoke("cloud_source_statuses");
+  },
   saveOpenDalCredential(source: CloudSource, secrets: Record<string, string>): Promise<void> {
     if (!isTauri()) desktopOnly();
     return invoke("save_opendal_credential", { source, secrets });

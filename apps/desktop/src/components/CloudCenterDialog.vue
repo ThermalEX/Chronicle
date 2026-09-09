@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { CheckCircle2, ChevronDown, CloudCog, Download, ExternalLink, FileJson, Plus, RefreshCw, Search, Server, Trash2, Upload, X } from "@lucide/vue";
-import { computed, onMounted, reactive, ref } from "vue";
+import { CheckCircle2, ChevronDown, CircleAlert, CloudCog, Download, ExternalLink, FileJson, Plus, RefreshCw, Search, Server, Trash2, Upload, X } from "@lucide/vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { cloudRepository, saveCloudConfiguration, type CloudPreview, type RemoteItem } from "../services/cloud";
 import { cloudSettings, type CloudSettings, type CloudSource } from "../services/settings";
 import { createBackdropDismissal } from "../services/dialogDismissal";
@@ -18,6 +18,7 @@ const passwords = reactive<Record<string, string>>({});
 const secrets = reactive<Record<string, Record<string, string>>>(Object.fromEntries(draft.sources.map((source) => [source.id, {}])));
 const tested = reactive<Record<string, string>>({});
 const failedTests = reactive(new Set<string>());
+const savedCredentials = reactive<Record<string, boolean>>({});
 const original = new Map(draft.sources.map((source) => [source.id, sourceTestKey(source, {})]));
 function currentTestKey(source: CloudSource): string { return sourceTestKey(source, secretPatch(secrets[source.id] ?? {})); }
 function requiresTest(source: CloudSource): boolean {
@@ -31,6 +32,8 @@ const busy = ref("");
 const backdrop = createBackdropDismissal(() => emit("close"), () => !busy.value);
 const feedback = ref("");
 const error = ref("");
+const toast = ref<{ type: "success" | "error"; message: string }>();
+let toastTimer: number | undefined;
 const confirmAction = ref<{ title: string; message: string; run: () => Promise<void> }>();
 const activeSource = computed(() => draft.sources.find((source) => source.id === draft.activeSourceId));
 const cloudSearch = ref("");
@@ -41,6 +44,14 @@ const visibleRemoteArchives = computed(() => {
   return remoteArchives.value.filter((item) => item.name.toLocaleLowerCase().includes(query));
 });
 const remoteSnapshotTotal = computed(() => remoteArchives.value.reduce((total, item) => total + item.snapshotCount, 0));
+function sourcePassed(source: CloudSource): boolean { return tested[source.id] === currentTestKey(source) && !failedTests.has(source.id); }
+function showToast(type: "success" | "error", message: string): void {
+  toast.value = { type, message };
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => { toast.value = undefined; }, type === "success" ? 3600 : 7000);
+}
+watch(feedback, (message) => { if (message) showToast("success", message); });
+watch(error, (message) => { if (message) showToast("error", message); });
 const sourceOptions = computed<ThemedSelectOption[]>(() => [
   { value: null, label: "未选择" },
   ...draft.sources.map((source) => ({ value: source.id, label: source.name })),
@@ -107,7 +118,17 @@ async function persist(): Promise<void> {
     passwords[source.id] = "";
     original.set(source.id, sourceTestKey(source, {}));
   }
+  await loadSourceStatuses();
   emit("saved");
+}
+
+async function loadSourceStatuses(): Promise<void> {
+  try {
+    const statuses = await cloudRepository.sourceStatuses();
+    for (const source of draft.sources) savedCredentials[source.id] = statuses.find((status) => status.sourceId === source.id)?.credentialSaved ?? false;
+  } catch {
+    for (const source of draft.sources) savedCredentials[source.id] = false;
+  }
 }
 
 async function loadPreview(): Promise<void> {
@@ -224,7 +245,8 @@ async function saveAndClose(): Promise<void> {
   finally { busy.value = ""; }
 }
 
-onMounted(() => { closeButton.value?.focus(); if (activeSource.value) void loadPreview(); });
+onMounted(() => { closeButton.value?.focus(); void loadSourceStatuses(); if (activeSource.value) void loadPreview(); });
+onBeforeUnmount(() => window.clearTimeout(toastTimer));
 </script>
 
 <template>
@@ -233,7 +255,6 @@ onMounted(() => { closeButton.value?.focus(); if (activeSource.value) void loadP
       <header><div class="heading-icon"><CloudCog :size="21" /></div><div><p>同步服务</p><h2 id="cloud-title">云端设置</h2></div><button ref="closeButton" aria-label="关闭云端设置" title="关闭云端设置" @click="emit('close')"><X :size="18" /></button></header>
       <nav aria-label="云端设置页面"><button :class="{ active: tab === 'repository' }" @click="tab = 'repository'; activeSource && loadPreview()">云端仓库</button><button :class="{ active: tab === 'sources' }" @click="tab = 'sources'">同步源</button></nav>
       <main>
-        <p v-if="error" class="message error" role="alert">{{ error }}</p><p v-if="feedback" class="message success"><CheckCircle2 :size="15" />{{ feedback }}</p>
         <section v-if="tab === 'repository'" class="repository-page">
           <div v-if="!activeSource" class="empty"><CloudCog :size="30" /><h3>尚未配置云同步源</h3><p>添加 WebDAV 后即可查看和管理远端 Chronicle 仓库。</p><button @click="tab = 'sources'; addSource()"><Plus :size="16" />添加同步源</button></div>
           <template v-else>
@@ -282,9 +303,9 @@ onMounted(() => { closeButton.value?.focus(); if (activeSource.value) void loadP
           <div class="source-toolbar"><label><span>当前同步源</span><ThemedSelect :model-value="draft.activeSourceId" :options="sourceOptions" label="当前同步源" @update:model-value="selectActiveSource" /></label><button @click="addSource"><Plus :size="15" />添加 WebDAV 兼容源</button><button @click="addGitHubSource"><Plus :size="15" />添加 GitHub 兼容源</button><button @click="addOpenDalSource"><Plus :size="15" />添加 OpenDAL</button></div>
           <div v-if="!draft.sources.length" class="empty compact"><Server :size="28" /><h3>没有同步源</h3><p>Chronicle 支持保存多个云端配置，同时只启用其中一个。</p></div>
           <article v-for="source in draft.sources" v-else :key="source.id" class="source-card" :class="{ active: source.id === draft.activeSourceId }">
-            <div class="source-title"><span><Server :size="17" /><b>{{ source.name }}</b><small>{{ source.provider === 'legacy_github' ? 'GitHub 兼容源' : source.provider === 'opendal' ? 'OpenDAL · ' + source.scheme : 'WebDAV 兼容源' }}</small><small v-if="source.id === draft.activeSourceId">当前使用</small></span><button class="icon-danger" :aria-label="`删除 ${source.name}`" :title="`删除 ${source.name}`" @click="removeSource(source)"><Trash2 :size="15" /></button></div>
-            <div v-if="source.provider === 'legacy_github'" class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>仓库</span><input v-model.trim="source.repository" type="text" placeholder="owner/repository" /></label><label><span>分支</span><input v-model.trim="source.branch" type="text" placeholder="main" /></label><label class="wide github-token-field"><span>访问令牌</span><div><input v-model="passwords[source.id]" type="password" autocomplete="current-password" placeholder="粘贴 GitHub 生成的访问令牌" /><button type="button" @click="openGitHubPatPage"><ExternalLink :size="14" />在 GitHub 生成令牌</button></div><small>登录后直接生成带 repo 权限的令牌；GitHub 只显示一次，请复制后粘贴到这里。</small></label><label><span>新仓库名称</span><input v-model.trim="newRepositoryNames[source.id]" type="text" :placeholder="githubRepositoryName(source.id)" /></label><button class="create-repository-button" :disabled="Boolean(busy)" @click="createGitHubRepository(source)"><Plus :size="15" />创建私有仓库</button><label class="wide"><span>Chronicle 目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div>
-            <OpenDalSourceFields v-else-if="source.provider === 'opendal'" :source="source" :secrets="secrets[source.id] ?? (secrets[source.id] = {})" :disabled="Boolean(busy)" /><div v-else class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>服务器地址</span><input v-model.trim="source.endpoint" type="url" placeholder="https://dav.example.com/remote.php/dav/files/user" /></label><label><span>用户名</span><input v-model.trim="source.username" type="text" autocomplete="username" /></label><label><span>密码</span><input v-model="passwords[source.id]" type="password" autocomplete="current-password" placeholder="留空表示使用已保存密码" /></label><label class="wide"><span>远端目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div>
+            <div class="source-title"><span><Server :size="17" /><b>{{ source.name }}</b><i v-if="sourcePassed(source)" class="source-tested" role="img" :aria-label="`${source.name} 已通过测试`" title="已通过测试"></i><small>{{ source.provider === 'legacy_github' ? 'GitHub 兼容源' : source.provider === 'opendal' ? 'OpenDAL · ' + source.scheme : 'WebDAV 兼容源' }}</small><small v-if="source.id === draft.activeSourceId">当前使用</small></span><button class="icon-danger" :aria-label="`删除 ${source.name}`" :title="`删除 ${source.name}`" @click="removeSource(source)"><Trash2 :size="15" /></button></div>
+            <div v-if="source.provider === 'legacy_github'" class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>仓库</span><input v-model.trim="source.repository" type="text" placeholder="owner/repository" /></label><label><span>分支</span><input v-model.trim="source.branch" type="text" placeholder="main" /></label><label class="wide github-token-field"><span>访问令牌</span><div><input v-model="passwords[source.id]" type="password" autocomplete="current-password" :placeholder="savedCredentials[source.id] ? '已保存，留空保留' : '粘贴 GitHub 生成的访问令牌'" /><button type="button" @click="openGitHubPatPage"><ExternalLink :size="14" />在 GitHub 生成令牌</button></div><small>登录后直接生成带 repo 权限的令牌；GitHub 只显示一次，请复制后粘贴到这里。</small></label><label><span>新仓库名称</span><input v-model.trim="newRepositoryNames[source.id]" type="text" :placeholder="githubRepositoryName(source.id)" /></label><button class="create-repository-button" :disabled="Boolean(busy)" @click="createGitHubRepository(source)"><Plus :size="15" />创建私有仓库</button><label class="wide"><span>Chronicle 目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div>
+            <OpenDalSourceFields v-else-if="source.provider === 'opendal'" :source="source" :secrets="secrets[source.id] ?? (secrets[source.id] = {})" :credential-saved="savedCredentials[source.id]" :disabled="Boolean(busy)" /><div v-else class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>服务器地址</span><input v-model.trim="source.endpoint" type="url" placeholder="https://dav.example.com/remote.php/dav/files/user" /></label><label><span>用户名</span><input v-model.trim="source.username" type="text" autocomplete="username" /></label><label><span>密码</span><input v-model="passwords[source.id]" type="password" autocomplete="current-password" :placeholder="savedCredentials[source.id] ? '已保存，留空保留' : '请输入密码'" /></label><label class="wide"><span>远端目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div>
             <button class="test-button" :disabled="Boolean(busy) || (source.provider === 'legacy_github' ? !source.repository || !source.branch : source.provider === 'opendal' ? false : !source.endpoint || !source.username)" @click="testSource(source)">{{ busy === `test:${source.id}` ? '测试中…' : source.provider === 'legacy_github' ? '测试仓库访问' : source.provider === 'opendal' ? '测试读写、列举与清理' : '测试连接与读写' }}</button><small v-if="requiresTest(source)" class="source-test-hint">配置尚未测试或已更改，保存前请重新测试。</small>
           </article>
           <fieldset><legend>请求控制</legend><label><span>元数据并发</span><input v-model.number="draft.maxConcurrentMetadataReads" type="number" min="1" max="4" /></label><label><span>传输并发</span><input v-model.number="draft.maxConcurrentTransfers" type="number" min="1" max="4" /></label><label><span>请求间隔（毫秒）</span><input v-model.number="draft.requestDelayMs" type="number" min="0" max="5000" step="50" /></label><label><span>重试次数</span><input v-model.number="draft.retryLimit" type="number" min="1" max="10" /></label></fieldset>
@@ -292,6 +313,7 @@ onMounted(() => { closeButton.value?.focus(); if (activeSource.value) void loadP
       </main>
       <footer><button class="cancel" :disabled="Boolean(busy)" @click="emit('close')">取消</button><button class="save" :disabled="Boolean(busy)" @click="saveAndClose">{{ busy === 'save' ? '保存中…' : '保存云端设置' }}</button></footer>
     </section>
+    <div v-if="toast" class="cloud-toast" :class="toast.type" :role="toast.type === 'error' ? 'alert' : 'status'" aria-live="polite"><CheckCircle2 v-if="toast.type === 'success'" :size="16" /><CircleAlert v-else :size="16" /><span>{{ toast.message }}</span><button aria-label="关闭通知" title="关闭通知" @click="toast = undefined"><X :size="14" /></button></div>
     <ConfirmDialog v-if="confirmAction" :title="confirmAction.title" :message="confirmAction.message" confirm-label="确定" danger @cancel="confirmAction = undefined" @confirm="runConfirmed" />
   </div>
 </template>
@@ -306,6 +328,8 @@ onMounted(() => { closeButton.value?.focus(); if (activeSource.value) void loadP
 .remote-list article.protected, .repository-summary span, .remote-table tbody tr:hover, .archive-search, .remote-list select, .source-toolbar select, .fields input, fieldset input, .item-actions button, .remote-table .item-actions button { background: var(--subtle); }
 .remote-list select, .source-toolbar select, .fields input, fieldset input { color: var(--text); }
 .source-card.active { border-color: color-mix(in srgb, var(--primary) 45%, var(--border)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 12%, transparent); }
+.source-tested { width: 8px; height: 8px; border-radius: 50%; background: #22a55b; box-shadow: 0 0 0 2px color-mix(in srgb, #22a55b 18%, transparent); }
+.cloud-toast { position: fixed; z-index: 55; right: 28px; bottom: 28px; display: flex; align-items: flex-start; gap: 8px; max-width: min(390px, calc(100vw - 56px)); padding: 11px 12px; border: 1px solid var(--border-2); border-radius: 9px; background: var(--surface-raised); box-shadow: 0 12px 34px #0d242047; font-size: 11px; line-height: 1.45; }.cloud-toast span { flex: 1; }.cloud-toast button { display: grid; flex: 0 0 auto; place-items: center; width: 22px; height: 22px; margin: -3px -4px -3px 1px; color: inherit; background: transparent; border-radius: 5px; }.cloud-toast button:hover { background: var(--hover); }.cloud-toast.success { color: #17834a; border-color: color-mix(in srgb, #22a55b 34%, var(--border)); }.cloud-toast.error { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 34%, var(--border)); }
 .archive-search:focus-within { box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 18%, transparent); }
 .save { color: var(--on-primary); }
 </style>

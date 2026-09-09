@@ -7,7 +7,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$releaseVersion = "1.0.0"
+$releaseVersion = "1.1.0-beta"
 $portableName = "Chronicle-$releaseVersion-windows-x64-portable"
 
 if (-not (Test-Path -LiteralPath $ExecutablePath -PathType Leaf)) {

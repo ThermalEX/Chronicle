@@ -69,6 +69,7 @@ pub fn run() {
             cloud::save_cloud_credential,
             cloud::save_opendal_credential,
             cloud::create_github_repository,
+            cloud::cloud_source_statuses,
             cloud::test_cloud_source,
             cloud::cloud_preview,
             cloud::cloud_sync_entry,

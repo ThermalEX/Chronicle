@@ -13,6 +13,7 @@ export interface AppSettings {
   launchAtStartup: boolean;
   closeBehavior: CloseBehavior;
   checkForUpdates: boolean;
+  checkCloudOnLaunch: boolean;
   notifications: boolean;
   createInitialSnapshot: boolean;
   backupSchedule: BackupSchedule;
@@ -22,6 +23,14 @@ export interface AppSettings {
   searchShortcut: string;
   snapshotShortcut: string;
   settingsShortcut: string;
+}
+
+export type CloudHealthStatus = "unchecked" | "checking" | "available" | "unavailable";
+
+export interface CloudHealth {
+  status: CloudHealthStatus;
+  sourceName?: string;
+  reason?: string;
 }
 
 export interface CloudSource {
@@ -49,11 +58,15 @@ export interface CloudSettings {
   retryLimit: number;
 }
 
-export function cloudLibraryIndicator(settings: Pick<CloudSettings, "enabled" | "activeSourceId" | "sources">): { available: boolean; label: string } {
+export function cloudLibraryIndicator(
+  settings: Pick<CloudSettings, "enabled" | "activeSourceId" | "sources">,
+  health: CloudHealth = { status: "unchecked" },
+): { available: boolean; label: string } {
   if (!settings.enabled || !settings.sources.length) return { available: false, label: "云端资料库未启用" };
-  if (settings.sources.length > 1) return { available: true, label: `云端资料库：${settings.sources.length} 个同步源` };
-  const source = settings.sources.find((item) => item.id === settings.activeSourceId) ?? settings.sources[0];
-  return { available: true, label: `云端资料库：${source.name}` };
+  if (health.status === "checking") return { available: false, label: "云端资料库：检测中" };
+  if (health.status === "unavailable") return { available: false, label: `云端资料库：${health.sourceName ?? "同步源"} 无法使用` };
+  if (health.status === "available") return { available: true, label: `云端资料库：${settings.sources.length} 个同步源可用` };
+  return { available: false, label: "云端资料库：未检测" };
 }
 
 const APP_SETTINGS_KEY = "chronicle.app-settings.v2";
@@ -71,6 +84,7 @@ const defaultAppSettings: AppSettings = {
   launchAtStartup: false,
   closeBehavior: "ask",
   checkForUpdates: true,
+  checkCloudOnLaunch: false,
   notifications: true,
   createInitialSnapshot: true,
   backupSchedule: "off",

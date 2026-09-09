@@ -214,6 +214,7 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
               <label class="setting-row select-row"><span><b>显示模式</b><small>右上角太阳/月亮按钮可随时切换。</small></span><ThemedSelect :model-value="draft.colorMode" :options="colorModeOptions" label="显示模式" @update:model-value="updateColorMode" /></label>
               <label class="setting-row"><span><b>随系统启动</b><small>登录 Windows 后自动启动 Chronicle</small></span><input v-model="draft.launchAtStartup" type="checkbox" role="switch" /></label>
               <label class="setting-row"><span><b>自动检查更新</b><small>启动后检查稳定版本更新</small></span><input v-model="draft.checkForUpdates" type="checkbox" role="switch" /></label>
+              <label class="setting-row"><span><b>启动时检测云端</b><small>后台验证全部同步源的读写、列举与清理能力</small></span><input v-model="draft.checkCloudOnLaunch" type="checkbox" role="switch" /></label>
               <label class="setting-row"><span><b>桌面通知</b><small>备份、同步和恢复完成后显示通知</small></span><input v-model="draft.notifications" type="checkbox" role="switch" /></label>
               <label class="setting-row select-row"><span><b>关闭主窗口时</b><small>决定关闭按钮的默认行为</small></span><ThemedSelect :model-value="draft.closeBehavior" :options="closeBehaviorOptions" label="关闭主窗口时" @update:model-value="updateCloseBehavior" /></label>
             </div>
