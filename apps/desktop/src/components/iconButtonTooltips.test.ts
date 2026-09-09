@@ -5,7 +5,7 @@ const componentFiles = [
   "../App.vue",
   "ArchiveMetadata.vue",
   "CloudCenterDialog.vue",
-  "CloudSettingsDialog.vue",
+  "AppToast.vue",
   "ConfirmDialog.vue",
   "CreateArchiveDialog.vue",
   "CreateCategoryDialog.vue",

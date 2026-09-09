@@ -59,11 +59,7 @@ fn remote_error(error: opendal::Error) -> WebDavError {
 fn is_local_credential_key(key: &str) -> bool {
     matches!(
         key,
-        "root"
-            | "branch"
-            | "credential_path"
-            | "google_application_credentials"
-            | "aws_profile"
+        "root" | "branch" | "credential_path" | "google_application_credentials" | "aws_profile"
     ) || key.ends_with("_path")
         || key.ends_with("_file")
 }
@@ -346,12 +342,19 @@ mod tests {
 
     #[test]
     fn gcs_credentials_are_encoded_and_local_credential_aliases_are_rejected() {
-        let encoded = gcs_credential_as_base64(r#"{"client_email":"a@example.test","private_key":"key"}"#).unwrap();
+        let encoded =
+            gcs_credential_as_base64(r#"{"client_email":"a@example.test","private_key":"key"}"#)
+                .unwrap();
         let decoded = STANDARD.decode(encoded).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
         assert_eq!(value["client_email"], "a@example.test");
         assert!(gcs_credential_as_base64("not-json").is_err());
-        for key in ["credential_path", "google_application_credentials", "service_account_path", "aws_profile"] {
+        for key in [
+            "credential_path",
+            "google_application_credentials",
+            "service_account_path",
+            "aws_profile",
+        ] {
             assert!(is_local_credential_key(key), "{key}");
         }
     }
@@ -384,7 +387,7 @@ mod tests {
 
     #[tokio::test]
     async fn permanent_http_errors_are_not_retried_and_secrets_are_redacted() {
-        use std::io::{Read, Write};
+        use std::io::{BufRead, BufReader, Write};
         use std::sync::{
             Arc,
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -399,11 +402,15 @@ mod tests {
         let worker = std::thread::spawn(move || {
             while !worker_stop.load(Ordering::SeqCst) {
                 if let Ok((mut stream, _)) = listener.accept() {
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .unwrap();
-                    let mut bytes = [0; 8192];
-                    let _ = stream.read(&mut bytes);
+                    let mut reader = BufReader::new(&mut stream);
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).unwrap() > 0 && line != "\r\n" {
+                        line.clear();
+                    }
                     worker_requests.fetch_add(1, Ordering::SeqCst);
                     let body =
                         "<Error><Code>AccessDenied</Code><Message>secret-value</Message></Error>";
@@ -449,5 +456,4 @@ mod tests {
         assert!(!error.contains("test-id"));
         assert!(error.contains("PermissionDenied"));
     }
-
 }

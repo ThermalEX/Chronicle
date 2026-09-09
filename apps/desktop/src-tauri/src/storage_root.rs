@@ -1,6 +1,12 @@
-use std::{io, path::{Path, PathBuf}};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
-pub(crate) fn resolve_repository_root(executable: &Path, app_local_data: &Path) -> io::Result<PathBuf> {
+pub(crate) fn resolve_repository_root(
+    executable: &Path,
+    app_local_data: &Path,
+) -> io::Result<PathBuf> {
     let executable_directory = executable
         .parent()
         .ok_or_else(|| io::Error::other("executable has no parent directory"))?;

@@ -449,8 +449,6 @@ pub async fn save_cloud_credential(
     }
     let service = if provider == "legacy_github" {
         GITHUB_CREDENTIAL_SERVICE
-    } else if provider == "opendal" {
-        OPENDAL_CREDENTIAL_SERVICE
     } else {
         CREDENTIAL_SERVICE
     };
@@ -546,7 +544,9 @@ fn fingerprint_source(
 ) -> Result<String, String> {
     let mut canonical = serde_json::to_value(source).map_err(|_| "配置无效".to_owned())?;
     // Synchronization state and map order are presentation only; values and target remain bound.
-    let object = canonical.as_object_mut().expect("cloud source serializes to an object");
+    let object = canonical
+        .as_object_mut()
+        .expect("cloud source serializes to an object");
     if !include_sync_state {
         object.remove("syncEnabled");
     }
@@ -733,6 +733,14 @@ pub async fn cloud_preview(
         Err(WebDavError::NotFound(_)) => None,
         Err(error) => return Err(error.to_string()),
     };
+    Ok(preview_from_catalog(source.name, &library, catalog))
+}
+
+fn preview_from_catalog(
+    source_name: String,
+    library: &Value,
+    catalog: Option<Catalog>,
+) -> CloudPreviewDto {
     let mut items = vec![
         RemoteItemDto {
             id: "config:library".into(),
@@ -767,14 +775,14 @@ pub async fn cloud_preview(
             sync_mode: entry.sync_mode.as_str().unwrap_or("manual").to_owned(),
         }));
     }
-    Ok(CloudPreviewDto {
-        source_name: source.name,
+    CloudPreviewDto {
+        source_name,
         library_id: library
             .get("libraryId")
             .and_then(Value::as_str)
             .map(str::to_owned),
         items,
-    })
+    }
 }
 
 async fn ensure_remote_layout(client: &RemoteStore) -> Result<(), String> {
@@ -804,14 +812,7 @@ async fn ensure_remote_library(client: &RemoteStore, root: &Path) -> Result<Valu
         Ok(value) => Ok(value),
         Err(WebDavError::NotFound(_)) => {
             ensure_remote_layout(client).await?;
-            let library_path = root.join("library.json");
-            let mut library = if library_path.is_file() {
-                read_json::<Value>(&library_path)?
-            } else {
-                serde_json::json!({ "formatVersion": 2, "libraryId": Uuid::new_v4().to_string() })
-            };
-            library["updatedAtMs"] = Value::from(unix_millis());
-            write_json_atomic(&library_path, &library)?;
+            let library = updated_library(root)?;
             client
                 .put_json("library.json", &library)
                 .await
@@ -845,14 +846,7 @@ async fn ensure_github_library(client: &GitHubClient, root: &Path) -> Result<Val
     match client.get_json("library.json").await {
         Ok(value) => Ok(value),
         Err(GitHubError::NotFound(_)) => {
-            let library_path = root.join("library.json");
-            let mut library = if library_path.is_file() {
-                read_json::<Value>(&library_path)?
-            } else {
-                serde_json::json!({ "formatVersion": 2, "libraryId": Uuid::new_v4().to_string() })
-            };
-            library["updatedAtMs"] = Value::from(unix_millis());
-            write_json_atomic(&library_path, &library)?;
+            let library = updated_library(root)?;
             client
                 .commit_changes(
                     "Initialize Chronicle repository",
@@ -880,48 +874,7 @@ async fn github_preview(
         Err(GitHubError::NotFound(_)) => None,
         Err(error) => return Err(error.to_string()),
     };
-    let mut items = vec![
-        RemoteItemDto {
-            id: "config:library".into(),
-            name: "library.json".into(),
-            kind: "config".into(),
-            protected: true,
-            snapshot_count: 0,
-            size_bytes: 0,
-            updated_at: library.get("updatedAtMs").and_then(Value::as_u64),
-            sync_mode: "manual".into(),
-        },
-        RemoteItemDto {
-            id: "config:catalog".into(),
-            name: "catalog.json".into(),
-            kind: "config".into(),
-            protected: true,
-            snapshot_count: 0,
-            size_bytes: 0,
-            updated_at: None,
-            sync_mode: "manual".into(),
-        },
-    ];
-    if let Some(catalog) = catalog {
-        items.extend(catalog.entries.into_iter().map(|entry| RemoteItemDto {
-            id: entry.id,
-            name: entry.name,
-            kind: "archive".into(),
-            protected: false,
-            snapshot_count: entry.snapshot_count,
-            size_bytes: entry.stored_bytes,
-            updated_at: entry.last_snapshot_at_ms,
-            sync_mode: entry.sync_mode.as_str().unwrap_or("manual").to_owned(),
-        }));
-    }
-    Ok(CloudPreviewDto {
-        source_name: source.name,
-        library_id: library
-            .get("libraryId")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        items,
-    })
+    Ok(preview_from_catalog(source.name, &library, catalog))
 }
 
 async fn github_overwrite_upload(
@@ -2240,7 +2193,14 @@ mod tests {
         source.sync_enabled = true;
         assert!(super::verify_bundle(&source, &bundle).is_ok());
         let legacy_bundle = super::TestedCredential {
-            fingerprint: super::legacy_source_fingerprint(&super::CloudSourceInput { sync_enabled: false, ..source.clone() }, &bundle.secrets).unwrap(),
+            fingerprint: super::legacy_source_fingerprint(
+                &super::CloudSourceInput {
+                    sync_enabled: false,
+                    ..source.clone()
+                },
+                &bundle.secrets,
+            )
+            .unwrap(),
             secrets: bundle.secrets.clone(),
         };
         assert!(super::verify_bundle(&source, &legacy_bundle).is_ok());

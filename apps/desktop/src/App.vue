@@ -6,7 +6,8 @@ import {
   Sun, Trash2,
 } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import CloudSettingsDialog from "./components/CloudCenterDialog.vue";
+import CloudCenterDialog from "./components/CloudCenterDialog.vue";
+import AppToast from "./components/AppToast.vue";
 import CloudHealthDialog from "./components/CloudHealthDialog.vue";
 import ArchiveMetadata from "./components/ArchiveMetadata.vue";
 import ConfirmDialog from "./components/ConfirmDialog.vue";
@@ -30,7 +31,6 @@ import { runAcrossEnabledSources, type SourceSyncOutcome } from "./services/mult
 import { categoryBreadcrumb } from "./services/categoryBreadcrumb";
 import { formatCurrentTime, millisecondsUntilNextMinute } from "./services/currentTime";
 import { snapshotButtonProgress } from "./services/snapshotButtonProgress";
-import { recordCloudSourceTest } from "./services/cloudTestState";
 
 type CategoryTreeNode = CategoryRecord & {
   nodeType: "category";
@@ -131,10 +131,7 @@ async function checkCloudSources(showDialog = false): Promise<void> {
   if (showDialog) cloudHealthDialogOpen.value = true;
   cloudHealth.value = { status: "checking" };
   cloudHealthCheckRunning.value = true;
-  const items = await runCloudHealthCheck(cloudSettings.sources, async (source) => {
-    await cloudRepository.test(source, "");
-    recordCloudSourceTest(source);
-  }, (next) => { cloudHealthCheckItems.value = next; });
+  const items = await runCloudHealthCheck(cloudSettings.sources, (source) => cloudRepository.test(source, ""), (next) => { cloudHealthCheckItems.value = next; });
   cloudHealthCheckRunning.value = false;
   const failed = items.find((item) => item.status === "failed");
   cloudHealth.value = failed ? { status: "unavailable", sourceName: failed.name, reason: failed.reason } : { status: "available" };
@@ -969,9 +966,9 @@ onBeforeUnmount(() => {
       <section v-else class="detail-panel detail-placeholder"><span><FolderArchive :size="31" /></span><h2>本地优先的时间节点管理</h2><p>从左侧添加文件或文件夹，开始保存和恢复历史状态。</p></section>
     </main>
 
-    <div v-if="notice" class="toast" :class="notice.type" role="status"><span>{{ notice.message }}</span><button aria-label="关闭通知" title="关闭通知" @click="notice = undefined"><X :size="15" /></button></div>
+    <AppToast v-if="notice" :message="notice.message" :type="notice.type" @close="notice = undefined" />
     <SettingsDialog v-if="settingsOpen" @close="settingsOpen = false" @saved="handleSettingsChanged" />
-    <CloudSettingsDialog v-if="cloudSettingsOpen" @close="cloudSettingsOpen = false" @saved="handleCloudSettingsChanged" />
+    <CloudCenterDialog v-if="cloudSettingsOpen" @close="cloudSettingsOpen = false" @saved="handleCloudSettingsChanged" />
     <CloudHealthDialog v-if="cloudHealthDialogOpen" :items="cloudHealthCheckItems" :running="cloudHealthCheckRunning" @close="cloudHealthDialogOpen = false" />
     <CreateCategoryDialog
       v-if="categoryDialogOpen"

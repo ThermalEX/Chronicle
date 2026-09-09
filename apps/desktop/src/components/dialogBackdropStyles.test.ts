@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 
 const dialogFiles = [
   "CloudCenterDialog.vue",
-  "CloudSettingsDialog.vue",
   "ConfirmDialog.vue",
   "CreateArchiveDialog.vue",
   "CreateCategoryDialog.vue",

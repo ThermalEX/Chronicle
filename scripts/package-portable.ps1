@@ -7,7 +7,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$releaseVersion = "1.1.0-beta"
+$releaseVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot "../apps/desktop/package.json") -Raw | ConvertFrom-Json).version
 $portableName = "Chronicle-$releaseVersion-windows-x64-portable"
 
 if (-not (Test-Path -LiteralPath $ExecutablePath -PathType Leaf)) {
