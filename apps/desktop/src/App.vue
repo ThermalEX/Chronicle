@@ -16,7 +16,7 @@ import SettingsDialog from "./components/SettingsDialog.vue";
 import ThemedSelect, { type ThemedSelectOption } from "./components/ThemedSelect.vue";
 import type { ArchiveRecord, ArchiveSource, CategoryRecord, CreateArchiveInput, RepositoryInfo, SnapshotProgress, SnapshotRecord, SourceKind } from "./domain";
 import { archiveRepository, isTauriRuntime } from "./services/repository";
-import { cloudRepository } from "./services/cloud";
+import { cloudRepository, type CloudSyncResult } from "./services/cloud";
 import { runCloudHealthCheck, type CloudHealthCheckItem } from "./services/cloudHealthCheck";
 import { diagnosticsRepository } from "./services/diagnostics";
 import { diagnosticFromError, type DiagnosticContext } from "./services/diagnosticsCore";
@@ -25,7 +25,8 @@ import { selectArchivePanelCategory, selectCategoryPanel } from "./services/arch
 import { applyAppearance, normalizeAppearance } from "./services/appearance";
 import { floatingMenuStyle, positionFloatingMenu } from "./services/floatingMenu";
 import { filterTimeline, type TimelineSort } from "./services/snapshotTimeline";
-import { appSettings, cloudLibraryIndicator, cloudSettings, initializeSettings, saveAppSettings, shortcutMatches, type CloudHealth } from "./services/settings";
+import { appSettings, cloudLibraryIndicator, cloudSettings, enabledCloudSources, initializeSettings, saveAppSettings, shortcutMatches, type CloudHealth } from "./services/settings";
+import { runAcrossEnabledSources, type SourceSyncOutcome } from "./services/multiSourceSync";
 import { categoryBreadcrumb } from "./services/categoryBreadcrumb";
 import { formatCurrentTime, millisecondsUntilNextMinute } from "./services/currentTime";
 
@@ -139,12 +140,15 @@ function openCloudHealthDialog(): void {
 }
 
 function queueAutomaticUpload(archive?: ArchiveRecord): void {
-  if (!archive || !isTauriRuntime || archive.storagePolicy !== "local_and_remote" || archive.syncMode !== "automatic" || !cloudSettings.activeSourceId) return;
+  const sources = enabledCloudSources(cloudSettings);
+  if (!archive || !isTauriRuntime || archive.storagePolicy !== "local_and_remote" || archive.syncMode !== "automatic" || !sources.length) return;
   window.clearTimeout(automaticSyncTimers.get(archive.id));
   automaticSyncTimers.set(archive.id, window.setTimeout(async () => {
     automaticSyncTimers.delete(archive.id);
-    try { await cloudRepository.upload(cloudSettings.activeSourceId!, archive.id); showNotice(`“${archive.name}”已自动上传`); }
-    catch (error) { reportError(error, { operation: "自动上传", archiveId: archive.id, sourceId: cloudSettings.activeSourceId ?? undefined }); }
+    const outcomes = await runAcrossEnabledSources(sources, (source) => cloudRepository.upload(source.id, archive.id));
+    reportSourceFailures(outcomes, archive, "自动上传");
+    const completed = outcomes.filter((outcome) => outcome.status === "fulfilled").length;
+    if (completed) showNotice(`“${archive.name}”已自动上传到 ${completed} 个同步源`);
   }, 1200));
 }
 
@@ -220,6 +224,12 @@ function reportError(error: unknown, context: DiagnosticContext): void {
   const entry = diagnosticFromError(error, context);
   showNotice(entry.message, "error");
   void diagnosticsRepository.record(error, context).catch(() => undefined);
+}
+
+function reportSourceFailures(outcomes: SourceSyncOutcome<unknown>[], archive: ArchiveRecord, operation: string): void {
+  for (const outcome of outcomes) {
+    if (outcome.status === "rejected") reportError(outcome.reason, { operation, archiveId: archive.id, sourceId: outcome.source.id });
+  }
 }
 
 function formatBytes(bytes: number): string {
@@ -530,19 +540,25 @@ async function syncSelectedArchive() {
     showNotice("当前存档仅使用本地存储，请先在编辑存档中启用云端保存", "info");
     return;
   }
-  if (!cloudSettings.enabled || !cloudSettings.activeSourceId) {
+  const sources = enabledCloudSources(cloudSettings);
+  if (!sources.length) {
     cloudSettingsOpen.value = true;
-    showNotice("请先添加并启用一个云同步源", "info");
+    showNotice("请先添加同步源，并点击开始同步", "info");
     return;
   }
   syncingArchive.value = true;
   try {
-    const result = await cloudRepository.sync(cloudSettings.activeSourceId, archive.id);
+    const outcomes = await runAcrossEnabledSources(sources, (source) => cloudRepository.sync(source.id, archive.id));
+    reportSourceFailures(outcomes, archive, "同步存档");
     await refreshArchives(archive.id);
     await refreshSnapshots(archive.id);
-    showNotice(result.message, result.status === "conflict" ? "info" : "success");
+    const completed = outcomes.filter((outcome): outcome is Extract<SourceSyncOutcome<CloudSyncResult>, { status: "fulfilled" }> => outcome.status === "fulfilled");
+    if (completed.length) {
+      const hasConflict = completed.some((outcome) => outcome.value.status === "conflict");
+      showNotice(`已完成 ${completed.length} / ${outcomes.length} 个同步源`, hasConflict ? "info" : "success");
+    }
   } catch (error) {
-    reportError(error, { operation: "同步存档", archiveId: archive.id, sourceId: cloudSettings.activeSourceId });
+    reportError(error, { operation: "同步存档", archiveId: archive.id });
   } finally {
     syncingArchive.value = false;
   }
