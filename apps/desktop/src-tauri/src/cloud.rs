@@ -530,7 +530,8 @@ fn source_fingerprint(
     secrets: &std::collections::HashMap<String, String>,
 ) -> Result<String, String> {
     let mut canonical = serde_json::to_value(source).map_err(|_| "配置无效".to_owned())?;
-    // Order of advanced fields is presentation only; values and target remain bound.
+    // Synchronization state and advanced-field order are presentation only; values and target remain bound.
+    canonical.as_object_mut().expect("cloud source serializes to an object").remove("syncEnabled");
     let mut keys = source.secret_keys.clone();
     keys.sort();
     canonical["secretKeys"] = serde_json::json!(keys);
@@ -2198,6 +2199,8 @@ mod tests {
             secrets,
         };
         source.secret_keys.reverse();
+        assert!(super::verify_bundle(&source, &bundle).is_ok());
+        source.sync_enabled = true;
         assert!(super::verify_bundle(&source, &bundle).is_ok());
         source.remote_path = "/other".into();
         assert!(super::verify_bundle(&source, &bundle).is_err());

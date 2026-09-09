@@ -341,6 +341,7 @@ kbd { padding: 2px 5px; color: var(--text-3); background: var(--hover); border: 
 .timeline-actions { display: flex; align-items: center; justify-content: center; gap: 5px; }
 .timeline-actions button { display: grid; place-items: center; width: 34px; height: 34px; min-width: 34px; min-height: 34px; padding: 0; color: var(--text-2); background: var(--subtle); border-radius: 7px; }
 .timeline-actions button:hover:not(:disabled) { color: var(--primary-dark); background: var(--primary-soft); }
+.timeline-actions button.info.active { color: var(--primary-dark); background: var(--primary-soft); border-color: color-mix(in srgb, var(--primary) 35%, var(--border)); }
 .timeline-actions button.danger { color: var(--danger); background: var(--danger-soft); }
 .timeline-actions button span { display: none; }
 .snapshot.selected { background: var(--primary-soft); border-color: color-mix(in srgb, var(--primary) 25%, var(--border)); }

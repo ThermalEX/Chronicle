@@ -12,6 +12,7 @@ import OpenDalSourceFields from "./OpenDalSourceFields.vue";
 import { configureOpenDal, secretPatch, sourceTestKey, validateOpenDal } from "../services/opendal";
 import { initialExpandedSourceIds, toggleExpandedSource } from "../services/sourceCardState";
 import { newCloudSource, toggleSourceSync } from "../services/cloudSourceControls";
+import { hasCloudSourceTestPassed, recordCloudSourceTest } from "../services/cloudTestState";
 
 const emit = defineEmits<{ close: []; saved: [] }>();
 const tab = ref<"repository" | "sources">("repository");
@@ -24,20 +25,26 @@ const savedCredentials = reactive<Record<string, boolean>>({});
 const original = new Map(draft.sources.map((source) => [source.id, sourceTestKey(source, {})]));
 function currentTestKey(source: CloudSource): string { return sourceTestKey(source, secretPatch(secrets[source.id] ?? {})); }
 function requiresTest(source: CloudSource): boolean {
-  return source.provider === "opendal" && (failedTests.has(source.id) || (currentTestKey(source) !== original.get(source.id) && tested[source.id] !== currentTestKey(source)));
+  const secretsForTest = secretPatch(secrets[source.id] ?? {});
+  return source.provider === "opendal" && (failedTests.has(source.id) || (
+    currentTestKey(source) !== original.get(source.id)
+    && tested[source.id] !== currentTestKey(source)
+    && !hasCloudSourceTestPassed(source, secretsForTest)
+  ));
 }
 const newRepositoryNames = reactive<Record<string, string>>({});
 const closeButton = ref<HTMLButtonElement>();
 const preview = ref<CloudPreview>();
 const selected = ref<string[]>([]);
 const busy = ref("");
-const backdrop = createBackdropDismissal(() => emit("close"), () => !busy.value);
+const backdrop = createBackdropDismissal(() => requestClose(), () => !busy.value);
 const feedback = ref("");
 const error = ref("");
 const toast = ref<{ type: "success" | "error"; message: string }>();
 const expandedSourceIds = ref(initialExpandedSourceIds());
 let toastTimer: number | undefined;
 const confirmAction = ref<{ title: string; message: string; run: () => Promise<void> }>();
+const closeConfirmationOpen = ref(false);
 const repositorySourceId = ref<string | null>(draft.sources[0]?.id ?? null);
 const repositorySource = computed(() => draft.sources.find((source) => source.id === repositorySourceId.value));
 const cloudSearch = ref("");
@@ -48,6 +55,22 @@ const visibleRemoteArchives = computed(() => {
   return remoteArchives.value.filter((item) => item.name.toLocaleLowerCase().includes(query));
 });
 const remoteSnapshotTotal = computed(() => remoteArchives.value.reduce((total, item) => total + item.snapshotCount, 0));
+function settingsFingerprint(settings: CloudSettings): string {
+  return JSON.stringify({
+    enabled: settings.enabled,
+    sources: settings.sources,
+    maxConcurrentMetadataReads: settings.maxConcurrentMetadataReads,
+    maxConcurrentTransfers: settings.maxConcurrentTransfers,
+    requestDelayMs: settings.requestDelayMs,
+    retryLimit: settings.retryLimit,
+  });
+}
+let savedFingerprint = settingsFingerprint(draft);
+function hasUnsavedConfiguration(): boolean {
+  return savedFingerprint !== settingsFingerprint(draft)
+    || Object.values(passwords).some(Boolean)
+    || Object.values(secrets).some((values) => Object.values(values).some(Boolean));
+}
 function showToast(type: "success" | "error", message: string): void {
   toast.value = { type, message };
   window.clearTimeout(toastTimer);
@@ -120,6 +143,7 @@ async function persist(): Promise<void> {
     original.set(source.id, sourceTestKey(source, {}));
   }
   await loadSourceStatuses();
+  savedFingerprint = settingsFingerprint(draft);
   emit("saved");
 }
 
@@ -152,6 +176,7 @@ async function testSource(source: CloudSource): Promise<void> {
     const key = currentTestKey(source);
     await cloudRepository.test(source, source.provider === "opendal" ? JSON.stringify(secretPatch(secrets[source.id] ?? {})) : passwords[source.id] ?? "");
     tested[source.id] = key;
+    recordCloudSourceTest(source, secretPatch(secrets[source.id] ?? {}));
     failedTests.delete(source.id);
     feedback.value = source.provider === "opendal" ? `“${source.name}”读写、列举和临时清理测试通过` : `“${source.name}”连接与读写测试通过`;
   }
@@ -185,7 +210,7 @@ function removeSource(source: CloudSource): void {
   confirmAction.value = { title: "删除同步源", message: `删除“${source.name}”的本机配置，远端文件不会被删除。`, run: async () => {
     draft.sources = draft.sources.filter((item) => item.id !== source.id);
     if (repositorySourceId.value === source.id) repositorySourceId.value = draft.sources[0]?.id ?? null;
-    await persist(); preview.value = undefined;
+    preview.value = undefined;
   } };
 }
 
@@ -229,6 +254,7 @@ function selectRepositorySource(sourceId: string | null): void {
   repositorySourceId.value = sourceId;
   expandedSourceIds.value = initialExpandedSourceIds();
   preview.value = undefined;
+  if (repositorySource.value) void loadPreview();
 }
 
 function toggleSource(source: CloudSource): void {
@@ -259,6 +285,20 @@ async function saveAndClose(): Promise<void> {
   finally { busy.value = ""; }
 }
 
+function requestClose(): void {
+  if (busy.value) return;
+  if (hasUnsavedConfiguration()) {
+    closeConfirmationOpen.value = true;
+    return;
+  }
+  emit("close");
+}
+
+function discardAndClose(): void {
+  closeConfirmationOpen.value = false;
+  emit("close");
+}
+
 onMounted(() => { closeButton.value?.focus(); void loadSourceStatuses(); if (repositorySource.value) void loadPreview(); });
 onBeforeUnmount(() => window.clearTimeout(toastTimer));
 </script>
@@ -266,14 +306,14 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer));
 <template>
   <div class="dialog-backdrop" @pointerdown="backdrop.pointerDown" @pointerup="backdrop.pointerUp" @pointercancel="backdrop.pointerCancel">
     <section class="cloud-center" role="dialog" aria-modal="true" aria-labelledby="cloud-title">
-      <header><div class="heading-icon"><CloudCog :size="21" /></div><div><p>同步服务</p><h2 id="cloud-title">云端设置</h2></div><button ref="closeButton" aria-label="关闭云端设置" title="关闭云端设置" @click="emit('close')"><X :size="18" /></button></header>
+      <header><div class="heading-icon"><CloudCog :size="21" /></div><div><p>同步服务</p><h2 id="cloud-title">云端设置</h2></div><button ref="closeButton" aria-label="关闭云端设置" title="关闭云端设置" @click="requestClose"><X :size="18" /></button></header>
       <nav aria-label="云端设置页面"><button :class="{ active: tab === 'repository' }" @click="tab = 'repository'; repositorySource && loadPreview()">云端仓库</button><button :class="{ active: tab === 'sources' }" @click="tab = 'sources'">同步源</button></nav>
       <main>
         <section v-if="tab === 'repository'" class="repository-page">
           <div v-if="!repositorySource" class="empty"><CloudCog :size="30" /><h3>尚未配置云同步源</h3><p>添加 WebDAV 后即可查看和管理远端 Chronicle 仓库。</p><button @click="tab = 'sources'; addSource()"><Plus :size="16" />添加同步源</button></div>
           <template v-else>
             <div class="repository-heading">
-              <div><p class="repository-eyebrow">共享快照历史</p><ThemedSelect :model-value="repositorySourceId" :options="sourceOptions" label="查看云端仓库来源" @update:model-value="selectRepositorySource" /><p class="repository-description">按存档标题汇总远端时间节点；仓库配置由 Chronicle 自动维护。</p></div>
+              <div><p class="repository-eyebrow">云端预览</p><ThemedSelect class="repository-source-select" :model-value="repositorySourceId" :options="sourceOptions" label="查看云端仓库来源" @update:model-value="selectRepositorySource" /><p class="repository-description">按存档标题汇总远端时间节点；仓库配置由 Chronicle 自动维护。</p></div>
               <button :disabled="Boolean(busy)" @click="loadPreview"><RefreshCw :size="15" />刷新</button>
             </div>
             <div class="repository-summary" aria-live="polite"><span>远端 {{ remoteArchives.length }} 个存档</span><span>共 {{ remoteSnapshotTotal }} 个时间节点</span><span>{{ preview?.libraryId ? '仓库已初始化' : '等待首次上传' }}</span></div>
@@ -323,10 +363,16 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer));
           <fieldset><legend>请求控制</legend><label><span>元数据并发</span><input v-model.number="draft.maxConcurrentMetadataReads" type="number" min="1" max="4" /></label><label><span>传输并发</span><input v-model.number="draft.maxConcurrentTransfers" type="number" min="1" max="4" /></label><label><span>请求间隔（毫秒）</span><input v-model.number="draft.requestDelayMs" type="number" min="0" max="5000" step="50" /></label><label><span>重试次数</span><input v-model.number="draft.retryLimit" type="number" min="1" max="10" /></label></fieldset>
         </section>
       </main>
-      <footer><button class="cancel" :disabled="Boolean(busy)" @click="emit('close')">取消</button><button class="save" :disabled="Boolean(busy)" @click="saveAndClose">{{ busy === 'save' ? '保存中…' : '保存云端设置' }}</button></footer>
+      <footer><button class="cancel" :disabled="Boolean(busy)" @click="requestClose">取消</button><button class="save" :disabled="Boolean(busy)" @click="saveAndClose">{{ busy === 'save' ? '保存中…' : '保存云端设置' }}</button></footer>
     </section>
     <div v-if="toast" class="cloud-toast" :class="toast.type" :role="toast.type === 'error' ? 'alert' : 'status'" aria-live="polite"><CheckCircle2 v-if="toast.type === 'success'" :size="16" /><CircleAlert v-else :size="16" /><span>{{ toast.message }}</span><button aria-label="关闭通知" title="关闭通知" @click="toast = undefined"><X :size="14" /></button></div>
     <ConfirmDialog v-if="confirmAction" :title="confirmAction.title" :message="confirmAction.message" confirm-label="确定" danger @cancel="confirmAction = undefined" @confirm="runConfirmed" />
+    <div v-if="closeConfirmationOpen" class="close-confirm-backdrop">
+      <section class="close-confirm" role="alertdialog" aria-modal="true" aria-labelledby="close-confirm-title">
+        <h3 id="close-confirm-title">保存云端配置？</h3><p>云端配置或同步开关已更改。保存后才会生效。</p>
+        <footer><button class="cancel" @click="closeConfirmationOpen = false">取消</button><button class="discard" @click="discardAndClose">不保存</button><button class="save" @click="saveAndClose">保存</button></footer>
+      </section>
+    </div>
   </div>
 </template>
 
@@ -334,7 +380,7 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer));
 .source-toolbar { flex-wrap: wrap; }
 .source-test-hint { display: block; margin-top: 8px; color: var(--text-3); font-size: 11px; }
 .dialog-backdrop{position:fixed;z-index:45;inset:0;display:grid;place-items:center;padding:28px;background:#18181b99;backdrop-filter:blur(3px)}.cloud-center{display:grid;grid-template-rows:72px 44px minmax(0,1fr) 64px;width:min(940px,calc(100vw - 56px));height:min(720px,calc(100vh - 56px));overflow:hidden;background:var(--surface);border:1px solid var(--border-2);border-radius:13px;box-shadow:0 24px 80px #0d24205c}.cloud-center>header{display:grid;grid-template-columns:42px 1fr 38px;align-items:center;gap:11px;padding:0 22px;border-bottom:1px solid var(--border)}.heading-icon{display:grid;place-items:center;width:38px;height:38px;color:var(--primary);background:var(--primary-soft);border-radius:9px}header p,header h2{margin:0}header p{color:var(--text-3);font-size:9px;font-weight:700;letter-spacing:.08em}header h2{margin-top:3px;font-size:18px}header button{display:grid;place-items:center;width:38px;height:38px;background:transparent;border-radius:7px}header button:hover{background:var(--hover)}nav{display:flex;gap:4px;padding:5px 22px 0;border-bottom:1px solid var(--border)}nav button{padding:0 14px;color:var(--text-3);background:transparent;border-bottom:2px solid transparent;font-size:11px;font-weight:650}nav button.active{color:var(--primary-dark);border-color:var(--primary)}main{overflow-y:auto;padding:20px 24px 28px}.message{display:flex;align-items:center;gap:7px;margin:0 0 12px;padding:9px 11px;border-radius:7px;font-size:10px}.message.error{color:#a52e28;background:#fff0ef}.message.success{color:var(--primary-dark);background:var(--primary-soft)}.empty{display:grid;place-items:center;min-height:390px;color:var(--text-3);text-align:center}.empty.compact{min-height:190px}.empty h3{margin:12px 0 0;color:var(--text);font-size:15px}.empty p{margin:7px 0 16px;font-size:10px}.empty button,.source-toolbar>button,.repository-toolbar button,.test-button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:34px;padding:0 10px;color:var(--primary-dark);background:var(--primary-soft);border-radius:7px;font-size:10px;font-weight:650}.repository-toolbar{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:12px}.repository-toolbar>span{display:flex;flex-direction:column;gap:3px}.repository-toolbar b{font-size:13px}.repository-toolbar small{color:var(--text-3);font-size:9px}.repository-toolbar>div{display:flex;gap:7px}.repository-toolbar button.danger{color:#a52e28;background:#fff0ef}.remote-list{overflow:hidden;border:1px solid var(--border);border-radius:9px}.remote-list article{display:grid;grid-template-columns:28px minmax(150px,1fr) 118px auto;align-items:center;gap:10px;min-height:66px;padding:8px 11px}.remote-list article+article{border-top:1px solid var(--border)}.remote-list article.protected{background:#f7f9f8}.config-mark{display:grid;place-items:center;color:var(--text-3)}.remote-copy{display:flex;min-width:0;flex-direction:column;gap:4px}.remote-copy b{overflow:hidden;font-size:11px;text-overflow:ellipsis;white-space:nowrap}.remote-copy small{color:var(--text-3);font-size:9px}.remote-list select,.source-toolbar select,.fields input,fieldset input{height:34px;padding:0 9px;color:#263431;background:#f8faf9;border:1px solid var(--border-2);border-radius:6px;font-size:10px}.item-actions{display:flex;gap:5px}.item-actions button{display:inline-flex;align-items:center;gap:4px;min-height:31px;padding:0 7px;color:var(--text-2);background:#f2f6f4;border-radius:6px;font-size:9px}.item-actions span{color:var(--text-3);font-size:9px}.list-empty,.loading{display:grid;place-items:center;min-height:150px;color:var(--text-3);font-size:10px}.source-toolbar{display:flex;align-items:end;gap:8px;margin-bottom:14px}.source-toolbar label{display:flex;min-width:240px;flex-direction:column;gap:5px}.source-toolbar label span,.fields label span,fieldset label span{color:var(--text-2);font-size:9px;font-weight:650}.source-toolbar button:disabled{color:var(--text-3);background:#f1f3f2;cursor:default}.source-card{margin-bottom:12px;padding:14px;border:1px solid var(--border);border-radius:9px}.source-card.active{border-color:#9fcfc5;box-shadow:0 0 0 2px #0d8b7d14}.source-title{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}.source-title>span{display:flex;align-items:center;gap:7px}.source-title b{font-size:11px}.source-title small{padding:3px 6px;color:var(--primary-dark);background:var(--primary-soft);border-radius:10px;font-size:8px}.icon-danger{display:grid;place-items:center;width:32px;height:32px;color:#a52e28;background:transparent;border-radius:6px}.icon-danger:hover{background:#fff0ef}.fields{display:grid;grid-template-columns:1fr 1.5fr 1fr 1fr;gap:10px}.fields label{display:flex;flex-direction:column;gap:5px}.fields label.wide{grid-column:1/-1}.test-button{margin-top:12px}.sources-page fieldset{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:16px;padding:14px;border:1px solid var(--border);border-radius:9px}.sources-page legend{padding:0 6px;color:var(--text-2);font-size:10px;font-weight:700}.sources-page fieldset label{display:flex;flex-direction:column;gap:5px}.cloud-center>footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:0 22px;border-top:1px solid var(--border)}footer button{min-height:36px;padding:0 13px;border-radius:7px;font-size:10px;font-weight:650}.cancel{background:transparent}.cancel:hover{background:var(--hover)}.save{color:#fff;background:var(--primary)}button:disabled{cursor:default;opacity:.55}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--primary);outline-offset:2px}@media(max-width:900px){.fields{grid-template-columns:1fr 1fr}.sources-page fieldset{grid-template-columns:1fr 1fr}.remote-list article{grid-template-columns:28px minmax(120px,1fr) 110px}.item-actions{grid-column:2/-1}.cloud-center{width:calc(100vw - 28px);height:calc(100vh - 28px)}.dialog-backdrop{padding:14px}}
-.repository-toolbar,.repository-toolbar + .loading,.remote-list{display:none}.repository-page{min-width:0}.repository-heading{display:flex;align-items:start;justify-content:space-between;gap:20px}.repository-eyebrow{margin:0;color:var(--text-3);font-size:10px;font-weight:700;letter-spacing:.07em}.repository-heading h3{margin:5px 0 0;color:var(--text);font-size:18px;line-height:1.2}.repository-description{margin:7px 0 0;color:var(--text-3);font-size:10px}.repository-heading>button{display:inline-flex;flex:0 0 auto;align-items:center;justify-content:center;gap:6px;min-height:34px;padding:0 10px;color:var(--primary-dark);background:var(--primary-soft);border-radius:7px;font-size:10px;font-weight:650}.repository-summary{display:flex;flex-wrap:wrap;gap:7px;margin:15px 0 12px}.repository-summary span{padding:4px 7px;color:var(--text-2);background:#f2f6f4;border-radius:12px;font-size:9px;font-variant-numeric:tabular-nums}.repository-summary span:last-child{color:var(--primary-dark);background:var(--primary-soft)}.repository-controls{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.archive-search{display:flex;align-items:center;gap:8px;min-width:0;width:min(360px,100%);height:36px;padding:0 10px;color:var(--text-3);background:#f8faf9;border:1px solid var(--border-2);border-radius:7px}.archive-search:focus-within{border-color:var(--primary);box-shadow:0 0 0 2px #0d8b7d18}.archive-search input{min-width:0;flex:1;height:100%;color:var(--text);background:transparent;border:0;font-size:10px}.archive-search input:focus{outline:0}.repository-controls .danger{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:34px;padding:0 10px;color:#a52e28;background:#fff0ef;border-radius:7px;font-size:10px;font-weight:650}.remote-table-wrap{position:relative;overflow:visible;border:1px solid var(--border);border-radius:9px}.remote-table{width:100%;min-width:0;border-collapse:collapse;table-layout:fixed}.remote-table tbody tr:focus-within{position:relative;z-index:1}.remote-table th{height:34px;padding:0 9px;color:var(--text-3);border-bottom:1px solid var(--border);font-size:9px;font-weight:700;text-align:left}.remote-table td{height:58px;padding:7px 9px;border-bottom:1px solid var(--border);color:var(--text-2);font-size:10px;vertical-align:middle}.remote-table tbody tr:last-child td{border-bottom:0}.remote-table tbody tr:hover{background:#f8fbfa}.remote-table .selection-column{width:32px;padding-right:0;text-align:center}.remote-table .actions-column{width:168px}.remote-table .archive-name{width:25%;min-width:180px}.archive-name b{display:block;overflow:hidden;color:var(--text);font-size:11px;text-overflow:ellipsis;white-space:nowrap}.remote-table :deep(.themed-select){width:110px}.timeline-count{display:block;color:var(--text-2);font-variant-numeric:tabular-nums}.remote-table td small{display:block;margin-top:3px;color:var(--text-3);font-size:9px;font-variant-numeric:tabular-nums}.updated-at{color:var(--text-3)!important;font-variant-numeric:tabular-nums;white-space:nowrap}.remote-table .item-actions{display:flex;align-items:center;gap:5px}.remote-table .item-actions button{display:inline-flex;align-items:center;justify-content:center;gap:4px;min-width:30px;min-height:30px;padding:0 7px;color:var(--text-2);background:#f2f6f4;border-radius:6px;font-size:9px}.remote-table .item-actions button:first-child{color:var(--primary-dark);background:var(--primary-soft)}.remote-table .item-actions button:hover{background:var(--hover)}.remote-empty{border:1px dashed var(--border-2);border-radius:9px}.sr-only{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}@media(max-width:900px){.repository-heading{align-items:start}.repository-controls{align-items:stretch;flex-direction:column}.archive-search{width:100%}.repository-controls .danger{align-self:flex-end}}
+.repository-toolbar,.repository-toolbar + .loading,.remote-list{display:none}.repository-page{min-width:0}.repository-heading{display:flex;align-items:start;justify-content:space-between;gap:20px}.repository-eyebrow{margin:0;color:var(--text-2);font-size:13px;font-weight:750;letter-spacing:.04em}.repository-source-select{margin:10px 0 15px}.repository-heading h3{margin:5px 0 0;color:var(--text);font-size:18px;line-height:1.2}.repository-description{margin:7px 0 0;color:var(--text-3);font-size:10px}.repository-heading>button{display:inline-flex;flex:0 0 auto;align-items:center;justify-content:center;gap:6px;min-height:34px;padding:0 10px;color:var(--primary-dark);background:var(--primary-soft);border-radius:7px;font-size:10px;font-weight:650}.repository-summary{display:flex;flex-wrap:wrap;gap:7px;margin:15px 0 12px}.repository-summary span{padding:4px 7px;color:var(--text-2);background:#f2f6f4;border-radius:12px;font-size:9px;font-variant-numeric:tabular-nums}.repository-summary span:last-child{color:var(--primary-dark);background:var(--primary-soft)}.repository-controls{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.archive-search{display:flex;align-items:center;gap:8px;min-width:0;width:min(360px,100%);height:36px;padding:0 10px;color:var(--text-3);background:#f8faf9;border:1px solid var(--border-2);border-radius:7px}.archive-search:focus-within{border-color:var(--primary);box-shadow:0 0 0 2px #0d8b7d18}.archive-search input{min-width:0;flex:1;height:100%;color:var(--text);background:transparent;border:0;font-size:10px}.archive-search input:focus{outline:0}.repository-controls .danger{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:34px;padding:0 10px;color:#a52e28;background:#fff0ef;border-radius:7px;font-size:10px;font-weight:650}.remote-table-wrap{position:relative;overflow:visible;border:1px solid var(--border);border-radius:9px}.remote-table{width:100%;min-width:0;border-collapse:collapse;table-layout:fixed}.remote-table tbody tr:focus-within{position:relative;z-index:1}.remote-table th{height:34px;padding:0 9px;color:var(--text-3);border-bottom:1px solid var(--border);font-size:9px;font-weight:700;text-align:left}.remote-table td{height:58px;padding:7px 9px;border-bottom:1px solid var(--border);color:var(--text-2);font-size:10px;vertical-align:middle}.remote-table tbody tr:last-child td{border-bottom:0}.remote-table tbody tr:hover{background:#f8fbfa}.remote-table .selection-column{width:32px;padding-right:0;text-align:center}.remote-table .actions-column{width:168px}.remote-table .archive-name{width:25%;min-width:180px}.archive-name b{display:block;overflow:hidden;color:var(--text);font-size:11px;text-overflow:ellipsis;white-space:nowrap}.remote-table :deep(.themed-select){width:110px}.timeline-count{display:block;color:var(--text-2);font-variant-numeric:tabular-nums}.remote-table td small{display:block;margin-top:3px;color:var(--text-3);font-size:9px;font-variant-numeric:tabular-nums}.updated-at{color:var(--text-3)!important;font-variant-numeric:tabular-nums;white-space:nowrap}.remote-table .item-actions{display:flex;align-items:center;gap:5px}.remote-table .item-actions button{display:inline-flex;align-items:center;justify-content:center;gap:4px;min-width:30px;min-height:30px;padding:0 7px;color:var(--text-2);background:#f2f6f4;border-radius:6px;font-size:9px}.remote-table .item-actions button:first-child{color:var(--primary-dark);background:var(--primary-soft)}.remote-table .item-actions button:hover{background:var(--hover)}.remote-empty{border:1px dashed var(--border-2);border-radius:9px}.sr-only{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}@media(max-width:900px){.repository-heading{align-items:start}.repository-controls{align-items:stretch;flex-direction:column}.archive-search{width:100%}.repository-controls .danger{align-self:flex-end}}
 .github-token-field>div{display:flex;gap:8px}.github-token-field input{min-width:0;flex:1}.github-token-field button,.create-repository-button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:34px;padding:0 10px;color:var(--primary-dark);background:var(--primary-soft);border:1px solid transparent;border-radius:6px;font-size:10px;font-weight:650;white-space:nowrap}.github-token-field small{color:var(--text-3);font-size:9px;line-height:1.4}.create-repository-button{align-self:end}.github-token-field button:hover,.create-repository-button:hover{background:var(--hover);border-color:var(--border-2)}.github-token-field button:focus-visible{outline:2px solid var(--primary);outline-offset:2px}@media(max-width:900px){.github-token-field>div{align-items:stretch;flex-direction:column}}
 .message.error, .repository-toolbar button.danger, .repository-controls .danger, .icon-danger { color: var(--danger); background: var(--danger-soft); }
 .remote-list article.protected, .repository-summary span, .remote-table tbody tr:hover, .archive-search, .remote-list select, .source-toolbar select, .fields input, fieldset input, .item-actions button, .remote-table .item-actions button { background: var(--subtle); }
@@ -345,4 +391,5 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer));
 .cloud-toast { position: fixed; z-index: 200; right: 28px; bottom: 28px; display: flex; align-items: flex-start; gap: 8px; max-width: min(390px, calc(100vw - 56px)); padding: 11px 12px; color: #fff; border: 1px solid transparent; border-radius: 9px; box-shadow: 0 12px 34px #0d242047; font-size: 11px; line-height: 1.45; }.cloud-toast span { flex: 1; }.cloud-toast button { display: grid; flex: 0 0 auto; place-items: center; width: 22px; height: 22px; margin: -3px -4px -3px 1px; color: inherit; background: transparent; border-radius: 5px; }.cloud-toast button:hover { background: #ffffff1f; }.cloud-toast.success { background: #17834a; border-color: #17834a; }.cloud-toast.error { background: #7f1d1d; border-color: #7f1d1d; }
 .archive-search:focus-within { box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 18%, transparent); }
 .save { color: var(--on-primary); }
+.close-confirm-backdrop { position: fixed; z-index: 210; inset: 0; display: grid; place-items: center; padding: 24px; background: #18181b99; backdrop-filter: blur(3px); }.close-confirm { width: min(390px, calc(100vw - 48px)); overflow: hidden; background: var(--surface); border: 1px solid var(--border-2); border-radius: 12px; box-shadow: 0 24px 80px var(--shadow-color); }.close-confirm h3 { margin: 0; padding: 19px 20px 0; color: var(--text); font-size: 16px; }.close-confirm p { margin: 0; padding: 10px 20px 18px; color: var(--text-2); font-size: 12px; line-height: 1.55; }.close-confirm footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; background: var(--subtle); border-top: 1px solid var(--border); }.close-confirm footer button { min-height: 34px; padding: 0 11px; border-radius: 7px; font-size: 11px; font-weight: 650; }.close-confirm .discard { color: var(--text-2); background: var(--surface); border: 1px solid var(--border-2); }
 </style>
