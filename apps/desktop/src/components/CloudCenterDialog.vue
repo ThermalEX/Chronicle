@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { CheckCircle2, ChevronDown, CircleAlert, CloudCog, Download, ExternalLink, FileJson, Plus, RefreshCw, Search, Server, Trash2, Upload, X } from "@lucide/vue";
+import { CheckCircle2, ChevronDown, CircleAlert, CloudCog, Download, ExternalLink, FileJson, Pause, Play, Plus, RefreshCw, Search, Server, Trash2, Upload, X } from "@lucide/vue";
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { cloudRepository, saveCloudConfiguration, type CloudPreview, type RemoteItem } from "../services/cloud";
 import { cloudSettings, type CloudSettings, type CloudSource } from "../services/settings";
@@ -11,6 +11,7 @@ import { githubClassicPatUrl, githubRepositoryName } from "../services/githubPat
 import OpenDalSourceFields from "./OpenDalSourceFields.vue";
 import { configureOpenDal, secretPatch, sourceTestKey, validateOpenDal } from "../services/opendal";
 import { initialExpandedSourceIds, toggleExpandedSource } from "../services/sourceCardState";
+import { newCloudSource, toggleSourceSync } from "../services/cloudSourceControls";
 
 const emit = defineEmits<{ close: []; saved: [] }>();
 const tab = ref<"repository" | "sources">("repository");
@@ -37,7 +38,8 @@ const toast = ref<{ type: "success" | "error"; message: string }>();
 const expandedSourceIds = ref(initialExpandedSourceIds());
 let toastTimer: number | undefined;
 const confirmAction = ref<{ title: string; message: string; run: () => Promise<void> }>();
-const activeSource = computed(() => draft.sources.find((source) => source.id === draft.activeSourceId));
+const repositorySourceId = ref<string | null>(draft.sources[0]?.id ?? null);
+const repositorySource = computed(() => draft.sources.find((source) => source.id === repositorySourceId.value));
 const cloudSearch = ref("");
 const remoteArchives = computed(() => (preview.value?.items ?? []).filter((item) => item.kind === "archive"));
 const visibleRemoteArchives = computed(() => {
@@ -77,35 +79,30 @@ function formatUpdatedAt(value?: number): string {
 
 function addSource(): void {
   const id = crypto.randomUUID();
-  draft.sources.push({ id, name: `WebDAV ${draft.sources.length + 1}`, provider: "legacy_webdav", endpoint: "", username: "", remotePath: "/Chronicle", credentialRef: `chronicle-webdav:${id}` });
-  draft.activeSourceId = id;
+  draft.sources.push(newCloudSource("legacy_webdav", id, draft.sources.length + 1));
   expandedSourceIds.value = initialExpandedSourceIds();
-  draft.enabled = true;
   tab.value = "sources";
 }
 
 function addGitHubSource(): void {
   const id = crypto.randomUUID();
-  draft.sources.push({ id, name: `GitHub ${draft.sources.length + 1}`, provider: "legacy_github", endpoint: "", username: "", remotePath: "/Chronicle", credentialRef: `chronicle-github:${id}`, repository: "", branch: "main" });
-  draft.activeSourceId = id;
+  draft.sources.push(newCloudSource("legacy_github", id, draft.sources.length + 1));
   expandedSourceIds.value = initialExpandedSourceIds();
-  draft.enabled = true;
   tab.value = "sources";
 }
 
 function addOpenDalSource(): void {
   const id = crypto.randomUUID();
-  const source: CloudSource = { id, name: "OpenDAL", provider: "opendal", endpoint: "", username: "", remotePath: "/Chronicle", credentialRef: `chronicle-opendal:${id}` };
+  const source: CloudSource = newCloudSource("opendal", id, draft.sources.length + 1);
   configureOpenDal(source, "s3");
   secrets[id] = {};
   draft.sources.push(source);
-  draft.activeSourceId = id;
   expandedSourceIds.value = initialExpandedSourceIds();
   tab.value = "sources";
 }
 
 async function persist(): Promise<void> {
-  draft.enabled = Boolean(draft.activeSourceId && draft.sources.length);
+  draft.enabled = Boolean(draft.sources.length);
   for (const source of draft.sources) {
     if (source.provider === "opendal") {
       const problem = validateOpenDal(source);
@@ -137,9 +134,9 @@ async function loadSourceStatuses(): Promise<void> {
 }
 
 async function loadPreview(): Promise<void> {
-  if (!activeSource.value) return;
+  if (!repositorySource.value) return;
   busy.value = "preview"; error.value = ""; feedback.value = "";
-  try { await persist(); preview.value = await cloudRepository.preview(activeSource.value.id); selected.value = []; }
+  try { await persist(); preview.value = await cloudRepository.preview(repositorySource.value.id); selected.value = []; }
   catch (reason) { error.value = reason instanceof Error ? reason.message : String(reason); }
   finally { busy.value = ""; }
 }
@@ -188,18 +185,18 @@ async function openGitHubPatPage(): Promise<void> {
 function removeSource(source: CloudSource): void {
   confirmAction.value = { title: "删除同步源", message: `删除“${source.name}”的本机配置，远端文件不会被删除。`, run: async () => {
     draft.sources = draft.sources.filter((item) => item.id !== source.id);
-    if (draft.activeSourceId === source.id) draft.activeSourceId = draft.sources[0]?.id ?? null;
+    if (repositorySourceId.value === source.id) repositorySourceId.value = draft.sources[0]?.id ?? null;
     await persist(); preview.value = undefined;
   } };
 }
 
 async function runItemAction(item: RemoteItem, action: "sync" | "upload" | "download"): Promise<void> {
-  if (!activeSource.value || item.protected) return;
+  if (!repositorySource.value || item.protected) return;
   busy.value = `${action}:${item.id}`; error.value = ""; feedback.value = "";
   try {
-    if (action === "sync") feedback.value = (await cloudRepository.sync(activeSource.value.id, item.id)).message;
-    if (action === "upload") { await cloudRepository.upload(activeSource.value.id, item.id); feedback.value = "已用本地存档覆盖远端"; }
-    if (action === "download") { await cloudRepository.download(activeSource.value.id, item.id); feedback.value = "已用远端存档覆盖本地仓库，来源文件未改动"; }
+    if (action === "sync") feedback.value = (await cloudRepository.sync(repositorySource.value.id, item.id)).message;
+    if (action === "upload") { await cloudRepository.upload(repositorySource.value.id, item.id); feedback.value = "已用本地存档覆盖远端"; }
+    if (action === "download") { await cloudRepository.download(repositorySource.value.id, item.id); feedback.value = "已用远端存档覆盖本地仓库，来源文件未改动"; }
     await loadPreview();
   } catch (reason) { error.value = reason instanceof Error ? reason.message : String(reason); }
   finally { busy.value = ""; }
@@ -215,24 +212,28 @@ function confirmOverwrite(item: RemoteItem, direction: "upload" | "download"): v
 
 function confirmDelete(ids: string[]): void {
   const deletable = ids.filter((id) => remoteArchives.value.some((item) => item.id === id));
-  if (!deletable.length || !activeSource.value) return;
+  if (!deletable.length || !repositorySource.value) return;
   confirmAction.value = { title: "删除云端存档", message: `${deletable.length} 个云端存档及其全部时间节点将永久删除。`, run: async () => {
-    await cloudRepository.delete(activeSource.value!.id, deletable); await loadPreview();
+    await cloudRepository.delete(repositorySource.value!.id, deletable); await loadPreview();
   } };
 }
 
 async function changeSyncMode(item: RemoteItem, mode: string | null): Promise<void> {
-  if (!activeSource.value || (mode !== "manual" && mode !== "automatic")) return;
+  if (!repositorySource.value || (mode !== "manual" && mode !== "automatic")) return;
   busy.value = `mode:${item.id}`;
-  try { await cloudRepository.setSyncMode(activeSource.value.id, item.id, mode); item.syncMode = mode; feedback.value = "同步方案已保存"; }
+  try { await cloudRepository.setSyncMode(repositorySource.value.id, item.id, mode); item.syncMode = mode; feedback.value = "同步方案已保存"; }
   catch (reason) { error.value = reason instanceof Error ? reason.message : String(reason); }
   finally { busy.value = ""; }
 }
 
-function selectActiveSource(sourceId: string | null): void {
-  draft.activeSourceId = sourceId;
+function selectRepositorySource(sourceId: string | null): void {
+  repositorySourceId.value = sourceId;
   expandedSourceIds.value = initialExpandedSourceIds();
   preview.value = undefined;
+}
+
+function toggleSource(source: CloudSource): void {
+  Object.assign(source, toggleSourceSync(source));
 }
 
 function isSourceExpanded(sourceId: string): boolean {
@@ -259,7 +260,7 @@ async function saveAndClose(): Promise<void> {
   finally { busy.value = ""; }
 }
 
-onMounted(() => { closeButton.value?.focus(); void loadSourceStatuses(); if (activeSource.value) void loadPreview(); });
+onMounted(() => { closeButton.value?.focus(); void loadSourceStatuses(); if (repositorySource.value) void loadPreview(); });
 onBeforeUnmount(() => window.clearTimeout(toastTimer));
 </script>
 
@@ -267,13 +268,14 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer));
   <div class="dialog-backdrop" @pointerdown="backdrop.pointerDown" @pointerup="backdrop.pointerUp" @pointercancel="backdrop.pointerCancel">
     <section class="cloud-center" role="dialog" aria-modal="true" aria-labelledby="cloud-title">
       <header><div class="heading-icon"><CloudCog :size="21" /></div><div><p>同步服务</p><h2 id="cloud-title">云端设置</h2></div><button ref="closeButton" aria-label="关闭云端设置" title="关闭云端设置" @click="emit('close')"><X :size="18" /></button></header>
-      <nav aria-label="云端设置页面"><button :class="{ active: tab === 'repository' }" @click="tab = 'repository'; activeSource && loadPreview()">云端仓库</button><button :class="{ active: tab === 'sources' }" @click="tab = 'sources'">同步源</button></nav>
+      <nav aria-label="云端设置页面"><button :class="{ active: tab === 'repository' }" @click="tab = 'repository'; repositorySource && loadPreview()">云端仓库</button><button :class="{ active: tab === 'sources' }" @click="tab = 'sources'">同步源</button></nav>
       <main>
         <section v-if="tab === 'repository'" class="repository-page">
-          <div v-if="!activeSource" class="empty"><CloudCog :size="30" /><h3>尚未配置云同步源</h3><p>添加 WebDAV 后即可查看和管理远端 Chronicle 仓库。</p><button @click="tab = 'sources'; addSource()"><Plus :size="16" />添加同步源</button></div>
+          <div v-if="!repositorySource" class="empty"><CloudCog :size="30" /><h3>尚未配置云同步源</h3><p>添加 WebDAV 后即可查看和管理远端 Chronicle 仓库。</p><button @click="tab = 'sources'; addSource()"><Plus :size="16" />添加同步源</button></div>
           <template v-else>
             <div class="repository-heading">
-              <div><p class="repository-eyebrow">共享快照历史</p><h3>{{ preview?.sourceName ?? activeSource.name }}</h3><p class="repository-description">按存档标题汇总远端时间节点；仓库配置由 Chronicle 自动维护。</p></div>
+              <div><p class="repository-eyebrow">共享快照历史</p><h3>{{ preview?.sourceName ?? repositorySource.name }}</h3><p class="repository-description">按存档标题汇总远端时间节点；仓库配置由 Chronicle 自动维护。</p></div>
+              <ThemedSelect :model-value="repositorySourceId" :options="sourceOptions" label="查看云端仓库来源" @update:model-value="selectRepositorySource" />
               <button :disabled="Boolean(busy)" @click="loadPreview"><RefreshCw :size="15" />刷新</button>
             </div>
             <div class="repository-summary" aria-live="polite"><span>远端 {{ remoteArchives.length }} 个存档</span><span>共 {{ remoteSnapshotTotal }} 个时间节点</span><span>{{ preview?.libraryId ? '仓库已初始化' : '等待首次上传' }}</span></div>
@@ -299,7 +301,7 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer));
               <div v-if="!visibleRemoteArchives.length" class="list-empty">没有匹配的云端存档。</div>
             </div>
             <div v-else class="list-empty remote-empty">远端暂无存档，可以从本地存档执行覆盖上传。</div>
-            <div class="repository-toolbar"><span><b>{{ preview?.sourceName ?? activeSource.name }}</b><small>{{ preview?.libraryId ? `仓库 ${preview.libraryId}` : '尚未创建远端仓库' }}</small></span><div><button :disabled="Boolean(busy)" @click="loadPreview"><RefreshCw :size="15" />刷新</button><button class="danger" :disabled="!selected.length || Boolean(busy)" @click="confirmDelete(selected)"><Trash2 :size="15" />删除所选</button></div></div>
+            <div class="repository-toolbar"><span><b>{{ preview?.sourceName ?? repositorySource.name }}</b><small>{{ preview?.libraryId ? `仓库 ${preview.libraryId}` : '尚未创建远端仓库' }}</small></span><div><button :disabled="Boolean(busy)" @click="loadPreview"><RefreshCw :size="15" />刷新</button><button class="danger" :disabled="!selected.length || Boolean(busy)" @click="confirmDelete(selected)"><Trash2 :size="15" />删除所选</button></div></div>
             <div v-if="busy === 'preview' && !preview" class="loading">正在读取远端清单…</div>
             <div v-else class="remote-list">
               <article v-for="item in preview?.items ?? []" :key="item.id" :class="{ protected: item.protected }">
@@ -314,10 +316,10 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer));
         </section>
 
         <section v-else class="sources-page">
-          <div class="source-toolbar"><label><span>当前同步源</span><ThemedSelect :model-value="draft.activeSourceId ?? null" :options="sourceOptions" label="当前同步源" @update:model-value="selectActiveSource" /></label><button @click="addSource"><Plus :size="15" />添加 WebDAV 兼容源</button><button @click="addGitHubSource"><Plus :size="15" />添加 GitHub 兼容源</button><button @click="addOpenDalSource"><Plus :size="15" />添加 OpenDAL</button></div>
+          <div class="source-toolbar"><button @click="addSource"><Plus :size="15" />添加 WebDAV 兼容源</button><button @click="addGitHubSource"><Plus :size="15" />添加 GitHub 兼容源</button><button @click="addOpenDalSource"><Plus :size="15" />添加 OpenDAL</button></div>
           <div v-if="!draft.sources.length" class="empty compact"><Server :size="28" /><h3>没有同步源</h3><p>Chronicle 支持保存多个云端配置，同时只启用其中一个。</p></div>
-          <article v-for="source in draft.sources" v-else :key="source.id" class="source-card" :class="{ active: source.id === draft.activeSourceId, collapsed: !isSourceExpanded(source.id) }">
-            <div class="source-title"><button class="source-toggle" type="button" :aria-label="`${isSourceExpanded(source.id) ? '折叠' : '展开'} ${source.name}`" :title="`${isSourceExpanded(source.id) ? '折叠' : '展开'} ${source.name}`" :aria-expanded="isSourceExpanded(source.id)" @click="toggleSourceExpanded(source.id)"><Server :size="17" /><b>{{ source.name }}</b><i v-if="sourcePassed(source)" class="source-tested" role="img" :aria-label="`${source.name} 已通过测试`" title="已通过测试"></i><small>{{ source.provider === 'legacy_github' ? 'GitHub 兼容源' : source.provider === 'opendal' ? 'OpenDAL · ' + source.scheme : 'WebDAV 兼容源' }}</small><small v-if="source.id === draft.activeSourceId" class="source-active-badge">当前使用</small><ChevronDown :size="16" :class="{ closed: !isSourceExpanded(source.id) }" /></button><button class="icon-danger" :aria-label="`删除 ${source.name}`" :title="`删除 ${source.name}`" @click="removeSource(source)"><Trash2 :size="15" /></button></div>
+          <article v-for="source in draft.sources" v-else :key="source.id" class="source-card" :class="{ active: source.syncEnabled, collapsed: !isSourceExpanded(source.id) }">
+            <div class="source-title"><button class="source-toggle" type="button" :aria-label="`${isSourceExpanded(source.id) ? '折叠' : '展开'} ${source.name}`" :title="`${isSourceExpanded(source.id) ? '折叠' : '展开'} ${source.name}`" :aria-expanded="isSourceExpanded(source.id)" @click="toggleSourceExpanded(source.id)"><Server :size="17" /><b>{{ source.name }}</b><i v-if="sourcePassed(source)" class="source-tested" role="img" :aria-label="`${source.name} 已通过测试`" title="已通过测试"></i><small>{{ source.provider === 'legacy_github' ? 'GitHub 兼容源' : source.provider === 'opendal' ? 'OpenDAL · ' + source.scheme : 'WebDAV 兼容源' }}</small><small class="source-active-badge" :class="{ paused: !source.syncEnabled }">{{ source.syncEnabled ? '同步中' : '已暂停' }}</small><ChevronDown :size="16" :class="{ closed: !isSourceExpanded(source.id) }" /></button><button class="icon-sync" :class="{ paused: !source.syncEnabled }" :aria-label="`${source.syncEnabled ? '暂停同步' : '开始同步'} ${source.name}`" :title="source.syncEnabled ? '暂停同步' : '开始同步'" @click="toggleSource(source)"><Pause v-if="source.syncEnabled" :size="15" /><Play v-else :size="15" /></button><button class="icon-danger" :aria-label="`删除 ${source.name}`" :title="`删除 ${source.name}`" @click="removeSource(source)"><Trash2 :size="15" /></button></div>
             <div v-show="isSourceExpanded(source.id)" class="source-body"><div v-if="source.provider === 'legacy_github'" class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>仓库</span><input v-model.trim="source.repository" type="text" placeholder="owner/repository" /></label><label><span>分支</span><input v-model.trim="source.branch" type="text" placeholder="main" /></label><label class="wide github-token-field"><span>访问令牌</span><div><input v-model="passwords[source.id]" type="password" autocomplete="current-password" :placeholder="savedCredentials[source.id] ? '已保存，留空保留' : '粘贴 GitHub 生成的访问令牌'" /><button type="button" @click="openGitHubPatPage"><ExternalLink :size="14" />在 GitHub 生成令牌</button></div><small>登录后直接生成带 repo 权限的令牌；GitHub 只显示一次，请复制后粘贴到这里。</small></label><label><span>新仓库名称</span><input v-model.trim="newRepositoryNames[source.id]" type="text" :placeholder="githubRepositoryName(source.id)" /></label><button class="create-repository-button" :disabled="Boolean(busy)" @click="createGitHubRepository(source)"><Plus :size="15" />创建私有仓库</button><label class="wide"><span>Chronicle 目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div><OpenDalSourceFields v-else-if="source.provider === 'opendal'" :source="source" :secrets="secrets[source.id] ?? (secrets[source.id] = {})" :credential-saved="savedCredentials[source.id]" :disabled="Boolean(busy)" /><div v-else class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>服务器地址</span><input v-model.trim="source.endpoint" type="url" placeholder="https://dav.example.com/remote.php/dav/files/user" /></label><label><span>用户名</span><input v-model.trim="source.username" type="text" autocomplete="username" /></label><label><span>密码</span><input v-model="passwords[source.id]" type="password" autocomplete="current-password" :placeholder="savedCredentials[source.id] ? '已保存，留空保留' : '请输入密码'" /></label><label class="wide"><span>远端目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div><button class="test-button" :disabled="Boolean(busy) || (source.provider === 'legacy_github' ? !source.repository || !source.branch : source.provider === 'opendal' ? false : !source.endpoint || !source.username)" @click="testSource(source)">{{ busy === `test:${source.id}` ? '测试中…' : source.provider === 'legacy_github' ? '测试仓库访问' : source.provider === 'opendal' ? '测试读写、列举与清理' : '测试连接与读写' }}</button><small v-if="requiresTest(source)" class="source-test-hint">配置尚未测试或已更改，保存前请重新测试。</small></div>
           </article>
           <fieldset><legend>请求控制</legend><label><span>元数据并发</span><input v-model.number="draft.maxConcurrentMetadataReads" type="number" min="1" max="4" /></label><label><span>传输并发</span><input v-model.number="draft.maxConcurrentTransfers" type="number" min="1" max="4" /></label><label><span>请求间隔（毫秒）</span><input v-model.number="draft.requestDelayMs" type="number" min="0" max="5000" step="50" /></label><label><span>重试次数</span><input v-model.number="draft.retryLimit" type="number" min="1" max="10" /></label></fieldset>
@@ -340,7 +342,8 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer));
 .remote-list article.protected, .repository-summary span, .remote-table tbody tr:hover, .archive-search, .remote-list select, .source-toolbar select, .fields input, fieldset input, .item-actions button, .remote-table .item-actions button { background: var(--subtle); }
 .remote-list select, .source-toolbar select, .fields input, fieldset input { color: var(--text); }
 .source-card.active { border-color: color-mix(in srgb, var(--primary) 45%, var(--border)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 12%, transparent); }
-.source-card.collapsed { padding-block: 10px; }.source-card.collapsed .source-title { margin-bottom: 0; }.source-toggle { display: flex; min-width: 0; flex: 1; align-items: center; gap: 7px; padding: 4px; color: var(--text); background: transparent; border-radius: 6px; text-align: left; }.source-toggle:hover { background: var(--hover); }.source-toggle b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.source-toggle svg:last-child { margin-left: auto; flex: 0 0 auto; color: var(--text-3); transition: transform .14s ease; }.source-toggle svg.closed { transform: rotate(-90deg); }.source-title small.source-active-badge { color: var(--success); background: var(--success-soft); font-weight: 750; }
+.icon-sync { display: grid; place-items: center; width: 32px; height: 32px; margin-left: auto; color: #2563eb; background: #eff6ff; border-radius: 6px; }.icon-sync:hover { background: #dbeafe; }.icon-sync.paused { color: #15803d; background: #ecfdf3; }.icon-sync.paused:hover { background: #dcfce7; }
+.source-card.collapsed { padding-block: 10px; }.source-card.collapsed .source-title { margin-bottom: 0; }.source-toggle { display: flex; min-width: 0; flex: 1; align-items: center; gap: 7px; padding: 4px; color: var(--text); background: transparent; border-radius: 6px; text-align: left; }.source-toggle:hover { background: var(--hover); }.source-toggle b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.source-toggle svg:last-child { margin-left: auto; flex: 0 0 auto; color: var(--text-3); transition: transform .14s ease; }.source-toggle svg.closed { transform: rotate(-90deg); }.source-title small.source-active-badge { color: var(--success); background: var(--success-soft); font-weight: 750; }.source-title small.source-active-badge.paused { color: var(--text-2); background: var(--subtle); }
 .source-tested { width: 8px; height: 8px; border-radius: 50%; background: #22a55b; box-shadow: 0 0 0 2px color-mix(in srgb, #22a55b 18%, transparent); }
 .cloud-toast { position: fixed; z-index: 200; right: 28px; bottom: 28px; display: flex; align-items: flex-start; gap: 8px; max-width: min(390px, calc(100vw - 56px)); padding: 11px 12px; border: 1px solid var(--border-2); border-radius: 9px; background: var(--surface-raised); box-shadow: 0 12px 34px #0d242047; font-size: 11px; line-height: 1.45; }.cloud-toast span { flex: 1; }.cloud-toast button { display: grid; flex: 0 0 auto; place-items: center; width: 22px; height: 22px; margin: -3px -4px -3px 1px; color: inherit; background: transparent; border-radius: 5px; }.cloud-toast button:hover { background: var(--hover); }.cloud-toast.success { color: #17834a; border-color: color-mix(in srgb, #22a55b 34%, var(--border)); }.cloud-toast.error { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 34%, var(--border)); }
 .archive-search:focus-within { box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 18%, transparent); }
