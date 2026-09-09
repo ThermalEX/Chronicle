@@ -44,6 +44,8 @@ pub struct CloudSourceInput {
     config: std::collections::HashMap<String, String>,
     #[serde(default)]
     secret_keys: Vec<String>,
+    #[serde(default)]
+    sync_enabled: bool,
 }
 
 fn default_branch() -> String {
@@ -625,9 +627,6 @@ pub async fn save_opendal_credential(
 pub fn validate_settings(settings: &Value, _previous: &Value) -> Result<(), String> {
     let sources = settings.pointer("/cloud/sources").and_then(Value::as_array);
     let enabled = settings.pointer("/cloud/enabled").and_then(Value::as_bool) == Some(true);
-    let active = settings
-        .pointer("/cloud/activeSourceId")
-        .and_then(Value::as_str);
     let mut ids = std::collections::HashSet::new();
     for value in sources.into_iter().flatten() {
         let source: CloudSourceInput =
@@ -652,12 +651,9 @@ pub fn validate_settings(settings: &Value, _previous: &Value) -> Result<(), Stri
         {
             return Err("不支持的服务，或公开配置包含机密字段".into());
         }
-        if enabled && active == Some(source.id.as_str()) {
+        if enabled && source.sync_enabled {
             credential(&source)?;
         }
-    }
-    if enabled && active.is_none_or(|id| !ids.contains(id)) {
-        return Err("请选择有效的同步源".into());
     }
     Ok(())
 }
@@ -2239,6 +2235,15 @@ mod tests {
                 .unwrap_err()
                 .contains("must-not-save")
         );
+    }
+
+    #[test]
+    fn accepts_paused_sources_without_a_legacy_active_source() {
+        let settings = json!({"cloud":{"enabled":true, "sources":[{
+            "id":"paused", "name":"Paused", "provider":"legacy_webdav", "endpoint":"", "username":"",
+            "remotePath":"/Chronicle", "credentialRef":"ref", "syncEnabled":false
+        }]}});
+        assert!(super::validate_settings(&settings, &json!({})).is_ok());
     }
 
     #[test]

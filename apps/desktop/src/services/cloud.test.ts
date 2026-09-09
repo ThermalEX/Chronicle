@@ -26,21 +26,21 @@ describe("cloud repository adapter", () => {
     const { cloudSettings } = await import("./settings");
     const source = { id: "dal-1", name: "S3", provider: "opendal" as const, endpoint: "", username: "", remotePath: "/Chronicle", credentialRef: "dal-1", scheme: "s3", config: { bucket: "bucket" }, secretKeys: ["secret_access_key"] };
     invoke.mockRejectedValueOnce(new Error("credential failed"));
-    await expect(saveCloudConfiguration({ ...cloudSettings, enabled: true, activeSourceId: source.id, sources: [source] }, [{ source, secrets: { secret_access_key: "secret" } }])).rejects.toThrow("credential failed");
+    await expect(saveCloudConfiguration({ ...cloudSettings, enabled: true, sources: [source] }, [{ source, secrets: { secret_access_key: "secret" } }])).rejects.toThrow("credential failed");
     expect(invoke).toHaveBeenCalledTimes(1);
     expect(invoke.mock.calls[0][0]).toBe("save_opendal_credential");
     expect(cloudSettings.enabled).toBe(false);
   });
 
-  it("saves credentials before a v3 settings document with no secret values", async () => {
+  it("saves credentials before a v4 settings document with no secret values", async () => {
     const { saveCloudConfiguration } = await import("./cloud");
     const { cloudSettings } = await import("./settings");
     const source = { id: "dal-2", name: "S3", provider: "opendal" as const, endpoint: "", username: "", remotePath: "/Chronicle", credentialRef: "dal-2", scheme: "s3", config: { bucket: "bucket" }, secretKeys: ["secret_access_key"] };
     invoke.mockResolvedValue(undefined);
-    await saveCloudConfiguration({ ...cloudSettings, enabled: true, activeSourceId: source.id, sources: [source] }, [{ source, secrets: { secret_access_key: "never-persist-here" } }]);
+    await saveCloudConfiguration({ ...cloudSettings, enabled: true, sources: [source] }, [{ source, secrets: { secret_access_key: "never-persist-here" } }]);
     expect(invoke.mock.calls.map((call) => call[0])).toEqual(["save_opendal_credential", "save_settings"]);
     const settings = invoke.mock.calls[1][1].settings;
-    expect(settings.formatVersion).toBe(3);
+    expect(settings.formatVersion).toBe(4);
     expect(JSON.stringify(settings)).not.toContain("never-persist-here");
   });
 

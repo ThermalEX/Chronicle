@@ -51,8 +51,6 @@ export interface CloudSource {
 
 export interface CloudSettings {
   enabled: boolean;
-  /** @deprecated Temporary compatibility field while callers migrate to source.syncEnabled. */
-  activeSourceId?: string | null;
   sources: CloudSource[];
   maxConcurrentMetadataReads: number;
   maxConcurrentTransfers: number;
@@ -75,7 +73,7 @@ const APP_SETTINGS_KEY = "chronicle.app-settings.v2";
 const CLOUD_SETTINGS_KEY = "chronicle.cloud-settings.v2";
 
 export interface SettingsDocument {
-  formatVersion: 3;
+  formatVersion: 4;
   app: AppSettings;
   cloud: CloudSettings;
 }
@@ -100,7 +98,6 @@ const defaultAppSettings: AppSettings = {
 
 const defaultCloudSettings: CloudSettings = {
   enabled: false,
-  activeSourceId: null,
   sources: [],
   maxConcurrentMetadataReads: 2,
   maxConcurrentTransfers: 2,
@@ -144,7 +141,6 @@ export function normalizedCloud(value?: LegacyCloudSettings): CloudSettings {
   const requestedDelay = Number(raw.requestDelayMs ?? 150);
   return {
     enabled: Boolean(raw.enabled && sources.length),
-    activeSourceId: sources.find((source) => source.syncEnabled)?.id ?? null,
     sources,
     maxConcurrentMetadataReads: Math.max(1, Math.min(4, Number(raw.maxConcurrentMetadataReads) || 2)),
     maxConcurrentTransfers: Math.max(1, Math.min(4, Number(raw.maxConcurrentTransfers) || 2)),
@@ -171,7 +167,7 @@ export const cloudSettings = reactive<CloudSettings>(normalizedCloud());
 
 function settingsDocument(): SettingsDocument {
   return {
-    formatVersion: 3,
+    formatVersion: 4,
     app: { ...appSettings },
     cloud: { ...cloudSettings, sources: cloudSettings.sources.map((source) => ({ ...source })) },
   };
@@ -182,7 +178,7 @@ export async function initializeSettings(): Promise<void> {
     const saved = await invoke<Partial<SettingsDocument> & { cloud?: LegacyCloudSettings }>("load_settings");
     Object.assign(appSettings, defaultAppSettings, saved.app ?? {}, normalizeAppearance(saved.app ?? {}));
     Object.assign(cloudSettings, normalizedCloud(saved.cloud));
-    if (saved.formatVersion !== 3) await persistSettings();
+    if (saved.formatVersion !== 4) await persistSettings();
     return;
   }
   const savedApp = loadSettings(APP_SETTINGS_KEY, defaultAppSettings);
@@ -212,7 +208,7 @@ export async function saveCloudSettings(value: CloudSettings): Promise<void> {
     }
   }
   if (isTauri()) {
-    await invoke("save_settings", { settings: { formatVersion: 3, app: { ...appSettings }, cloud: normalized } });
+    await invoke("save_settings", { settings: { formatVersion: 4, app: { ...appSettings }, cloud: normalized } });
   } else {
     localStorage.setItem(CLOUD_SETTINGS_KEY, JSON.stringify(normalized));
   }
