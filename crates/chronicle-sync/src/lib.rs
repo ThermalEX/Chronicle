@@ -1,7 +1,11 @@
 #![doc = "Repository comparison and rate-limited synchronization orchestration."]
 
 mod github;
+mod remote;
 mod webdav;
+pub use remote::{
+    OPEN_DAL_SCHEMES, OpenDalSource, PUBLIC_CONFIG_KEYS, RemoteStore, validate_relative_path,
+};
 
 pub use github::{
     CreatedGitHubRepository, GitHubChange, GitHubClient, GitHubError, GitHubSource,

@@ -56,6 +56,8 @@ mod tests {
 
 #[derive(Debug, Error)]
 pub enum WebDavError {
+    #[error("{0}")]
+    Remote(String),
     #[error("WebDAV request failed: {0}")]
     Request(#[from] reqwest::Error),
     #[error("WebDAV returned HTTP {status} for {operation}")]

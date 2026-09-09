@@ -515,6 +515,10 @@ pub fn load_settings(state: State<'_, AppState>) -> Result<Value, String> {
 #[tauri::command(async)]
 pub fn save_settings(state: State<'_, AppState>, settings: Value) -> Result<(), String> {
     let repository = state.repository.lock().map_err(|_| state_error())?;
+    let previous = repository
+        .load_settings()
+        .map_err(|error| error.to_string())?;
+    crate::cloud::validate_settings(&settings, &previous)?;
     repository
         .save_settings(&settings)
         .map_err(|error| error.to_string())

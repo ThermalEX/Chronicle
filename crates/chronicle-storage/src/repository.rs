@@ -21,7 +21,7 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 const FORMAT_VERSION: u32 = 4;
-const SETTINGS_VERSION: u32 = 2;
+const SETTINGS_VERSION: u32 = 3;
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
 #[derive(Debug, Error)]
@@ -44,7 +44,7 @@ pub enum StorageError {
     EmptySources,
     #[error("archive name cannot be empty")]
     EmptyName,
-    #[error("settings must use formatVersion 2 and contain app and cloud objects")]
+    #[error("settings must use formatVersion 3 and contain app and cloud objects")]
     InvalidSettings,
     #[error("category name cannot be empty")]
     EmptyCategoryName,
@@ -1673,7 +1673,7 @@ mod tests {
         fs::write(&file, b"version one").unwrap();
         let repository_root = workspace.path().join("Chronicle");
         let repository = LocalRepository::open(&repository_root).unwrap();
-        assert_eq!(repository.load_settings().unwrap()["formatVersion"], 2);
+        assert_eq!(repository.load_settings().unwrap()["formatVersion"], 3);
         assert!(
             repository
                 .save_settings(&serde_json::json!({ "app": {}, "cloud": {} }))
@@ -1681,7 +1681,7 @@ mod tests {
         );
         repository
             .save_settings(&serde_json::json!({
-                "formatVersion": 2,
+                "formatVersion": 3,
                 "app": { "defaultCategory": "配置" },
                 "cloud": { "enabled": false }
             }))

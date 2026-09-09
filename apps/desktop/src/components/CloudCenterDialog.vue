@@ -1,18 +1,28 @@
 <script setup lang="ts">
 import { CheckCircle2, ChevronDown, CloudCog, Download, ExternalLink, FileJson, Plus, RefreshCw, Search, Server, Trash2, Upload, X } from "@lucide/vue";
 import { computed, onMounted, reactive, ref } from "vue";
-import { cloudRepository, type CloudPreview, type RemoteItem } from "../services/cloud";
-import { cloudSettings, saveCloudSettings, type CloudSettings, type CloudSource } from "../services/settings";
+import { cloudRepository, saveCloudConfiguration, type CloudPreview, type RemoteItem } from "../services/cloud";
+import { cloudSettings, type CloudSettings, type CloudSource } from "../services/settings";
 import { createBackdropDismissal } from "../services/dialogDismissal";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
 import { openExternalUrl } from "../services/externalBrowser";
 import { githubClassicPatUrl, githubRepositoryName } from "../services/githubPat";
+import OpenDalSourceFields from "./OpenDalSourceFields.vue";
+import { configureOpenDal, secretPatch, sourceTestKey, validateOpenDal } from "../services/opendal";
 
 const emit = defineEmits<{ close: []; saved: [] }>();
 const tab = ref<"repository" | "sources">("repository");
-const draft = reactive<CloudSettings>({ ...cloudSettings, sources: cloudSettings.sources.map((source) => ({ ...source })) });
+const draft = reactive<CloudSettings>({ ...cloudSettings, sources: cloudSettings.sources.map((source) => ({ ...source, ...(source.config ? { config: { ...source.config } } : {}), ...(source.secretKeys ? { secretKeys: [...source.secretKeys] } : {}) })) });
 const passwords = reactive<Record<string, string>>({});
+const secrets = reactive<Record<string, Record<string, string>>>(Object.fromEntries(draft.sources.map((source) => [source.id, {}])));
+const tested = reactive<Record<string, string>>({});
+const failedTests = reactive(new Set<string>());
+const original = new Map(draft.sources.map((source) => [source.id, sourceTestKey(source, {})]));
+function currentTestKey(source: CloudSource): string { return sourceTestKey(source, secretPatch(secrets[source.id] ?? {})); }
+function requiresTest(source: CloudSource): boolean {
+  return source.provider === "opendal" && (failedTests.has(source.id) || (currentTestKey(source) !== original.get(source.id) && tested[source.id] !== currentTestKey(source)));
+}
 const newRepositoryNames = reactive<Record<string, string>>({});
 const closeButton = ref<HTMLButtonElement>();
 const preview = ref<CloudPreview>();
@@ -54,7 +64,7 @@ function formatUpdatedAt(value?: number): string {
 
 function addSource(): void {
   const id = crypto.randomUUID();
-  draft.sources.push({ id, name: `WebDAV ${draft.sources.length + 1}`, provider: "webdav", endpoint: "", username: "", remotePath: "/Chronicle", credentialRef: `chronicle-webdav:${id}` });
+  draft.sources.push({ id, name: `WebDAV ${draft.sources.length + 1}`, provider: "legacy_webdav", endpoint: "", username: "", remotePath: "/Chronicle", credentialRef: `chronicle-webdav:${id}` });
   draft.activeSourceId = id;
   draft.enabled = true;
   tab.value = "sources";
@@ -62,16 +72,41 @@ function addSource(): void {
 
 function addGitHubSource(): void {
   const id = crypto.randomUUID();
-  draft.sources.push({ id, name: `GitHub ${draft.sources.length + 1}`, provider: "github", endpoint: "", username: "", remotePath: "/Chronicle", credentialRef: `chronicle-github:${id}`, repository: "", branch: "main" });
+  draft.sources.push({ id, name: `GitHub ${draft.sources.length + 1}`, provider: "legacy_github", endpoint: "", username: "", remotePath: "/Chronicle", credentialRef: `chronicle-github:${id}`, repository: "", branch: "main" });
   draft.activeSourceId = id;
   draft.enabled = true;
   tab.value = "sources";
 }
 
+function addOpenDalSource(): void {
+  const id = crypto.randomUUID();
+  const source: CloudSource = { id, name: "OpenDAL", provider: "opendal", endpoint: "", username: "", remotePath: "/Chronicle", credentialRef: `chronicle-opendal:${id}` };
+  configureOpenDal(source, "s3");
+  secrets[id] = {};
+  draft.sources.push(source);
+  draft.activeSourceId = id;
+  tab.value = "sources";
+}
+
 async function persist(): Promise<void> {
   draft.enabled = Boolean(draft.activeSourceId && draft.sources.length);
-  await saveCloudSettings({ ...draft, sources: draft.sources.map((source) => ({ ...source })) });
-  for (const source of draft.sources) if (passwords[source.id]) await cloudRepository.saveCredential(source, passwords[source.id]);
+  for (const source of draft.sources) {
+    if (source.provider === "opendal") {
+      const problem = validateOpenDal(source);
+      if (problem) throw new Error(`${source.name}：${problem}`);
+      if (requiresTest(source)) throw new Error(`“${source.name}”配置已更改，请先测试读写、列举和清理`);
+    }
+  }
+  // Credential persistence must succeed before settings can enable a new source.
+  const credentials = draft.sources.filter((source) => source.provider === "opendal"
+    ? currentTestKey(source) !== original.get(source.id) : Boolean(passwords[source.id]))
+    .map((source) => ({ source, password: passwords[source.id], secrets: secretPatch(secrets[source.id] ?? {}) }));
+  await saveCloudConfiguration({ ...draft, sources: draft.sources.map((source) => ({ ...source })) }, credentials);
+  for (const source of draft.sources) {
+    secrets[source.id] = {};
+    passwords[source.id] = "";
+    original.set(source.id, sourceTestKey(source, {}));
+  }
   emit("saved");
 }
 
@@ -85,7 +120,19 @@ async function loadPreview(): Promise<void> {
 
 async function testSource(source: CloudSource): Promise<void> {
   busy.value = `test:${source.id}`; error.value = ""; feedback.value = "";
-  try { await cloudRepository.test(source, passwords[source.id] ?? ""); feedback.value = `“${source.name}”连接与读写测试通过`; }
+  delete tested[source.id];
+  failedTests.add(source.id);
+  try {
+    if (source.provider === "opendal") {
+      const problem = validateOpenDal(source);
+      if (problem) throw new Error(problem);
+    }
+    const key = currentTestKey(source);
+    await cloudRepository.test(source, source.provider === "opendal" ? JSON.stringify(secretPatch(secrets[source.id] ?? {})) : passwords[source.id] ?? "");
+    tested[source.id] = key;
+    failedTests.delete(source.id);
+    feedback.value = source.provider === "opendal" ? `“${source.name}”读写、列举和临时清理测试通过` : `“${source.name}”连接与读写测试通过`;
+  }
   catch (reason) { error.value = reason instanceof Error ? reason.message : String(reason); }
   finally { busy.value = ""; }
 }
@@ -232,13 +279,13 @@ onMounted(() => { closeButton.value?.focus(); if (activeSource.value) void loadP
         </section>
 
         <section v-else class="sources-page">
-          <div class="source-toolbar"><label><span>当前同步源</span><ThemedSelect :model-value="draft.activeSourceId" :options="sourceOptions" label="当前同步源" @update:model-value="selectActiveSource" /></label><button @click="addSource"><Plus :size="15" />添加 WebDAV</button><button @click="addGitHubSource"><Plus :size="15" />添加 GitHub</button></div>
+          <div class="source-toolbar"><label><span>当前同步源</span><ThemedSelect :model-value="draft.activeSourceId" :options="sourceOptions" label="当前同步源" @update:model-value="selectActiveSource" /></label><button @click="addSource"><Plus :size="15" />添加 WebDAV 兼容源</button><button @click="addGitHubSource"><Plus :size="15" />添加 GitHub 兼容源</button><button @click="addOpenDalSource"><Plus :size="15" />添加 OpenDAL</button></div>
           <div v-if="!draft.sources.length" class="empty compact"><Server :size="28" /><h3>没有同步源</h3><p>Chronicle 支持保存多个云端配置，同时只启用其中一个。</p></div>
           <article v-for="source in draft.sources" v-else :key="source.id" class="source-card" :class="{ active: source.id === draft.activeSourceId }">
-            <div class="source-title"><span><Server :size="17" /><b>{{ source.name }}</b><small>{{ source.provider === 'github' ? 'GitHub 仓库' : 'WebDAV' }}</small><small v-if="source.id === draft.activeSourceId">当前使用</small></span><button class="icon-danger" :aria-label="`删除 ${source.name}`" :title="`删除 ${source.name}`" @click="removeSource(source)"><Trash2 :size="15" /></button></div>
-            <div v-if="source.provider === 'github'" class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>仓库</span><input v-model.trim="source.repository" type="text" placeholder="owner/repository" /></label><label><span>分支</span><input v-model.trim="source.branch" type="text" placeholder="main" /></label><label class="wide github-token-field"><span>访问令牌</span><div><input v-model="passwords[source.id]" type="password" autocomplete="current-password" placeholder="粘贴 GitHub 生成的访问令牌" /><button type="button" @click="openGitHubPatPage"><ExternalLink :size="14" />在 GitHub 生成令牌</button></div><small>登录后直接生成带 repo 权限的令牌；GitHub 只显示一次，请复制后粘贴到这里。</small></label><label><span>新仓库名称</span><input v-model.trim="newRepositoryNames[source.id]" type="text" :placeholder="githubRepositoryName(source.id)" /></label><button class="create-repository-button" :disabled="Boolean(busy)" @click="createGitHubRepository(source)"><Plus :size="15" />创建私有仓库</button><label class="wide"><span>Chronicle 目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div>
-            <div v-else class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>服务器地址</span><input v-model.trim="source.endpoint" type="url" placeholder="https://dav.example.com/remote.php/dav/files/user" /></label><label><span>用户名</span><input v-model.trim="source.username" type="text" autocomplete="username" /></label><label><span>密码</span><input v-model="passwords[source.id]" type="password" autocomplete="current-password" placeholder="留空表示使用已保存密码" /></label><label class="wide"><span>远端目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div>
-            <button class="test-button" :disabled="Boolean(busy) || (source.provider === 'github' ? !source.repository || !source.branch : !source.endpoint || !source.username)" @click="testSource(source)">{{ busy === `test:${source.id}` ? '测试中…' : source.provider === 'github' ? '测试仓库访问' : '测试连接与读写' }}</button>
+            <div class="source-title"><span><Server :size="17" /><b>{{ source.name }}</b><small>{{ source.provider === 'legacy_github' ? 'GitHub 兼容源' : source.provider === 'opendal' ? 'OpenDAL · ' + source.scheme : 'WebDAV 兼容源' }}</small><small v-if="source.id === draft.activeSourceId">当前使用</small></span><button class="icon-danger" :aria-label="`删除 ${source.name}`" :title="`删除 ${source.name}`" @click="removeSource(source)"><Trash2 :size="15" /></button></div>
+            <div v-if="source.provider === 'legacy_github'" class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>仓库</span><input v-model.trim="source.repository" type="text" placeholder="owner/repository" /></label><label><span>分支</span><input v-model.trim="source.branch" type="text" placeholder="main" /></label><label class="wide github-token-field"><span>访问令牌</span><div><input v-model="passwords[source.id]" type="password" autocomplete="current-password" placeholder="粘贴 GitHub 生成的访问令牌" /><button type="button" @click="openGitHubPatPage"><ExternalLink :size="14" />在 GitHub 生成令牌</button></div><small>登录后直接生成带 repo 权限的令牌；GitHub 只显示一次，请复制后粘贴到这里。</small></label><label><span>新仓库名称</span><input v-model.trim="newRepositoryNames[source.id]" type="text" :placeholder="githubRepositoryName(source.id)" /></label><button class="create-repository-button" :disabled="Boolean(busy)" @click="createGitHubRepository(source)"><Plus :size="15" />创建私有仓库</button><label class="wide"><span>Chronicle 目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div>
+            <OpenDalSourceFields v-else-if="source.provider === 'opendal'" :source="source" :secrets="secrets[source.id] ?? (secrets[source.id] = {})" :disabled="Boolean(busy)" /><div v-else class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>服务器地址</span><input v-model.trim="source.endpoint" type="url" placeholder="https://dav.example.com/remote.php/dav/files/user" /></label><label><span>用户名</span><input v-model.trim="source.username" type="text" autocomplete="username" /></label><label><span>密码</span><input v-model="passwords[source.id]" type="password" autocomplete="current-password" placeholder="留空表示使用已保存密码" /></label><label class="wide"><span>远端目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div>
+            <button class="test-button" :disabled="Boolean(busy) || (source.provider === 'legacy_github' ? !source.repository || !source.branch : source.provider === 'opendal' ? false : !source.endpoint || !source.username)" @click="testSource(source)">{{ busy === `test:${source.id}` ? '测试中…' : source.provider === 'legacy_github' ? '测试仓库访问' : source.provider === 'opendal' ? '测试读写、列举与清理' : '测试连接与读写' }}</button><small v-if="requiresTest(source)" class="source-test-hint">配置尚未测试或已更改，保存前请重新测试。</small>
           </article>
           <fieldset><legend>请求控制</legend><label><span>元数据并发</span><input v-model.number="draft.maxConcurrentMetadataReads" type="number" min="1" max="4" /></label><label><span>传输并发</span><input v-model.number="draft.maxConcurrentTransfers" type="number" min="1" max="4" /></label><label><span>请求间隔（毫秒）</span><input v-model.number="draft.requestDelayMs" type="number" min="0" max="5000" step="50" /></label><label><span>重试次数</span><input v-model.number="draft.retryLimit" type="number" min="1" max="10" /></label></fieldset>
         </section>
@@ -250,6 +297,8 @@ onMounted(() => { closeButton.value?.focus(); if (activeSource.value) void loadP
 </template>
 
 <style scoped>
+.source-toolbar { flex-wrap: wrap; }
+.source-test-hint { display: block; margin-top: 8px; color: var(--text-3); font-size: 11px; }
 .dialog-backdrop{position:fixed;z-index:45;inset:0;display:grid;place-items:center;padding:28px;background:#18181b99;backdrop-filter:blur(3px)}.cloud-center{display:grid;grid-template-rows:72px 44px minmax(0,1fr) 64px;width:min(940px,calc(100vw - 56px));height:min(720px,calc(100vh - 56px));overflow:hidden;background:var(--surface);border:1px solid var(--border-2);border-radius:13px;box-shadow:0 24px 80px #0d24205c}.cloud-center>header{display:grid;grid-template-columns:42px 1fr 38px;align-items:center;gap:11px;padding:0 22px;border-bottom:1px solid var(--border)}.heading-icon{display:grid;place-items:center;width:38px;height:38px;color:var(--primary);background:var(--primary-soft);border-radius:9px}header p,header h2{margin:0}header p{color:var(--text-3);font-size:9px;font-weight:700;letter-spacing:.08em}header h2{margin-top:3px;font-size:18px}header button{display:grid;place-items:center;width:38px;height:38px;background:transparent;border-radius:7px}header button:hover{background:var(--hover)}nav{display:flex;gap:4px;padding:5px 22px 0;border-bottom:1px solid var(--border)}nav button{padding:0 14px;color:var(--text-3);background:transparent;border-bottom:2px solid transparent;font-size:11px;font-weight:650}nav button.active{color:var(--primary-dark);border-color:var(--primary)}main{overflow-y:auto;padding:20px 24px 28px}.message{display:flex;align-items:center;gap:7px;margin:0 0 12px;padding:9px 11px;border-radius:7px;font-size:10px}.message.error{color:#a52e28;background:#fff0ef}.message.success{color:var(--primary-dark);background:var(--primary-soft)}.empty{display:grid;place-items:center;min-height:390px;color:var(--text-3);text-align:center}.empty.compact{min-height:190px}.empty h3{margin:12px 0 0;color:var(--text);font-size:15px}.empty p{margin:7px 0 16px;font-size:10px}.empty button,.source-toolbar>button,.repository-toolbar button,.test-button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:34px;padding:0 10px;color:var(--primary-dark);background:var(--primary-soft);border-radius:7px;font-size:10px;font-weight:650}.repository-toolbar{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:12px}.repository-toolbar>span{display:flex;flex-direction:column;gap:3px}.repository-toolbar b{font-size:13px}.repository-toolbar small{color:var(--text-3);font-size:9px}.repository-toolbar>div{display:flex;gap:7px}.repository-toolbar button.danger{color:#a52e28;background:#fff0ef}.remote-list{overflow:hidden;border:1px solid var(--border);border-radius:9px}.remote-list article{display:grid;grid-template-columns:28px minmax(150px,1fr) 118px auto;align-items:center;gap:10px;min-height:66px;padding:8px 11px}.remote-list article+article{border-top:1px solid var(--border)}.remote-list article.protected{background:#f7f9f8}.config-mark{display:grid;place-items:center;color:var(--text-3)}.remote-copy{display:flex;min-width:0;flex-direction:column;gap:4px}.remote-copy b{overflow:hidden;font-size:11px;text-overflow:ellipsis;white-space:nowrap}.remote-copy small{color:var(--text-3);font-size:9px}.remote-list select,.source-toolbar select,.fields input,fieldset input{height:34px;padding:0 9px;color:#263431;background:#f8faf9;border:1px solid var(--border-2);border-radius:6px;font-size:10px}.item-actions{display:flex;gap:5px}.item-actions button{display:inline-flex;align-items:center;gap:4px;min-height:31px;padding:0 7px;color:var(--text-2);background:#f2f6f4;border-radius:6px;font-size:9px}.item-actions span{color:var(--text-3);font-size:9px}.list-empty,.loading{display:grid;place-items:center;min-height:150px;color:var(--text-3);font-size:10px}.source-toolbar{display:flex;align-items:end;gap:8px;margin-bottom:14px}.source-toolbar label{display:flex;min-width:240px;flex-direction:column;gap:5px}.source-toolbar label span,.fields label span,fieldset label span{color:var(--text-2);font-size:9px;font-weight:650}.source-toolbar button:disabled{color:var(--text-3);background:#f1f3f2;cursor:default}.source-card{margin-bottom:12px;padding:14px;border:1px solid var(--border);border-radius:9px}.source-card.active{border-color:#9fcfc5;box-shadow:0 0 0 2px #0d8b7d14}.source-title{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}.source-title>span{display:flex;align-items:center;gap:7px}.source-title b{font-size:11px}.source-title small{padding:3px 6px;color:var(--primary-dark);background:var(--primary-soft);border-radius:10px;font-size:8px}.icon-danger{display:grid;place-items:center;width:32px;height:32px;color:#a52e28;background:transparent;border-radius:6px}.icon-danger:hover{background:#fff0ef}.fields{display:grid;grid-template-columns:1fr 1.5fr 1fr 1fr;gap:10px}.fields label{display:flex;flex-direction:column;gap:5px}.fields label.wide{grid-column:1/-1}.test-button{margin-top:12px}.sources-page fieldset{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:16px;padding:14px;border:1px solid var(--border);border-radius:9px}.sources-page legend{padding:0 6px;color:var(--text-2);font-size:10px;font-weight:700}.sources-page fieldset label{display:flex;flex-direction:column;gap:5px}.cloud-center>footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:0 22px;border-top:1px solid var(--border)}footer button{min-height:36px;padding:0 13px;border-radius:7px;font-size:10px;font-weight:650}.cancel{background:transparent}.cancel:hover{background:var(--hover)}.save{color:#fff;background:var(--primary)}button:disabled{cursor:default;opacity:.55}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--primary);outline-offset:2px}@media(max-width:900px){.fields{grid-template-columns:1fr 1fr}.sources-page fieldset{grid-template-columns:1fr 1fr}.remote-list article{grid-template-columns:28px minmax(120px,1fr) 110px}.item-actions{grid-column:2/-1}.cloud-center{width:calc(100vw - 28px);height:calc(100vh - 28px)}.dialog-backdrop{padding:14px}}
 .repository-toolbar,.repository-toolbar + .loading,.remote-list{display:none}.repository-page{min-width:0}.repository-heading{display:flex;align-items:start;justify-content:space-between;gap:20px}.repository-eyebrow{margin:0;color:var(--text-3);font-size:10px;font-weight:700;letter-spacing:.07em}.repository-heading h3{margin:5px 0 0;color:var(--text);font-size:18px;line-height:1.2}.repository-description{margin:7px 0 0;color:var(--text-3);font-size:10px}.repository-heading>button{display:inline-flex;flex:0 0 auto;align-items:center;justify-content:center;gap:6px;min-height:34px;padding:0 10px;color:var(--primary-dark);background:var(--primary-soft);border-radius:7px;font-size:10px;font-weight:650}.repository-summary{display:flex;flex-wrap:wrap;gap:7px;margin:15px 0 12px}.repository-summary span{padding:4px 7px;color:var(--text-2);background:#f2f6f4;border-radius:12px;font-size:9px;font-variant-numeric:tabular-nums}.repository-summary span:last-child{color:var(--primary-dark);background:var(--primary-soft)}.repository-controls{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.archive-search{display:flex;align-items:center;gap:8px;min-width:0;width:min(360px,100%);height:36px;padding:0 10px;color:var(--text-3);background:#f8faf9;border:1px solid var(--border-2);border-radius:7px}.archive-search:focus-within{border-color:var(--primary);box-shadow:0 0 0 2px #0d8b7d18}.archive-search input{min-width:0;flex:1;height:100%;color:var(--text);background:transparent;border:0;font-size:10px}.archive-search input:focus{outline:0}.repository-controls .danger{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:34px;padding:0 10px;color:#a52e28;background:#fff0ef;border-radius:7px;font-size:10px;font-weight:650}.remote-table-wrap{position:relative;overflow:visible;border:1px solid var(--border);border-radius:9px}.remote-table{width:100%;min-width:0;border-collapse:collapse;table-layout:fixed}.remote-table tbody tr:focus-within{position:relative;z-index:1}.remote-table th{height:34px;padding:0 9px;color:var(--text-3);border-bottom:1px solid var(--border);font-size:9px;font-weight:700;text-align:left}.remote-table td{height:58px;padding:7px 9px;border-bottom:1px solid var(--border);color:var(--text-2);font-size:10px;vertical-align:middle}.remote-table tbody tr:last-child td{border-bottom:0}.remote-table tbody tr:hover{background:#f8fbfa}.remote-table .selection-column{width:32px;padding-right:0;text-align:center}.remote-table .actions-column{width:168px}.remote-table .archive-name{width:25%;min-width:180px}.archive-name b{display:block;overflow:hidden;color:var(--text);font-size:11px;text-overflow:ellipsis;white-space:nowrap}.remote-table :deep(.themed-select){width:110px}.timeline-count{display:block;color:var(--text-2);font-variant-numeric:tabular-nums}.remote-table td small{display:block;margin-top:3px;color:var(--text-3);font-size:9px;font-variant-numeric:tabular-nums}.updated-at{color:var(--text-3)!important;font-variant-numeric:tabular-nums;white-space:nowrap}.remote-table .item-actions{display:flex;align-items:center;gap:5px}.remote-table .item-actions button{display:inline-flex;align-items:center;justify-content:center;gap:4px;min-width:30px;min-height:30px;padding:0 7px;color:var(--text-2);background:#f2f6f4;border-radius:6px;font-size:9px}.remote-table .item-actions button:first-child{color:var(--primary-dark);background:var(--primary-soft)}.remote-table .item-actions button:hover{background:var(--hover)}.remote-empty{border:1px dashed var(--border-2);border-radius:9px}.sr-only{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}@media(max-width:900px){.repository-heading{align-items:start}.repository-controls{align-items:stretch;flex-direction:column}.archive-search{width:100%}.repository-controls .danger{align-self:flex-end}}
 .github-token-field>div{display:flex;gap:8px}.github-token-field input{min-width:0;flex:1}.github-token-field button,.create-repository-button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:34px;padding:0 10px;color:var(--primary-dark);background:var(--primary-soft);border:1px solid transparent;border-radius:6px;font-size:10px;font-weight:650;white-space:nowrap}.github-token-field small{color:var(--text-3);font-size:9px;line-height:1.4}.create-repository-button{align-self:end}.github-token-field button:hover,.create-repository-button:hover{background:var(--hover);border-color:var(--border-2)}.github-token-field button:focus-visible{outline:2px solid var(--primary);outline-offset:2px}@media(max-width:900px){.github-token-field>div{align-items:stretch;flex-direction:column}}

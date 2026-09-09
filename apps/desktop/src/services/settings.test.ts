@@ -27,7 +27,7 @@ describe("shortcutFromKeyboardEvent", () => {
 
 describe("cloudLibraryIndicator", () => {
   const source = {
-    id: "github-1", name: "GitHub 资料库", provider: "github" as const, endpoint: "", username: "",
+    id: "github-1", name: "GitHub 资料库", provider: "legacy_github" as const, endpoint: "", username: "",
     remotePath: "/Chronicle", credentialRef: "chronicle-github:github-1", repository: "owner/chronicle", branch: "main",
   };
   const base: Omit<CloudSettings, "enabled" | "sources"> = {

@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { ArchiveSyncMode } from "../domain";
-import type { CloudSource } from "./settings";
+import { saveCloudSettings, type CloudSettings, type CloudSource } from "./settings";
 
 export type RemoteItem = {
   id: string;
@@ -20,6 +20,10 @@ export type CreatedGitHubRepository = { repository: string; branch: string };
 function desktopOnly(): never { throw new Error("云同步仅在 Chronicle 桌面端可用"); }
 
 export const cloudRepository = {
+  saveOpenDalCredential(source: CloudSource, secrets: Record<string, string>): Promise<void> {
+    if (!isTauri()) desktopOnly();
+    return invoke("save_opendal_credential", { source, secrets });
+  },
   saveCredential(source: CloudSource, password: string): Promise<void> {
     if (!isTauri()) desktopOnly();
     return invoke("save_cloud_credential", { sourceId: source.id, credentialRef: source.credentialRef, password, provider: source.provider });
@@ -57,3 +61,16 @@ export const cloudRepository = {
     return invoke("cloud_set_entry_sync_mode", { sourceId, entryId, syncMode });
   },
 };
+
+/** Do not enable sources until every credential write has succeeded. */
+export async function saveCloudConfiguration(settings: CloudSettings, credentials: {
+  source: CloudSource;
+  password?: string;
+  secrets?: Record<string, string>;
+}[]): Promise<void> {
+  for (const value of credentials) {
+    if (value.source.provider === "opendal") await cloudRepository.saveOpenDalCredential(value.source, value.secrets ?? {});
+    else if (value.password) await cloudRepository.saveCredential(value.source, value.password);
+  }
+  await saveCloudSettings(settings);
+}

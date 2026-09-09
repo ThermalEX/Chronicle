@@ -1,10 +1,11 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { reactive } from "vue";
 import { normalizeAppearance, type ColorMode, type ColorTheme } from "./appearance";
+import { publicConfigKeys } from "./opendal";
 
 export type CloseBehavior = "ask" | "tray" | "exit";
 export type BackupSchedule = "off" | "15m" | "1h" | "6h" | "daily";
-export type CloudProvider = "webdav" | "github";
+export type CloudProvider = "legacy_webdav" | "legacy_github" | "opendal";
 
 export interface AppSettings {
   colorTheme: ColorTheme;
@@ -33,6 +34,9 @@ export interface CloudSource {
   credentialRef: string;
   repository?: string;
   branch?: string;
+  scheme?: string;
+  config?: Record<string, string>;
+  secretKeys?: string[];
 }
 
 export interface CloudSettings {
@@ -56,7 +60,7 @@ const APP_SETTINGS_KEY = "chronicle.app-settings.v2";
 const CLOUD_SETTINGS_KEY = "chronicle.cloud-settings.v2";
 
 export interface SettingsDocument {
-  formatVersion: 2;
+  formatVersion: 3;
   app: AppSettings;
   cloud: CloudSettings;
 }
@@ -94,16 +98,24 @@ type LegacyCloudSettings = Partial<CloudSettings> & {
   remotePath?: string;
 };
 
-function normalizedCloud(value?: LegacyCloudSettings): CloudSettings {
+export function normalizedCloud(value?: LegacyCloudSettings): CloudSettings {
   const raw = value ?? {};
-  let sources = Array.isArray(raw.sources) ? raw.sources.map((source) => ({ ...source })) : [];
+  let sources = Array.isArray(raw.sources) ? raw.sources.map((source) => {
+    const provider = String(source.provider);
+    return {
+      ...source,
+      provider: (provider === "github" ? "legacy_github" : provider === "webdav" ? "legacy_webdav" : provider) as CloudProvider,
+      ...(source.config ? { config: { ...source.config } } : {}),
+      ...(source.secretKeys ? { secretKeys: [...source.secretKeys] } : {}),
+    };
+  }) : [];
   let activeSourceId = raw.activeSourceId ?? null;
   if (!sources.length && raw.endpoint) {
     const id = crypto.randomUUID();
     sources = [{
       id,
       name: "WebDAV",
-      provider: "webdav",
+      provider: "legacy_webdav",
       endpoint: raw.endpoint,
       username: raw.username ?? "",
       remotePath: raw.remotePath || "/Chronicle",
@@ -112,13 +124,14 @@ function normalizedCloud(value?: LegacyCloudSettings): CloudSettings {
     activeSourceId = id;
   }
   if (!sources.some((source) => source.id === activeSourceId)) activeSourceId = sources[0]?.id ?? null;
+  const requestedDelay = Number(raw.requestDelayMs ?? 150);
   return {
     enabled: Boolean(raw.enabled && sources.length),
     activeSourceId,
     sources,
     maxConcurrentMetadataReads: Math.max(1, Math.min(4, Number(raw.maxConcurrentMetadataReads) || 2)),
     maxConcurrentTransfers: Math.max(1, Math.min(4, Number(raw.maxConcurrentTransfers) || 2)),
-    requestDelayMs: Math.max(0, Math.min(5000, Number(raw.requestDelayMs) || 150)),
+    requestDelayMs: Math.max(0, Math.min(5000, Number.isFinite(requestedDelay) ? requestedDelay : 150)),
     retryLimit: Math.max(1, Math.min(10, Number(raw.retryLimit) || 5)),
   };
 }
@@ -137,7 +150,7 @@ export const cloudSettings = reactive<CloudSettings>(normalizedCloud());
 
 function settingsDocument(): SettingsDocument {
   return {
-    formatVersion: 2,
+    formatVersion: 3,
     app: { ...appSettings },
     cloud: { ...cloudSettings, sources: cloudSettings.sources.map((source) => ({ ...source })) },
   };
@@ -148,7 +161,7 @@ export async function initializeSettings(): Promise<void> {
     const saved = await invoke<Partial<SettingsDocument> & { cloud?: LegacyCloudSettings }>("load_settings");
     Object.assign(appSettings, defaultAppSettings, saved.app ?? {}, normalizeAppearance(saved.app ?? {}));
     Object.assign(cloudSettings, normalizedCloud(saved.cloud));
-    if (saved.formatVersion !== 2) await persistSettings();
+    if (saved.formatVersion !== 3) await persistSettings();
     return;
   }
   const savedApp = loadSettings(APP_SETTINGS_KEY, defaultAppSettings);
@@ -171,8 +184,18 @@ export async function saveAppSettings(value: AppSettings): Promise<void> {
 }
 
 export async function saveCloudSettings(value: CloudSettings): Promise<void> {
-  Object.assign(cloudSettings, normalizedCloud(value));
-  await persistSettings();
+  const normalized = normalizedCloud(value);
+  for (const source of normalized.sources) {
+    if (source.provider === "opendal" && Object.keys(source.config ?? {}).some((key) => !publicConfigKeys.includes(key) || source.secretKeys?.includes(key))) {
+      throw new Error("机密值不能保存在公开设置中");
+    }
+  }
+  if (isTauri()) {
+    await invoke("save_settings", { settings: { formatVersion: 3, app: { ...appSettings }, cloud: normalized } });
+  } else {
+    localStorage.setItem(CLOUD_SETTINGS_KEY, JSON.stringify(normalized));
+  }
+  Object.assign(cloudSettings, normalized);
 }
 
 export function resetAppSettings(): void {

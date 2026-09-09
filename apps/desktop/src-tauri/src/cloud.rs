@@ -8,8 +8,8 @@ use std::{
 
 use chronicle_core::SyncMode;
 use chronicle_sync::{
-    GitHubChange, GitHubClient, GitHubError, GitHubSource, RequestPolicy, WebDavClient,
-    WebDavError, WebDavSource,
+    GitHubChange, GitHubClient, GitHubError, GitHubSource, OpenDalSource, RemoteStore,
+    RequestPolicy, WebDavClient, WebDavError, WebDavSource,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -22,9 +22,10 @@ use crate::AppState;
 
 const CREDENTIAL_SERVICE: &str = "Chronicle WebDAV";
 const GITHUB_CREDENTIAL_SERVICE: &str = "Chronicle GitHub";
+const OPENDAL_CREDENTIAL_SERVICE: &str = "Chronicle OpenDAL";
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CloudSourceInput {
     id: String,
     name: String,
@@ -37,6 +38,12 @@ pub struct CloudSourceInput {
     repository: String,
     #[serde(default = "default_branch")]
     branch: String,
+    #[serde(default)]
+    scheme: String,
+    #[serde(default)]
+    config: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    secret_keys: Vec<String>,
 }
 
 fn default_branch() -> String {
@@ -167,17 +174,26 @@ fn source_from_settings(settings: &Value, source_id: &str) -> Result<CloudSource
         })
         .cloned()
         .ok_or_else(|| "找不到云同步源".to_owned())
-        .and_then(|source| serde_json::from_value(source).map_err(|error| error.to_string()))
+        .and_then(|mut source| {
+            match source["provider"].as_str() {
+                Some("github") => source["provider"] = Value::from("legacy_github"),
+                Some("webdav") => source["provider"] = Value::from("legacy_webdav"),
+                _ => {}
+            }
+            serde_json::from_value(source).map_err(|_| "同步源配置无效".into())
+        })
 }
 
-fn credential(source: &CloudSourceInput) -> Result<String, String> {
+fn raw_credential(source: &CloudSourceInput) -> Result<String, String> {
     let account = if source.credential_ref.is_empty() {
         &source.id
     } else {
         &source.credential_ref
     };
-    let service = if source.provider == "github" {
+    let service = if source.provider == "legacy_github" {
         GITHUB_CREDENTIAL_SERVICE
+    } else if source.provider == "opendal" {
+        OPENDAL_CREDENTIAL_SERVICE
     } else {
         CREDENTIAL_SERVICE
     };
@@ -208,8 +224,23 @@ fn client(
     source: &CloudSourceInput,
     password: String,
     request_policy: RequestPolicy,
-) -> Result<WebDavClient, String> {
-    if source.provider != "webdav" {
+) -> Result<RemoteStore, String> {
+    if source.provider == "opendal" {
+        let secrets = serde_json::from_str(&password)
+            .map_err(|_| "OpenDAL 机密配置必须是键值对象".to_owned())?;
+        return RemoteStore::opendal(
+            OpenDalSource {
+                scheme: source.scheme.clone(),
+                root: source.remote_path.clone(),
+                config: source.config.clone(),
+                secret_keys: source.secret_keys.clone(),
+            },
+            secrets,
+            request_policy,
+        )
+        .map_err(|error| error.to_string());
+    }
+    if source.provider != "legacy_webdav" {
         return Err("GitHub 同步接口尚未启用".into());
     }
     WebDavClient::new(
@@ -221,10 +252,12 @@ fn client(
         },
         request_policy,
     )
+    .map(RemoteStore::LegacyWebDav)
     .map_err(|error| error.to_string())
 }
 
 fn checked_folder(value: &str) -> Result<&str, String> {
+    chronicle_sync::validate_relative_path(value).map_err(|error| error.to_string())?;
     let mut components = Path::new(value).components();
     match (components.next(), components.next()) {
         (Some(Component::Normal(_)), None) => Ok(value),
@@ -333,7 +366,7 @@ fn configured_source(
 fn configured_client(
     state: &State<'_, AppState>,
     source_id: &str,
-) -> Result<(WebDavClient, CloudSourceInput, PathBuf), String> {
+) -> Result<(RemoteStore, CloudSourceInput, PathBuf), String> {
     let (source, root, request_policy) = configured_source(state, source_id)?;
     let client = client(&source, credential(&source)?, request_policy)?;
     Ok((client, source, root))
@@ -344,7 +377,7 @@ fn configured_github_client(
     source_id: &str,
 ) -> Result<(GitHubClient, CloudSourceInput, PathBuf), String> {
     let (source, root, request_policy) = configured_source(state, source_id)?;
-    if source.provider != "github" {
+    if source.provider != "legacy_github" {
         return Err("该同步源不是 GitHub 仓库".into());
     }
     let client = github_client(&source, credential(&source)?, request_policy)?;
@@ -363,8 +396,16 @@ pub async fn save_cloud_credential(
     } else {
         credential_ref.as_str()
     };
-    let service = if provider == "github" {
+    if provider == "opendal" {
+        return Err("OpenDAL 凭据必须测试后保存".into());
+    }
+    if !matches!(provider.as_str(), "legacy_github" | "legacy_webdav") {
+        return Err("不支持的同步源类型".into());
+    }
+    let service = if provider == "legacy_github" {
         GITHUB_CREDENTIAL_SERVICE
+    } else if provider == "opendal" {
+        OPENDAL_CREDENTIAL_SERVICE
     } else {
         CREDENTIAL_SERVICE
     };
@@ -380,23 +421,202 @@ pub async fn save_cloud_credential(
 
 #[tauri::command(async)]
 pub async fn test_cloud_source(source: CloudSourceInput, password: String) -> Result<(), String> {
-    let password = if password.is_empty() {
+    if source.provider == "opendal" {
+        tested_sources()
+            .lock()
+            .map_err(|_| storage_error())?
+            .remove(&source.id);
+    }
+    let password = if source.provider == "opendal" {
+        let patch = if password.is_empty() {
+            Default::default()
+        } else {
+            serde_json::from_str(&password).map_err(|_| "机密配置必须是键值对象".to_owned())?
+        };
+        serde_json::to_string(&merge_secret_patch(&source, patch)?)
+            .map_err(|_| "机密配置无效".to_owned())?
+    } else if password.is_empty() {
         credential(&source)?
     } else {
         password
     };
-    if source.provider == "github" {
+    if source.provider == "legacy_github" {
         github_client(&source, password, RequestPolicy::default())?
             .test_access()
             .await
             .map_err(|error| error.to_string())
     } else {
-        let test_client = client(&source, password, RequestPolicy::default())?;
+        let test_client = client(&source, password.clone(), RequestPolicy::default())?;
         test_client
             .test_capabilities()
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        if source.provider == "opendal" {
+            tested_sources()
+                .lock()
+                .map_err(|_| storage_error())?
+                .insert(
+                    source.id.clone(),
+                    source_fingerprint(
+                        &source,
+                        &serde_json::from_str(&password).map_err(|_| "机密配置无效".to_owned())?,
+                    )?,
+                );
+        }
+        Ok(())
     }
+}
+
+fn tested_sources() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static TESTED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, String>>,
+    > = std::sync::OnceLock::new();
+    TESTED.get_or_init(Default::default)
+}
+
+#[derive(Serialize, Deserialize)]
+struct TestedCredential {
+    secrets: std::collections::HashMap<String, String>,
+    fingerprint: String,
+}
+
+fn source_fingerprint(
+    source: &CloudSourceInput,
+    secrets: &std::collections::HashMap<String, String>,
+) -> Result<String, String> {
+    let mut canonical = serde_json::to_value(source).map_err(|_| "配置无效".to_owned())?;
+    // Order of advanced fields is presentation only; values and target remain bound.
+    let mut keys = source.secret_keys.clone();
+    keys.sort();
+    canonical["secretKeys"] = serde_json::json!(keys);
+    let secrets = serde_json::to_value(secrets).map_err(|_| "机密配置无效".to_owned())?;
+    let mut hash = Sha256::new();
+    hash.update(serde_json::to_vec(&(canonical, secrets)).map_err(|_| "配置无效".to_owned())?);
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn credential(source: &CloudSourceInput) -> Result<String, String> {
+    let raw = raw_credential(source)?;
+    if source.provider != "opendal" {
+        return Ok(raw);
+    }
+    let bundle: TestedCredential =
+        serde_json::from_str(&raw).map_err(|_| "请重新测试并保存 OpenDAL 凭据".to_owned())?;
+    verify_bundle(source, &bundle)?;
+    serde_json::to_string(&bundle.secrets).map_err(|_| "机密配置无效".to_owned())
+}
+
+fn verify_bundle(source: &CloudSourceInput, bundle: &TestedCredential) -> Result<(), String> {
+    if source_fingerprint(source, &bundle.secrets)? != bundle.fingerprint {
+        return Err("配置已更改，请重新测试并保存同步源".into());
+    }
+    Ok(())
+}
+
+fn merge_secret_patch(
+    source: &CloudSourceInput,
+    patch: std::collections::HashMap<String, String>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    if source.provider != "opendal" {
+        return Err("该同步源不是 OpenDAL".into());
+    }
+    let mut secrets = match raw_credential(source) {
+        Ok(raw) => {
+            serde_json::from_str::<TestedCredential>(&raw)
+                .map_err(|_| "已保存的机密配置无效，请重新创建同步源".to_owned())?
+                .secrets
+        }
+        Err(_) => Default::default(),
+    };
+    if patch.keys().any(|key| !source.secret_keys.contains(key)) {
+        return Err("机密字段未在同步源中声明".into());
+    }
+    for (key, value) in patch {
+        if !value.is_empty() {
+            secrets.insert(key, value);
+        }
+    }
+    secrets.retain(|key, _| source.secret_keys.contains(key));
+    Ok(secrets)
+}
+
+#[tauri::command(async)]
+pub async fn save_opendal_credential(
+    source: CloudSourceInput,
+    secrets: std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    let secrets = merge_secret_patch(&source, secrets)?;
+    let fingerprint = source_fingerprint(&source, &secrets)?;
+    if tested_sources()
+        .lock()
+        .map_err(|_| storage_error())?
+        .get(&source.id)
+        != Some(&fingerprint)
+    {
+        // A previously verified, unchanged bundle remains valid across app restarts.
+        let valid_saved = raw_credential(&source)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<TestedCredential>(&raw).ok())
+            .is_some_and(|saved| {
+                saved.fingerprint == fingerprint && verify_bundle(&source, &saved).is_ok()
+            });
+        if !valid_saved {
+            return Err("请先测试此配置的读写、列举和清理能力".into());
+        }
+    }
+    let bundle = TestedCredential {
+        secrets,
+        fingerprint,
+    };
+    let account = if source.credential_ref.is_empty() {
+        &source.id
+    } else {
+        &source.credential_ref
+    };
+    keyring::Entry::new(OPENDAL_CREDENTIAL_SERVICE, account)
+        .map_err(|_| "无法访问系统凭据库".to_owned())?
+        .set_password(&serde_json::to_string(&bundle).map_err(|_| "机密配置无效".to_owned())?)
+        .map_err(|_| "无法保存系统凭据".to_owned())
+}
+
+pub fn validate_settings(settings: &Value, _previous: &Value) -> Result<(), String> {
+    let sources = settings.pointer("/cloud/sources").and_then(Value::as_array);
+    let enabled = settings.pointer("/cloud/enabled").and_then(Value::as_bool) == Some(true);
+    let active = settings
+        .pointer("/cloud/activeSourceId")
+        .and_then(Value::as_str);
+    let mut ids = std::collections::HashSet::new();
+    for value in sources.into_iter().flatten() {
+        let source: CloudSourceInput =
+            serde_json::from_value(value.clone()).map_err(|_| "同步源配置无效".to_owned())?;
+        if !ids.insert(source.id.clone()) || source.id.is_empty() {
+            return Err("同步源标识重复或为空".into());
+        }
+        if !matches!(
+            source.provider.as_str(),
+            "legacy_github" | "legacy_webdav" | "opendal"
+        ) {
+            return Err("不支持的同步源类型".into());
+        }
+        if source.provider != "opendal" {
+            continue;
+        }
+        if !chronicle_sync::OPEN_DAL_SCHEMES.contains(&source.scheme.as_str())
+            || source.config.keys().any(|key| {
+                !chronicle_sync::PUBLIC_CONFIG_KEYS.contains(&key.as_str())
+                    || source.secret_keys.contains(key)
+            })
+        {
+            return Err("不支持的服务，或公开配置包含机密字段".into());
+        }
+        if enabled && active == Some(source.id.as_str()) {
+            credential(&source)?;
+        }
+    }
+    if enabled && active.is_none_or(|id| !ids.contains(id)) {
+        return Err("请选择有效的同步源".into());
+    }
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -405,7 +625,7 @@ pub async fn create_github_repository(
     repository_name: String,
     password: String,
 ) -> Result<CreatedGitHubRepositoryDto, String> {
-    if source.provider != "github" {
+    if source.provider != "legacy_github" {
         return Err("该同步源不是 GitHub 仓库".into());
     }
     let password = if password.is_empty() {
@@ -432,7 +652,7 @@ pub async fn cloud_preview(
     source_id: String,
 ) -> Result<CloudPreviewDto, String> {
     let (source, _, _) = configured_source(&state, &source_id)?;
-    if source.provider == "github" {
+    if source.provider == "legacy_github" {
         let (client, source, root) = configured_github_client(&state, &source_id)?;
         return github_preview(&client, source, &root).await;
     }
@@ -487,7 +707,7 @@ pub async fn cloud_preview(
     })
 }
 
-async fn ensure_remote_layout(client: &WebDavClient) -> Result<(), String> {
+async fn ensure_remote_layout(client: &RemoteStore) -> Result<(), String> {
     for path in ["", "archives"] {
         client
             .ensure_collection(path)
@@ -509,7 +729,7 @@ fn updated_library(root: &Path) -> Result<Value, String> {
     Ok(library)
 }
 
-async fn ensure_remote_library(client: &WebDavClient, root: &Path) -> Result<Value, String> {
+async fn ensure_remote_library(client: &RemoteStore, root: &Path) -> Result<Value, String> {
     match client.get_json("library.json").await {
         Ok(value) => Ok(value),
         Err(WebDavError::NotFound(_)) => {
@@ -739,6 +959,7 @@ async fn github_overwrite_download(
             .get("archive_name")
             .and_then(Value::as_str)
             .ok_or_else(|| "远端时间线缺少压缩包名称".to_owned())?;
+        checked_folder(archive_name)?;
         let expected_hash = snapshot
             .get("object_hash")
             .and_then(Value::as_str)
@@ -831,6 +1052,7 @@ async fn github_merge_remote_snapshots(
             .get("archive_name")
             .and_then(Value::as_str)
             .ok_or_else(|| "远端时间线缺少压缩包名称".to_owned())?;
+        checked_folder(archive_name)?;
         let expected_hash = snapshot
             .get("object_hash")
             .and_then(Value::as_str)
@@ -1084,6 +1306,7 @@ async fn github_delete_entries(client: &GitHubClient, entry_ids: &[String]) -> R
                 .get("archive_name")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "远端时间线缺少压缩包名称".to_owned())?;
+            checked_folder(archive_name)?;
             changes.push(GitHubChange {
                 path: format!("archives/{folder}/{archive_name}"),
                 contents: None,
@@ -1207,7 +1430,7 @@ fn merge_catalog_entry(
 }
 
 async fn upload_catalog_and_library(
-    client: &WebDavClient,
+    client: &RemoteStore,
     root: &Path,
     entry_id: &str,
 ) -> Result<(), String> {
@@ -1228,7 +1451,7 @@ async fn upload_catalog_and_library(
 }
 
 async fn upload_catalog_and_library_value(
-    client: &WebDavClient,
+    client: &RemoteStore,
     root: &Path,
     catalog: &Value,
 ) -> Result<(), String> {
@@ -1244,7 +1467,7 @@ async fn upload_catalog_and_library_value(
 }
 
 async fn upload_missing_webdav_snapshots(
-    client: &WebDavClient,
+    client: &RemoteStore,
     root: &Path,
     source_id: &str,
     entry_id: &str,
@@ -1281,6 +1504,19 @@ async fn upload_missing_webdav_snapshots(
     let local_dir = root.join("archives").join(folder);
     let upload_result: Result<(), String> = async {
         for archive_name in &archives {
+            checked_folder(archive_name)?;
+            if client.is_opendal() {
+                match client.get_bytes(&format!("{remote_folder}/{archive_name}")).await {
+                    Ok(existing) => {
+                        if format!("{:x}", Sha256::digest(&existing)) != hash_file(&local_dir.join(archive_name))? {
+                            return Err("远端已有同名快照且内容不同，未覆盖已有快照".into());
+                        }
+                        continue;
+                    }
+                    Err(WebDavError::NotFound(_)) => {}
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
             client
                 .upload_file(&format!("{remote_folder}/{archive_name}"), &local_dir.join(archive_name))
                 .await
@@ -1295,11 +1531,7 @@ async fn upload_missing_webdav_snapshots(
     }
     .await;
     if let Err(error) = upload_result {
-        for archive_name in &archives {
-            let _ = client
-                .delete(&format!("{remote_folder}/{archive_name}"))
-                .await;
-        }
+        // Keep immutable objects: a previous catalog or another device may reference them.
         return Err(error);
     }
     save_sync_state(
@@ -1317,7 +1549,7 @@ pub async fn cloud_overwrite_upload(
     entry_id: String,
 ) -> Result<(), String> {
     let (configured_source, root, request_policy) = configured_source(&state, &source_id)?;
-    if configured_source.provider == "github" {
+    if configured_source.provider == "legacy_github" {
         let client = github_client(
             &configured_source,
             credential(&configured_source)?,
@@ -1326,6 +1558,24 @@ pub async fn cloud_overwrite_upload(
         return github_overwrite_upload(&client, &root, &source_id, &entry_id).await;
     }
     let (client, _, root) = configured_client(&state, &source_id)?;
+    if client.is_opendal() {
+        let remote_catalog = match client.get_json::<Value>("catalog.json").await {
+            Ok(value) => Some(value),
+            Err(WebDavError::NotFound(_)) => None,
+            Err(error) => return Err(error.to_string()),
+        };
+        // Immutable objects remain intact; catalog publication selects the replacement history.
+        return upload_missing_webdav_snapshots(
+            &client,
+            &root,
+            &source_id,
+            &entry_id,
+            remote_catalog,
+            &[],
+            false,
+        )
+        .await;
+    }
     ensure_remote_layout(&client).await?;
     let catalog: Catalog = read_json(&root.join("catalog.json"))?;
     let entry = catalog
@@ -1411,7 +1661,7 @@ pub async fn cloud_overwrite_download(
     entry_id: String,
 ) -> Result<(), String> {
     let (configured_source, root, request_policy) = configured_source(&state, &source_id)?;
-    if configured_source.provider == "github" {
+    if configured_source.provider == "legacy_github" {
         let client = github_client(
             &configured_source,
             credential(&configured_source)?,
@@ -1445,6 +1695,7 @@ pub async fn cloud_overwrite_download(
                 .get("archive_name")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "远端时间线缺少压缩包名称".to_owned())?;
+            checked_folder(archive_name)?;
             let expected_hash = snapshot
                 .get("object_hash")
                 .and_then(Value::as_str)
@@ -1509,7 +1760,7 @@ pub async fn cloud_overwrite_download(
 }
 
 async fn merge_remote_snapshots(
-    client: &WebDavClient,
+    client: &RemoteStore,
     root: &Path,
     local_entry: &CatalogEntry,
     remote_entry: &CatalogEntry,
@@ -1537,6 +1788,7 @@ async fn merge_remote_snapshots(
             .get("archive_name")
             .and_then(Value::as_str)
             .ok_or_else(|| "远端时间线缺少压缩包名称".to_owned())?;
+        checked_folder(archive_name)?;
         let expected_hash = snapshot
             .get("object_hash")
             .and_then(Value::as_str)
@@ -1597,7 +1849,7 @@ pub async fn cloud_sync_entry(
     entry_id: String,
 ) -> Result<SyncResultDto, String> {
     let (configured_source, root, request_policy) = configured_source(&state, &source_id)?;
-    if configured_source.provider == "github" {
+    if configured_source.provider == "legacy_github" {
         let client = github_client(
             &configured_source,
             credential(&configured_source)?,
@@ -1729,7 +1981,7 @@ pub async fn cloud_delete_entries(
     entry_ids: Vec<String>,
 ) -> Result<(), String> {
     let (configured_source, _, request_policy) = configured_source(&state, &source_id)?;
-    if configured_source.provider == "github" {
+    if configured_source.provider == "legacy_github" {
         let client = github_client(
             &configured_source,
             credential(&configured_source)?,
@@ -1745,6 +1997,38 @@ pub async fn cloud_delete_entries(
     let catalog: Catalog =
         serde_json::from_value(catalog_value.clone()).map_err(|error| error.to_string())?;
     let deletion_id = Uuid::new_v4().to_string();
+    if client.is_opendal() {
+        // Publish the reference removal first. Failed publication must never destroy archives.
+        let folders: Vec<String> = catalog
+            .entries
+            .iter()
+            .filter(|entry| entry_ids.contains(&entry.id))
+            .map(|entry| checked_folder(&entry.folder).map(|folder| format!("archives/{folder}")))
+            .collect::<Result<_, _>>()?;
+        if let Some(entries) = catalog_value
+            .get_mut("entries")
+            .and_then(Value::as_array_mut)
+        {
+            entries.retain(|entry| {
+                !entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| entry_ids.iter().any(|candidate| candidate == id))
+            });
+        }
+        catalog_value["updated_at_ms"] = Value::from(unix_millis());
+        client
+            .put_json("catalog.json", &catalog_value)
+            .await
+            .map_err(|error| error.to_string())?;
+        for folder in folders {
+            client
+                .delete(&folder)
+                .await
+                .map_err(|error| format!("已移除清单记录，但远端对象清理失败：{error}"))?;
+        }
+        return Ok(());
+    }
     let mut moved = Vec::<(String, String)>::new();
     for entry in catalog
         .entries
@@ -1799,7 +2083,7 @@ pub async fn cloud_set_entry_sync_mode(
         return Err("不支持的同步方式".into());
     }
     let (configured_source, _, request_policy) = configured_source(&state, &source_id)?;
-    if configured_source.provider == "github" {
+    if configured_source.provider == "legacy_github" {
         let client = github_client(
             &configured_source,
             credential(&configured_source)?,
@@ -1857,6 +2141,62 @@ mod tests {
     use serde_json::json;
 
     use super::{merge_catalog_entry, missing_snapshot_archives};
+
+    #[test]
+    fn opendal_verification_binds_secrets_and_target_but_not_map_order() {
+        let mut source: super::CloudSourceInput = serde_json::from_value(json!({
+            "id":"test", "name":"S3", "provider":"opendal", "endpoint":"", "username":"",
+            "remotePath":"/Chronicle", "credentialRef":"test-ref", "scheme":"s3",
+            "config":{"bucket":"test"}, "secretKeys":["secret_access_key","access_key_id"]
+        }))
+        .unwrap();
+        let secrets = std::collections::HashMap::from([
+            ("access_key_id".into(), "id".into()),
+            ("secret_access_key".into(), "secret".into()),
+        ]);
+        let mut bundle = super::TestedCredential {
+            fingerprint: super::source_fingerprint(&source, &secrets).unwrap(),
+            secrets,
+        };
+        source.secret_keys.reverse();
+        assert!(super::verify_bundle(&source, &bundle).is_ok());
+        source.remote_path = "/other".into();
+        assert!(super::verify_bundle(&source, &bundle).is_err());
+        source.remote_path = "/Chronicle".into();
+        bundle
+            .secrets
+            .insert("secret_access_key".into(), "changed".into());
+        assert!(super::verify_bundle(&source, &bundle).is_err());
+    }
+
+    #[test]
+    fn old_source_routing_preserves_credential_branch_and_path() {
+        let settings = json!({"cloud":{"sources":[{
+            "id":"old", "name":"old", "provider":"github", "endpoint":"", "username":"",
+            "repository":"owner/repo", "branch":"custom", "remotePath":"/Existing Root",
+            "credentialRef":"existing-ref"
+        }]}});
+        let source = super::source_from_settings(&settings, "old").unwrap();
+        assert_eq!(source.provider, "legacy_github");
+        assert_eq!(source.branch, "custom");
+        assert_eq!(source.remote_path, "/Existing Root");
+        assert_eq!(source.credential_ref, "existing-ref");
+    }
+
+    #[test]
+    fn rejects_plaintext_secrets_even_for_inactive_sources() {
+        let settings = json!({"cloud":{"enabled":false, "sources":[{
+            "id":"s3", "name":"S3", "provider":"opendal", "endpoint":"", "username":"",
+            "remotePath":"/Chronicle", "credentialRef":"ref", "scheme":"s3",
+            "config":{"secret_access_key":"must-not-save"}
+        }]}});
+        assert!(super::validate_settings(&settings, &json!({})).is_err());
+        assert!(
+            !super::validate_settings(&settings, &json!({}))
+                .unwrap_err()
+                .contains("must-not-save")
+        );
+    }
 
     #[test]
     fn scoped_catalog_upload_does_not_add_unsynced_local_entries() {
