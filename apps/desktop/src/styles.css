@@ -25,6 +25,8 @@
   --border-2: #cbd5d1;
   --danger: #a52e28;
   --danger-soft: #fff0ef;
+  --success: #087a45;
+  --success-soft: #d9f5e5;
   --focus-ring: #397d76;
   --shadow-color: #254b4724;
   --icon: #46625c;
@@ -60,6 +62,8 @@
   --border-2: #485853;
   --danger: #fb7185;
   --danger-soft: #42212a;
+  --success: #4ade80;
+  --success-soft: #153b2a;
   --focus-ring: #9fd5cf;
   --shadow-color: #0000004d;
   --icon: #dcfce7;
@@ -98,7 +102,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 }
 .brand { display: flex; align-items: center; gap: 10px; padding: 0 18px; color: var(--titlebar-text); font-weight: 680; }
 .sync-states { justify-self: center; display: flex; align-items: center; gap: 18px; min-width: 0; }
-.sync-state { display: flex; align-items: center; gap: 8px; color: var(--titlebar-text); font-size: 12px; white-space: nowrap; }
+.sync-state { display: flex; align-items: center; gap: 8px; color: var(--titlebar-text); font-size: 12px; white-space: nowrap; }.sync-state-button { padding: 5px 7px; background: transparent; border-radius: 6px; }.sync-state-button:hover { background: color-mix(in srgb, var(--titlebar-text) 12%, transparent); }.sync-state-button:focus-visible { outline-color: var(--focus-ring); }
 .sync-state i { width: 7px; height: 7px; background: #78c2b8; border-radius: 50%; transform: translateY(1px); }
 .sync-state.unavailable { color: color-mix(in srgb, var(--titlebar-text) 72%, transparent); }
 .sync-state.unavailable i { background: var(--icon-muted); }

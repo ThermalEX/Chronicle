@@ -7,6 +7,7 @@ import {
 } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import CloudSettingsDialog from "./components/CloudCenterDialog.vue";
+import CloudHealthDialog from "./components/CloudHealthDialog.vue";
 import ArchiveMetadata from "./components/ArchiveMetadata.vue";
 import ConfirmDialog from "./components/ConfirmDialog.vue";
 import CreateCategoryDialog from "./components/CreateCategoryDialog.vue";
@@ -16,6 +17,7 @@ import ThemedSelect, { type ThemedSelectOption } from "./components/ThemedSelect
 import type { ArchiveRecord, ArchiveSource, CategoryRecord, CreateArchiveInput, RepositoryInfo, SnapshotProgress, SnapshotRecord, SourceKind } from "./domain";
 import { archiveRepository, isTauriRuntime } from "./services/repository";
 import { cloudRepository } from "./services/cloud";
+import { runCloudHealthCheck, type CloudHealthCheckItem } from "./services/cloudHealthCheck";
 import { diagnosticsRepository } from "./services/diagnostics";
 import { diagnosticFromError, type DiagnosticContext } from "./services/diagnosticsCore";
 import { compareArchiveNames, type ArchiveSortMode } from "./services/archiveSorting";
@@ -96,27 +98,34 @@ const notice = ref<{ type: "success" | "error" | "info"; message: string }>();
 let noticeTimer: number | undefined;
 const automaticSyncTimers = new Map<string, number>();
 const cloudHealth = ref<CloudHealth>({ status: "unchecked" });
+const cloudHealthDialogOpen = ref(false);
+const cloudHealthCheckRunning = ref(false);
+const cloudHealthCheckItems = ref<CloudHealthCheckItem[]>([]);
 const cloudLibrary = computed(() => cloudLibraryIndicator(cloudSettings, cloudHealth.value));
 const cloudStateClass = computed(() => {
   if (!cloudSettings.enabled || !cloudSettings.sources.length) return "unavailable";
   return cloudHealth.value.status === "unavailable" ? "failed" : cloudHealth.value.status;
 });
 
-async function checkCloudSources(): Promise<void> {
+async function checkCloudSources(showDialog = false): Promise<void> {
   if (!cloudSettings.enabled || !cloudSettings.sources.length) {
     cloudHealth.value = { status: "unchecked" };
+    cloudHealthCheckItems.value = [];
+    if (showDialog) cloudHealthDialogOpen.value = true;
     return;
   }
+  if (showDialog) cloudHealthDialogOpen.value = true;
   cloudHealth.value = { status: "checking" };
-  for (const source of cloudSettings.sources) {
-    try {
-      await cloudRepository.test(source, "");
-    } catch (error) {
-      cloudHealth.value = { status: "unavailable", sourceName: source.name, reason: readableError(error) };
-      return;
-    }
-  }
-  cloudHealth.value = { status: "available" };
+  cloudHealthCheckRunning.value = true;
+  const items = await runCloudHealthCheck(cloudSettings.sources, (source) => cloudRepository.test(source, ""), (next) => { cloudHealthCheckItems.value = next; });
+  cloudHealthCheckRunning.value = false;
+  const failed = items.find((item) => item.status === "failed");
+  cloudHealth.value = failed ? { status: "unavailable", sourceName: failed.name, reason: failed.reason } : { status: "available" };
+}
+
+function openCloudHealthDialog(): void {
+  if (!cloudHealthCheckRunning.value) void checkCloudSources(true);
+  else cloudHealthDialogOpen.value = true;
 }
 
 function queueAutomaticUpload(archive?: ArchiveRecord): void {
@@ -834,7 +843,7 @@ onBeforeUnmount(() => {
   <div class="app-shell">
     <header class="titlebar">
       <div class="brand"><span>Chronicle</span></div>
-      <div class="sync-states"><div class="sync-state"><i></i>本地资料库可用</div><div class="sync-state" :class="cloudStateClass" :title="cloudHealth.reason"><i :class="{ pulse: cloudHealth.status === 'checking' }"></i>{{ cloudLibrary.label }}</div></div>
+      <div class="sync-states"><button class="sync-state sync-state-button" title="打开本地资料库" @click="openRepositoryFolder"><i></i>本地资料库可用</button><button class="sync-state sync-state-button" :class="cloudStateClass" :title="cloudHealth.reason || '检测云端资料库'" @click="openCloudHealthDialog"><i :class="{ pulse: cloudHealth.status === 'checking' }"></i>{{ cloudLibrary.label }}</button></div>
       <div class="toolbar"><button class="toolbar-action mode-toggle" :class="{ 'is-dark': appSettings.colorMode === 'dark' }" :aria-label="appSettings.colorMode === 'dark' ? '切换到日间模式' : '切换到夜间模式'" :title="appSettings.colorMode === 'dark' ? '切换到日间模式' : '切换到夜间模式'" :aria-pressed="appSettings.colorMode === 'dark'" @click="toggleColorMode"><Sun v-if="appSettings.colorMode === 'dark'" :size="17" /><Moon v-else :size="17" /></button><button class="toolbar-action" aria-label="云端设置" title="云端设置" @click="cloudSettingsOpen = true"><CloudCog :size="17" /></button><button class="toolbar-action" aria-label="应用设置" title="应用设置" @click="settingsOpen = true"><Settings2 :size="17" /></button></div>
     </header>
 
@@ -926,6 +935,7 @@ onBeforeUnmount(() => {
     <div v-if="notice" class="toast" :class="notice.type" role="status"><span>{{ notice.message }}</span><button aria-label="关闭通知" title="关闭通知" @click="notice = undefined"><X :size="15" /></button></div>
     <SettingsDialog v-if="settingsOpen" @close="settingsOpen = false" @saved="handleSettingsChanged" />
     <CloudSettingsDialog v-if="cloudSettingsOpen" @close="cloudSettingsOpen = false" @saved="showNotice('云端设置已保存')" />
+    <CloudHealthDialog v-if="cloudHealthDialogOpen" :items="cloudHealthCheckItems" :running="cloudHealthCheckRunning" @close="cloudHealthDialogOpen = false" />
     <CreateCategoryDialog
       v-if="categoryDialogOpen"
       :parent-name="categoryRecords.find((category) => category.id === selectedCategoryId)?.name"
