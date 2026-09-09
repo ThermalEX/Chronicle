@@ -83,42 +83,23 @@ archives/<存档目录>/<时间>.7z
 
 单个 `.7z` 快照超过 100 MB 时，GitHub 标准仓库 API 会拒绝上传；Chronicle 会在发起上传前提示该限制。
 
-## 1.1.0：OpenDAL 云端同步
+## 云端同步配置
 
-底层固定使用 Apache OpenDAL **0.59.1**。这不表示支持其网站列出的全部服务：当前仅编译下面的白名单，不包含个人网盘 OAuth 登录、数据库、缓存、只读或 Unix 专用后端。
+v1.1.0-beta 固定使用 Apache OpenDAL **0.59.1**，并保留旧 GitHub 与 WebDAV 兼容源。完整的逐服务商填写说明、字段对照、Cloudflare R2 与 Backblaze B2 示例，以及测试与安全注意事项见：[云端同步配置指南](docs/cloud-setup.md)。
 
-| 类型 | scheme | 模板公开字段 | 模板机密字段 |
-| --- | --- | --- | --- |
-| S3 / S3 兼容服务 | `s3` | bucket、region、endpoint | access_key_id、secret_access_key |
-| Backblaze B2 | `b2` | bucket、bucket_id | application_key_id、application_key |
-| Azure Blob | `azblob` | container、endpoint、account_name | account_key |
-| Google Cloud Storage | `gcs` | bucket | credential |
-| 阿里云 OSS | `oss` | bucket、endpoint | access_key_id、access_key_secret |
-| 腾讯云 COS | `cos` | bucket、endpoint | secret_id、secret_key |
-| 华为云 OBS | `obs` | bucket、endpoint | access_key_id、secret_access_key |
-| 火山引擎 TOS | `tos` | bucket、endpoint、region | access_key_id、secret_access_key |
-| OpenStack Swift | `swift` | container、endpoint | token |
-| GitHub | `github` | owner、repo | token |
-| WebDAV | `webdav` | endpoint、username | password |
+## 更新日志
 
-### 配置步骤
+### v1.1.0-beta（预发行）
 
-1. 打开云端中心 → 同步源，添加 OpenDAL 源并选择服务模板。
-2. 填写目标容器/仓库、服务地址及机密字段。Chronicle 目录是容器内的独立前缀，例如 `/Chronicle`，不是本机磁盘目录。容器或仓库需事先存在。
-3. 按服务需要添加高级键值字段。字段名遵循该版本 OpenDAL 的配置名称；未知字段默认按机密处理。`root` 统一由 Chronicle 目录填写，禁止额外 `branch`、`*_path`、`*_file` 读取本机凭据文件。
-4. 点击测试。程序在唯一 `.chronicle-probe-<UUID>/` 下写入、读回、列举并清理测试对象，不初始化或改写 `library.json` 和 `catalog.json`。删除/清理失败会阻止启用，应先检查远端临时对象及权限。
-5. 测试通过后保存并选择为活动源。修改配置或凭据后需要重新测试；已保存机密留空表示保留，删除字段表示不再使用该键。
+- 新增 Apache OpenDAL 同步源：S3 / 兼容 S3、Backblaze B2、Azure Blob、Google Cloud Storage、阿里云 OSS、腾讯云 COS、华为云 OBS、火山引擎 TOS、OpenStack Swift、GitHub 和 WebDAV。
+- 云端中心支持多同步源、活动源切换、读写/列举/删除/清理能力测试、测试结果 Toast、已通过绿点和已保存凭据提示。
+- 新增启动时云端健康检查；首页会区分“未检测”、检测中、可用和某个同步源不可用状态。
+- 云端机密仅保存到 Windows 凭据管理器，不写入资料库 JSON；修改配置或凭据后必须重新测试。
+- 完善时间节点备注、单节点恢复/同步/删除，以及备注随资料库 JSON 同步。
+- 调整资料库导航：选择左侧文件夹后，主区显示规范化相对路径与该目录内容。
+- 新增日间/夜间模式、六种低饱和配色、灰色遮罩、统一的图标提示与改善夜间图标对比度。
+- 关于页展示应用图标、版本与作者；便携版会在 `Chronicle.exe` 同级创建 `Chronicle-data/`。
 
-例如 S3 兼容存储需要 `bucket`、服务商的 `endpoint` 和相应 `region`，密钥填到 `access_key_id`、`secret_access_key`；临时凭据可在高级字段添加机密 `session_token`。GCS 的 `credential` 按 OpenDAL 0.59.1 要求填写，不是本地凭据文件路径。公开 endpoint 不接受内嵌密码、查询令牌或片段。
+### v1.0.0
 
-### 兼容性、安全与限制
-
-- 旧设置 v2 自动转换为 v3，`github` / `webdav` 只改为 `legacy_github` / `legacy_webdav` 标识；源 ID、凭据引用、目录、仓库及分支保持不变。远端资料库与 `.7z` 文件无需转换。
-- 旧 GitHub 模式保留指定分支、创建仓库、批量 Git 提交；OpenDAL GitHub 仅使用默认分支，不替代前者。需要坚果云覆盖回退行为时继续使用旧 WebDAV 模式。
-- `settings.json` 只存公开 config、secretKeys 和 credentialRef。Windows 凭据记录还绑定测试通过的配置，换设备需要重新输入凭据和测试；复制资料库不会复制系统凭据。
-- 对象存储不要求原子目录重命名。上传先写快照，最后发布清单；失败不删除已存在的快照。覆盖上传可能保留不再被清单引用的旧对象；删除先移除清单引用，再清理目标前缀，清理失败会提示。
-- 不提供跨设备事务或分布式锁；不要让多台设备同时覆盖同一资料库。连接测试只验证当时能力，不保证后续网络或授权持续有效。
-- 请求有界重试、超时与并发限制；永久权限拒绝不重试。云服务费用、配额、单文件限制仍以服务商为准；当前文件传输会缓冲文件内容，大快照需预留内存。
-- 自动化验证覆盖本地模拟/内存后端和协议回归，未使用真实账号逐一验收所有厂商。白名单服务仍必须以实际账号的能力测试为准。
-
-参考：[Apache OpenDAL 服务目录](https://opendal.apache.org/services/) · [OpenDAL 0.59.1 API](https://docs.rs/opendal/0.59.1/opendal/)。
+- 首个 Windows 正式版：时间线 `.7z` 快照、分类、标签、保留策略、回收站、诊断与 GitHub/WebDAV 同步。
