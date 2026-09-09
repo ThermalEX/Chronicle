@@ -37,6 +37,7 @@ describe("OpenDAL configuration", () => {
     expect(sourceTestKey(value, { secret_access_key: "new" })).not.toBe(key);
     expect(sourceTestKey({ ...value, remotePath: "/other" }, { secret_access_key: "old" })).not.toBe(key);
     expect(sourceTestKey({ ...value, config: { bucket: "other" } }, { secret_access_key: "old" })).not.toBe(key);
+    expect(sourceTestKey({ ...value, syncEnabled: true }, { secret_access_key: "old" })).toBe(key);
   });
   it("keeps blank secrets as an unchanged credential patch and rejects unsafe advanced keys", () => {
     expect(secretPatch({ token: "", session_token: "new" })).toEqual({ session_token: "new" });

@@ -31,7 +31,8 @@ export function validateAdvancedKey(key: string): string {
 
 export function sourceTestKey(source: CloudSource, secrets: Record<string, string>): string {
   // Ephemeral, memory-only comparison. Never store this value in settings or logs.
-  return JSON.stringify([source, secrets]);
+  const { syncEnabled: _syncEnabled, ...connection } = source;
+  return JSON.stringify([connection, secrets]);
 }
 
 export function secretPatch(secrets: Record<string, string>): Record<string, string> {
