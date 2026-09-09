@@ -529,12 +529,33 @@ fn source_fingerprint(
     source: &CloudSourceInput,
     secrets: &std::collections::HashMap<String, String>,
 ) -> Result<String, String> {
+    fingerprint_source(source, secrets, false)
+}
+
+fn legacy_source_fingerprint(
+    source: &CloudSourceInput,
+    secrets: &std::collections::HashMap<String, String>,
+) -> Result<String, String> {
+    fingerprint_source(source, secrets, true)
+}
+
+fn fingerprint_source(
+    source: &CloudSourceInput,
+    secrets: &std::collections::HashMap<String, String>,
+    include_sync_state: bool,
+) -> Result<String, String> {
     let mut canonical = serde_json::to_value(source).map_err(|_| "配置无效".to_owned())?;
-    // Synchronization state and advanced-field order are presentation only; values and target remain bound.
-    canonical.as_object_mut().expect("cloud source serializes to an object").remove("syncEnabled");
+    // Synchronization state and map order are presentation only; values and target remain bound.
+    let object = canonical.as_object_mut().expect("cloud source serializes to an object");
+    if !include_sync_state {
+        object.remove("syncEnabled");
+    }
     let mut keys = source.secret_keys.clone();
     keys.sort();
     canonical["secretKeys"] = serde_json::json!(keys);
+    let config: std::collections::BTreeMap<_, _> = source.config.iter().collect();
+    canonical["config"] = serde_json::to_value(config).map_err(|_| "配置无效".to_owned())?;
+    let secrets: std::collections::BTreeMap<_, _> = secrets.iter().collect();
     let secrets = serde_json::to_value(secrets).map_err(|_| "机密配置无效".to_owned())?;
     let mut hash = Sha256::new();
     hash.update(serde_json::to_vec(&(canonical, secrets)).map_err(|_| "配置无效".to_owned())?);
@@ -553,10 +574,19 @@ fn credential(source: &CloudSourceInput) -> Result<String, String> {
 }
 
 fn verify_bundle(source: &CloudSourceInput, bundle: &TestedCredential) -> Result<(), String> {
-    if source_fingerprint(source, &bundle.secrets)? != bundle.fingerprint {
-        return Err("配置已更改，请重新测试并保存同步源".into());
+    if source_fingerprint(source, &bundle.secrets)? == bundle.fingerprint {
+        return Ok(());
     }
-    Ok(())
+    // v1.1.0-beta initially included syncEnabled in the fingerprint. It is not a
+    // connection property, so accept either old state while old credentials migrate.
+    let legacy_current = legacy_source_fingerprint(source, &bundle.secrets)?;
+    let mut legacy_alternate = source.clone();
+    legacy_alternate.sync_enabled = !legacy_alternate.sync_enabled;
+    let legacy_alternate = legacy_source_fingerprint(&legacy_alternate, &bundle.secrets)?;
+    if bundle.fingerprint == legacy_current || bundle.fingerprint == legacy_alternate {
+        return Ok(());
+    }
+    Err("配置已更改，请重新测试并保存同步源".into())
 }
 
 fn merge_secret_patch(
@@ -2187,7 +2217,7 @@ mod tests {
         let mut source: super::CloudSourceInput = serde_json::from_value(json!({
             "id":"test", "name":"S3", "provider":"opendal", "endpoint":"", "username":"",
             "remotePath":"/Chronicle", "credentialRef":"test-ref", "scheme":"s3",
-            "config":{"bucket":"test"}, "secretKeys":["secret_access_key","access_key_id"]
+            "config":{"bucket":"test", "endpoint":"https://example.test"}, "secretKeys":["secret_access_key","access_key_id"]
         }))
         .unwrap();
         let secrets = std::collections::HashMap::from([
@@ -2200,8 +2230,20 @@ mod tests {
         };
         source.secret_keys.reverse();
         assert!(super::verify_bundle(&source, &bundle).is_ok());
+        let reordered: super::CloudSourceInput = serde_json::from_value(json!({
+            "id":"test", "name":"S3", "provider":"opendal", "endpoint":"", "username":"",
+            "remotePath":"/Chronicle", "credentialRef":"test-ref", "scheme":"s3",
+            "config":{"endpoint":"https://example.test", "bucket":"test"}, "secretKeys":["access_key_id","secret_access_key"]
+        }))
+        .unwrap();
+        assert!(super::verify_bundle(&reordered, &bundle).is_ok());
         source.sync_enabled = true;
         assert!(super::verify_bundle(&source, &bundle).is_ok());
+        let legacy_bundle = super::TestedCredential {
+            fingerprint: super::legacy_source_fingerprint(&super::CloudSourceInput { sync_enabled: false, ..source.clone() }, &bundle.secrets).unwrap(),
+            secrets: bundle.secrets.clone(),
+        };
+        assert!(super::verify_bundle(&source, &legacy_bundle).is_ok());
         source.remote_path = "/other".into();
         assert!(super::verify_bundle(&source, &bundle).is_err());
         source.remote_path = "/Chronicle".into();
