@@ -29,6 +29,7 @@ import { appSettings, cloudLibraryIndicator, cloudSettings, enabledCloudSources,
 import { runAcrossEnabledSources, type SourceSyncOutcome } from "./services/multiSourceSync";
 import { categoryBreadcrumb } from "./services/categoryBreadcrumb";
 import { formatCurrentTime, millisecondsUntilNextMinute } from "./services/currentTime";
+import { snapshotButtonProgress } from "./services/snapshotButtonProgress";
 
 type CategoryTreeNode = CategoryRecord & {
   nodeType: "category";
@@ -205,10 +206,7 @@ const filteredArchives = computed(() => {
 const selectedArchive = computed(() => archives.value.find((archive) => archive.id === selectedArchiveId.value));
 const selectedSnapshot = computed(() => snapshots.value.find((snapshot) => snapshot.id === selectedSnapshotId.value));
 const visibleSnapshots = computed(() => filterTimeline(snapshots.value, snapshotSearch.value, snapshotSort.value));
-const progressPercent = computed(() => {
-  if (!snapshotProgress.value?.total) return 0;
-  return Math.round(snapshotProgress.value.current / snapshotProgress.value.total * 100);
-});
+const snapshotButtonState = computed(() => snapshotButtonProgress(snapshotProgress.value));
 
 function showNotice(message: string, type: "success" | "error" | "info" = "success") {
   notice.value = { message, type };
@@ -932,23 +930,21 @@ onBeforeUnmount(() => {
       <section v-if="selectedArchive" class="detail-panel" aria-labelledby="detail-title">
         <header class="detail-header">
           <div class="identity"><span class="detail-icon"><Folder v-if="selectedArchive.kind === 'folder'" /><File v-else-if="selectedArchive.kind === 'file'" /><FolderArchive v-else /></span><div class="title-line"><h2 id="detail-title">{{ selectedArchive.name }}</h2></div></div>
-          <div class="actions"><button class="secondary" :disabled="syncingArchive" @click="syncSelectedArchive"><UploadCloud :size="17" />{{ syncingArchive ? '同步中' : '同步' }}</button><button class="accent" :disabled="busyAction !== undefined" @click="createSnapshotFromDetail"><Plus :size="17" />{{ busyAction === 'snapshot' ? '创建中' : '创建备份' }}</button><div class="more-control"><button class="icon-button" aria-label="更多操作" title="更多操作" :aria-expanded="archiveMenuOpen" @click="archiveMenuOpen = !archiveMenuOpen"><MoreHorizontal :size="19" /></button><div v-if="archiveMenuOpen" class="archive-actions-menu"><button @click="openSelectedArchiveSources"><FolderOpen :size="15" />打开来源</button><button @click="openSelectedArchiveStorage"><HardDrive :size="15" />打开资料库</button><button @click="openEditArchive"><Pencil :size="15" />编辑存档</button><button class="danger" @click="selectedArchive && deleteArchive(selectedArchive)"><Trash2 :size="15" />删除存档</button></div></div></div>
+          <div class="actions"><button class="secondary" :disabled="syncingArchive" @click="syncSelectedArchive"><UploadCloud :size="17" />{{ syncingArchive ? '同步中' : '同步' }}</button><div class="more-control"><button class="icon-button" aria-label="更多操作" title="更多操作" :aria-expanded="archiveMenuOpen" @click="archiveMenuOpen = !archiveMenuOpen"><MoreHorizontal :size="19" /></button><div v-if="archiveMenuOpen" class="archive-actions-menu"><button @click="openSelectedArchiveSources"><FolderOpen :size="15" />打开来源</button><button @click="openSelectedArchiveStorage"><HardDrive :size="15" />打开资料库</button><button @click="openEditArchive"><Pencil :size="15" />编辑存档</button><button class="danger" @click="selectedArchive && deleteArchive(selectedArchive)"><Trash2 :size="15" />删除存档</button></div></div></div>
         </header>
 
         <ArchiveMetadata :archive="selectedArchive" :saving-tags="savingTags" @add-tag="addArchiveTag" @remove-tag="removeArchiveTag" />
 
-        <div v-if="snapshotProgress" class="operation-progress" aria-live="polite"><span><b>正在读取文件</b><small>{{ snapshotProgress.currentPath || '正在完成校验' }}</small></span><strong>{{ progressPercent }}%</strong><progress :value="snapshotProgress.current" :max="snapshotProgress.total || 1"></progress></div>
-
         <div class="detail-content">
           <section class="timeline-area">
             <div class="section-title"><div><p class="label">版本历史</p><h3>时间节点</h3></div><button class="link-button" @click="showNotice('保留策略将在自动备份阶段接入', 'info')">管理保留策略</button></div>
-            <div class="snapshot-create"><input v-model="snapshotDescription" maxlength="160" placeholder="输入新存档描述信息（可留空）" @keydown.enter.prevent="createSnapshotFromDetail" /><button class="accent" :disabled="busyAction !== undefined" @click="createSnapshotFromDetail"><Plus :size="16" />创建新快照</button></div>
+            <div class="snapshot-create"><input v-model="snapshotDescription" maxlength="160" placeholder="输入新存档描述信息（可留空）" @keydown.enter.prevent="createSnapshotFromDetail" /><button class="accent snapshot-create-button" :class="`is-${snapshotButtonState.state}`" :style="{ '--snapshot-progress': snapshotButtonState.percent / 100 }" :disabled="busyAction !== undefined" @click="createSnapshotFromDetail"><span><Plus :size="16" />{{ busyAction === 'snapshot' ? '创建中' : '创建新快照' }}</span></button></div>
             <div class="timeline-toolbar"><label><Search :size="15" /><input v-model="snapshotSearch" type="search" placeholder="搜索快照描述" /></label><ThemedSelect :model-value="snapshotSort" :options="timelineSortOptions" label="时间线排序" @update:model-value="updateTimelineSort" /></div>
             <div v-if="visibleSnapshots.length" class="timeline-table"><div class="timeline-table-head"><span>备份时间</span><span>描述</span><span>位置 / 大小</span><span>操作</span></div><article v-for="snapshot in visibleSnapshots" :key="snapshot.id" :class="{ selected: selectedSnapshotId === snapshot.id }" tabindex="0" @click="selectedSnapshotId = snapshot.id" @keydown.enter="selectedSnapshotId = snapshot.id"><time>{{ formatTime(snapshot.createdAt) }}</time><span><b>{{ snapshot.title }}</b><small>{{ snapshot.note || snapshotDetail(snapshot) }}</small></span><span>本机 · {{ formatBytes(snapshot.totalBytes) }}</span><div class="timeline-actions"><button :disabled="busyAction !== undefined" :aria-label="`恢复 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="`恢复 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="selectedSnapshotId = snapshot.id; restoreSnapshot()"><RotateCcw :size="16" /><span>恢复</span></button><button :disabled="syncingArchive" :aria-label="`同步 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="`同步 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="selectedSnapshotId = snapshot.id; syncSelectedArchive()"><UploadCloud :size="16" /><span>同步</span></button><button class="danger" :disabled="busyAction !== undefined" :aria-label="`删除 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="`删除 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="deleteSnapshot(snapshot)"><Trash2 :size="16" /></button></div></article></div>
             <div v-else class="timeline-empty"><Clock3 :size="25" /><b>还没有时间节点</b><p>创建首个备份后，可以从这里查看和恢复历史版本。</p><button :disabled="busyAction !== undefined" @click="createSnapshot('初始版本')">创建首个备份</button></div>
           </section>
 
-          <aside class="inspector">
+          <aside class="inspector activity-panel" :class="{ expanded: Boolean(selectedSnapshot) }">
             <template v-if="selectedSnapshot">
               <div class="section-title"><div><p class="label">已选版本</p><h3>{{ formatTime(selectedSnapshot.createdAt) }}</h3></div><span class="verified"><Check :size="13" />完整</span></div>
               <dl><div><dt>类型</dt><dd>{{ selectedSnapshot.title }}</dd></div><div><dt>快照大小</dt><dd>{{ formatBytes(selectedSnapshot.totalBytes) }}</dd></div><div><dt>存储位置</dt><dd>仅本地</dd></div><div><dt>内容校验</dt><dd class="hash">{{ selectedSnapshot.contentHash.slice(0, 6) }}…{{ selectedSnapshot.contentHash.slice(-4) }}</dd></div></dl>
@@ -957,7 +953,7 @@ onBeforeUnmount(() => {
               <div class="inspector-divider" aria-hidden="true"></div>
               <button class="restore" :disabled="busyAction !== undefined" @click="restoreSnapshot"><RotateCcw :size="16" />{{ busyAction === 'restore' ? '正在恢复' : '恢复到这个时间节点' }}</button><p class="hint">恢复前会先创建当前状态的安全快照。</p>
             </template>
-            <div v-else class="inspector-empty"><Clock3 :size="20" /><span>选择时间节点后显示详情</span></div>
+            <div v-else class="inspector-empty"><Clock3 :size="20" /><span>活动栏：选择时间节点后展开</span></div>
           </aside>
         </div>
       </section>
