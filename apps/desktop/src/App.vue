@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {
-  Check, ChevronLeft, ChevronRight, Clock3, CloudCog, File,
+  Check, ChevronLeft, ChevronRight, Clock3, CloudCog, File, Info,
   Folder, FolderArchive, FolderOpen, HardDrive, LockKeyhole, MoreHorizontal, Moon, Pencil, Plus, RotateCcw, Save,
   Search, Settings2, SlidersHorizontal, UploadCloud, X,
   Sun, Trash2,
@@ -52,6 +52,7 @@ const snapshots = ref<SnapshotRecord[]>([]);
 const selectedCategoryId = ref("all");
 const selectedArchiveId = ref<string>();
 const selectedSnapshotId = ref<string>();
+const activityPanelOpen = ref(false);
 const archivePanelCollapsed = ref(false);
 const snapshotDescription = ref("");
 const snapshotNote = ref("");
@@ -846,8 +847,11 @@ function handleShortcut(event: KeyboardEvent) {
   }
 }
 
-watch(selectedArchiveId, (archiveId) => { void refreshSnapshots(archiveId); });
-watch(selectedSnapshot, (snapshot) => { snapshotNote.value = snapshot?.note ?? ""; });
+watch(selectedArchiveId, (archiveId) => { activityPanelOpen.value = false; void refreshSnapshots(archiveId); });
+watch(selectedSnapshot, (snapshot) => {
+  snapshotNote.value = snapshot?.note ?? "";
+  if (!snapshot) activityPanelOpen.value = false;
+});
 onMounted(async () => {
   window.addEventListener("keydown", handleShortcut);
   refreshCurrentTime();
@@ -930,7 +934,7 @@ onBeforeUnmount(() => {
       <section v-if="selectedArchive" class="detail-panel" aria-labelledby="detail-title">
         <header class="detail-header">
           <div class="identity"><span class="detail-icon"><Folder v-if="selectedArchive.kind === 'folder'" /><File v-else-if="selectedArchive.kind === 'file'" /><FolderArchive v-else /></span><div class="title-line"><h2 id="detail-title">{{ selectedArchive.name }}</h2></div></div>
-          <div class="actions"><button class="secondary" :disabled="syncingArchive" @click="syncSelectedArchive"><UploadCloud :size="17" />{{ syncingArchive ? '同步中' : '同步' }}</button><div class="more-control"><button class="icon-button" aria-label="更多操作" title="更多操作" :aria-expanded="archiveMenuOpen" @click="archiveMenuOpen = !archiveMenuOpen"><MoreHorizontal :size="19" /></button><div v-if="archiveMenuOpen" class="archive-actions-menu"><button @click="openSelectedArchiveSources"><FolderOpen :size="15" />打开来源</button><button @click="openSelectedArchiveStorage"><HardDrive :size="15" />打开资料库</button><button @click="openEditArchive"><Pencil :size="15" />编辑存档</button><button class="danger" @click="selectedArchive && deleteArchive(selectedArchive)"><Trash2 :size="15" />删除存档</button></div></div></div>
+          <div class="actions"><button class="secondary" :disabled="syncingArchive" @click="syncSelectedArchive"><UploadCloud :size="17" />{{ syncingArchive ? '同步中' : '同步' }}</button><button class="icon-button" :class="{ active: activityPanelOpen }" :disabled="!selectedSnapshot" :aria-label="activityPanelOpen ? '隐藏时间节点详情' : '显示时间节点详情'" :title="activityPanelOpen ? '隐藏时间节点详情' : '显示时间节点详情'" :aria-pressed="activityPanelOpen" @click="activityPanelOpen = !activityPanelOpen"><Info :size="18" /></button><div class="more-control"><button class="icon-button" aria-label="更多操作" title="更多操作" :aria-expanded="archiveMenuOpen" @click="archiveMenuOpen = !archiveMenuOpen"><MoreHorizontal :size="19" /></button><div v-if="archiveMenuOpen" class="archive-actions-menu"><button @click="openSelectedArchiveSources"><FolderOpen :size="15" />打开来源</button><button @click="openSelectedArchiveStorage"><HardDrive :size="15" />打开资料库</button><button @click="openEditArchive"><Pencil :size="15" />编辑存档</button><button class="danger" @click="selectedArchive && deleteArchive(selectedArchive)"><Trash2 :size="15" />删除存档</button></div></div></div>
         </header>
 
         <ArchiveMetadata :archive="selectedArchive" :saving-tags="savingTags" @add-tag="addArchiveTag" @remove-tag="removeArchiveTag" />
@@ -944,8 +948,8 @@ onBeforeUnmount(() => {
             <div v-else class="timeline-empty"><Clock3 :size="25" /><b>还没有时间节点</b><p>创建首个备份后，可以从这里查看和恢复历史版本。</p><button :disabled="busyAction !== undefined" @click="createSnapshot('初始版本')">创建首个备份</button></div>
           </section>
 
-          <aside class="inspector activity-panel" :class="{ expanded: Boolean(selectedSnapshot) }">
-            <template v-if="selectedSnapshot">
+          <aside class="inspector activity-panel" :class="{ expanded: activityPanelOpen && Boolean(selectedSnapshot) }">
+            <template v-if="selectedSnapshot && activityPanelOpen">
               <div class="section-title"><div><p class="label">已选版本</p><h3>{{ formatTime(selectedSnapshot.createdAt) }}</h3></div><span class="verified"><Check :size="13" />完整</span></div>
               <dl><div><dt>类型</dt><dd>{{ selectedSnapshot.title }}</dd></div><div><dt>快照大小</dt><dd>{{ formatBytes(selectedSnapshot.totalBytes) }}</dd></div><div><dt>存储位置</dt><dd>仅本地</dd></div><div><dt>内容校验</dt><dd class="hash">{{ selectedSnapshot.contentHash.slice(0, 6) }}…{{ selectedSnapshot.contentHash.slice(-4) }}</dd></div></dl>
               <div class="changes"><p>内容变化</p><div><span><i class="green"></i>新增</span><b>{{ selectedSnapshot.changes.added }}</b></div><div><span><i class="amber"></i>修改</span><b>{{ selectedSnapshot.changes.modified }}</b></div><div><span><i class="red"></i>删除</span><b>{{ selectedSnapshot.changes.deleted }}</b></div></div>
@@ -953,7 +957,7 @@ onBeforeUnmount(() => {
               <div class="inspector-divider" aria-hidden="true"></div>
               <button class="restore" :disabled="busyAction !== undefined" @click="restoreSnapshot"><RotateCcw :size="16" />{{ busyAction === 'restore' ? '正在恢复' : '恢复到这个时间节点' }}</button><p class="hint">恢复前会先创建当前状态的安全快照。</p>
             </template>
-            <div v-else class="inspector-empty"><Clock3 :size="20" /><span>活动栏：选择时间节点后展开</span></div>
+            <div v-else class="inspector-empty"><Clock3 :size="20" /><span>选择时间节点后，点击信息按钮查看详情</span></div>
           </aside>
         </div>
       </section>
