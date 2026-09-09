@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { initialExpandedSourceIds, toggleExpandedSource } from "./sourceCardState";
 
 describe("cloud source card expansion", () => {
-  it("starts with only the active source expanded", () => {
-    expect([...initialExpandedSourceIds("r2")]).toEqual(["r2"]);
-    expect([...initialExpandedSourceIds(null)]).toEqual([]);
+  it("starts with every source collapsed, including the active one", () => {
+    expect([...initialExpandedSourceIds()]).toEqual([]);
+    expect([...initialExpandedSourceIds()]).toEqual([]);
   });
 
   it("toggles one source without changing the others", () => {

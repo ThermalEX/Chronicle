@@ -34,7 +34,7 @@ const backdrop = createBackdropDismissal(() => emit("close"), () => !busy.value)
 const feedback = ref("");
 const error = ref("");
 const toast = ref<{ type: "success" | "error"; message: string }>();
-const expandedSourceIds = ref(initialExpandedSourceIds(draft.activeSourceId));
+const expandedSourceIds = ref(initialExpandedSourceIds());
 let toastTimer: number | undefined;
 const confirmAction = ref<{ title: string; message: string; run: () => Promise<void> }>();
 const activeSource = computed(() => draft.sources.find((source) => source.id === draft.activeSourceId));
@@ -79,7 +79,7 @@ function addSource(): void {
   const id = crypto.randomUUID();
   draft.sources.push({ id, name: `WebDAV ${draft.sources.length + 1}`, provider: "legacy_webdav", endpoint: "", username: "", remotePath: "/Chronicle", credentialRef: `chronicle-webdav:${id}` });
   draft.activeSourceId = id;
-  expandedSourceIds.value = initialExpandedSourceIds(id);
+  expandedSourceIds.value = initialExpandedSourceIds();
   draft.enabled = true;
   tab.value = "sources";
 }
@@ -88,7 +88,7 @@ function addGitHubSource(): void {
   const id = crypto.randomUUID();
   draft.sources.push({ id, name: `GitHub ${draft.sources.length + 1}`, provider: "legacy_github", endpoint: "", username: "", remotePath: "/Chronicle", credentialRef: `chronicle-github:${id}`, repository: "", branch: "main" });
   draft.activeSourceId = id;
-  expandedSourceIds.value = initialExpandedSourceIds(id);
+  expandedSourceIds.value = initialExpandedSourceIds();
   draft.enabled = true;
   tab.value = "sources";
 }
@@ -100,7 +100,7 @@ function addOpenDalSource(): void {
   secrets[id] = {};
   draft.sources.push(source);
   draft.activeSourceId = id;
-  expandedSourceIds.value = initialExpandedSourceIds(id);
+  expandedSourceIds.value = initialExpandedSourceIds();
   tab.value = "sources";
 }
 
@@ -231,7 +231,7 @@ async function changeSyncMode(item: RemoteItem, mode: string | null): Promise<vo
 
 function selectActiveSource(sourceId: string | null): void {
   draft.activeSourceId = sourceId;
-  expandedSourceIds.value = initialExpandedSourceIds(sourceId);
+  expandedSourceIds.value = initialExpandedSourceIds();
   preview.value = undefined;
 }
 
@@ -317,7 +317,7 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer));
           <div class="source-toolbar"><label><span>当前同步源</span><ThemedSelect :model-value="draft.activeSourceId" :options="sourceOptions" label="当前同步源" @update:model-value="selectActiveSource" /></label><button @click="addSource"><Plus :size="15" />添加 WebDAV 兼容源</button><button @click="addGitHubSource"><Plus :size="15" />添加 GitHub 兼容源</button><button @click="addOpenDalSource"><Plus :size="15" />添加 OpenDAL</button></div>
           <div v-if="!draft.sources.length" class="empty compact"><Server :size="28" /><h3>没有同步源</h3><p>Chronicle 支持保存多个云端配置，同时只启用其中一个。</p></div>
           <article v-for="source in draft.sources" v-else :key="source.id" class="source-card" :class="{ active: source.id === draft.activeSourceId, collapsed: !isSourceExpanded(source.id) }">
-            <div class="source-title"><button class="source-toggle" type="button" :aria-label="`${isSourceExpanded(source.id) ? '折叠' : '展开'} ${source.name}`" :title="`${isSourceExpanded(source.id) ? '折叠' : '展开'} ${source.name}`" :aria-expanded="isSourceExpanded(source.id)" @click="toggleSourceExpanded(source.id)"><Server :size="17" /><b>{{ source.name }}</b><i v-if="sourcePassed(source)" class="source-tested" role="img" :aria-label="`${source.name} 已通过测试`" title="已通过测试"></i><small>{{ source.provider === 'legacy_github' ? 'GitHub 兼容源' : source.provider === 'opendal' ? 'OpenDAL · ' + source.scheme : 'WebDAV 兼容源' }}</small><small v-if="source.id === draft.activeSourceId">当前使用</small><ChevronDown :size="16" :class="{ closed: !isSourceExpanded(source.id) }" /></button><button class="icon-danger" :aria-label="`删除 ${source.name}`" :title="`删除 ${source.name}`" @click="removeSource(source)"><Trash2 :size="15" /></button></div>
+            <div class="source-title"><button class="source-toggle" type="button" :aria-label="`${isSourceExpanded(source.id) ? '折叠' : '展开'} ${source.name}`" :title="`${isSourceExpanded(source.id) ? '折叠' : '展开'} ${source.name}`" :aria-expanded="isSourceExpanded(source.id)" @click="toggleSourceExpanded(source.id)"><Server :size="17" /><b>{{ source.name }}</b><i v-if="sourcePassed(source)" class="source-tested" role="img" :aria-label="`${source.name} 已通过测试`" title="已通过测试"></i><small>{{ source.provider === 'legacy_github' ? 'GitHub 兼容源' : source.provider === 'opendal' ? 'OpenDAL · ' + source.scheme : 'WebDAV 兼容源' }}</small><small v-if="source.id === draft.activeSourceId" class="source-active-badge">当前使用</small><ChevronDown :size="16" :class="{ closed: !isSourceExpanded(source.id) }" /></button><button class="icon-danger" :aria-label="`删除 ${source.name}`" :title="`删除 ${source.name}`" @click="removeSource(source)"><Trash2 :size="15" /></button></div>
             <div v-show="isSourceExpanded(source.id)" class="source-body"><div v-if="source.provider === 'legacy_github'" class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>仓库</span><input v-model.trim="source.repository" type="text" placeholder="owner/repository" /></label><label><span>分支</span><input v-model.trim="source.branch" type="text" placeholder="main" /></label><label class="wide github-token-field"><span>访问令牌</span><div><input v-model="passwords[source.id]" type="password" autocomplete="current-password" :placeholder="savedCredentials[source.id] ? '已保存，留空保留' : '粘贴 GitHub 生成的访问令牌'" /><button type="button" @click="openGitHubPatPage"><ExternalLink :size="14" />在 GitHub 生成令牌</button></div><small>登录后直接生成带 repo 权限的令牌；GitHub 只显示一次，请复制后粘贴到这里。</small></label><label><span>新仓库名称</span><input v-model.trim="newRepositoryNames[source.id]" type="text" :placeholder="githubRepositoryName(source.id)" /></label><button class="create-repository-button" :disabled="Boolean(busy)" @click="createGitHubRepository(source)"><Plus :size="15" />创建私有仓库</button><label class="wide"><span>Chronicle 目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div><OpenDalSourceFields v-else-if="source.provider === 'opendal'" :source="source" :secrets="secrets[source.id] ?? (secrets[source.id] = {})" :credential-saved="savedCredentials[source.id]" :disabled="Boolean(busy)" /><div v-else class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>服务器地址</span><input v-model.trim="source.endpoint" type="url" placeholder="https://dav.example.com/remote.php/dav/files/user" /></label><label><span>用户名</span><input v-model.trim="source.username" type="text" autocomplete="username" /></label><label><span>密码</span><input v-model="passwords[source.id]" type="password" autocomplete="current-password" :placeholder="savedCredentials[source.id] ? '已保存，留空保留' : '请输入密码'" /></label><label class="wide"><span>远端目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div><button class="test-button" :disabled="Boolean(busy) || (source.provider === 'legacy_github' ? !source.repository || !source.branch : source.provider === 'opendal' ? false : !source.endpoint || !source.username)" @click="testSource(source)">{{ busy === `test:${source.id}` ? '测试中…' : source.provider === 'legacy_github' ? '测试仓库访问' : source.provider === 'opendal' ? '测试读写、列举与清理' : '测试连接与读写' }}</button><small v-if="requiresTest(source)" class="source-test-hint">配置尚未测试或已更改，保存前请重新测试。</small></div>
           </article>
           <fieldset><legend>请求控制</legend><label><span>元数据并发</span><input v-model.number="draft.maxConcurrentMetadataReads" type="number" min="1" max="4" /></label><label><span>传输并发</span><input v-model.number="draft.maxConcurrentTransfers" type="number" min="1" max="4" /></label><label><span>请求间隔（毫秒）</span><input v-model.number="draft.requestDelayMs" type="number" min="0" max="5000" step="50" /></label><label><span>重试次数</span><input v-model.number="draft.retryLimit" type="number" min="1" max="10" /></label></fieldset>
@@ -340,7 +340,7 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer));
 .remote-list article.protected, .repository-summary span, .remote-table tbody tr:hover, .archive-search, .remote-list select, .source-toolbar select, .fields input, fieldset input, .item-actions button, .remote-table .item-actions button { background: var(--subtle); }
 .remote-list select, .source-toolbar select, .fields input, fieldset input { color: var(--text); }
 .source-card.active { border-color: color-mix(in srgb, var(--primary) 45%, var(--border)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 12%, transparent); }
-.source-card.collapsed { padding-block: 10px; }.source-card.collapsed .source-title { margin-bottom: 0; }.source-toggle { display: flex; min-width: 0; flex: 1; align-items: center; gap: 7px; padding: 4px; color: var(--text); background: transparent; border-radius: 6px; text-align: left; }.source-toggle:hover { background: var(--hover); }.source-toggle b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.source-toggle svg:last-child { margin-left: auto; flex: 0 0 auto; color: var(--text-3); transition: transform .14s ease; }.source-toggle svg.closed { transform: rotate(-90deg); }
+.source-card.collapsed { padding-block: 10px; }.source-card.collapsed .source-title { margin-bottom: 0; }.source-toggle { display: flex; min-width: 0; flex: 1; align-items: center; gap: 7px; padding: 4px; color: var(--text); background: transparent; border-radius: 6px; text-align: left; }.source-toggle:hover { background: var(--hover); }.source-toggle b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.source-toggle svg:last-child { margin-left: auto; flex: 0 0 auto; color: var(--text-3); transition: transform .14s ease; }.source-toggle svg.closed { transform: rotate(-90deg); }.source-title small.source-active-badge { color: #087a45; background: #d9f5e5; font-weight: 750; }
 .source-tested { width: 8px; height: 8px; border-radius: 50%; background: #22a55b; box-shadow: 0 0 0 2px color-mix(in srgb, #22a55b 18%, transparent); }
 .cloud-toast { position: fixed; z-index: 55; right: 28px; bottom: 28px; display: flex; align-items: flex-start; gap: 8px; max-width: min(390px, calc(100vw - 56px)); padding: 11px 12px; border: 1px solid var(--border-2); border-radius: 9px; background: var(--surface-raised); box-shadow: 0 12px 34px #0d242047; font-size: 11px; line-height: 1.45; }.cloud-toast span { flex: 1; }.cloud-toast button { display: grid; flex: 0 0 auto; place-items: center; width: 22px; height: 22px; margin: -3px -4px -3px 1px; color: inherit; background: transparent; border-radius: 5px; }.cloud-toast button:hover { background: var(--hover); }.cloud-toast.success { color: #17834a; border-color: color-mix(in srgb, #22a55b 34%, var(--border)); }.cloud-toast.error { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 34%, var(--border)); }
 .archive-search:focus-within { box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 18%, transparent); }

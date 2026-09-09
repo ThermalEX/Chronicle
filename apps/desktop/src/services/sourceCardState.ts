@@ -1,5 +1,5 @@
-export function initialExpandedSourceIds(activeSourceId: string | null): Set<string> {
-  return activeSourceId ? new Set([activeSourceId]) : new Set();
+export function initialExpandedSourceIds(): Set<string> {
+  return new Set();
 }
 
 export function toggleExpandedSource(expandedSourceIds: ReadonlySet<string>, sourceId: string): Set<string> {
