@@ -12,6 +12,12 @@ describe("About update controls", () => {
     expect(aboutSection).toContain("启动时检查更新");
     expect(aboutSection).toContain("检查更新");
     expect(aboutSection).toContain("emit('check-update'");
+    expect(aboutSection.indexOf('class="setting-group about-update-group"')).toBeGreaterThan(
+      aboutSection.indexOf('class="about-list"'),
+    );
+    expect(aboutSection.indexOf('class="setting-group about-update-group"')).toBeGreaterThan(
+      aboutSection.indexOf("查看 GitHub 仓库"),
+    );
   });
 
   it("opens the update dialog when a newer release is found", () => {

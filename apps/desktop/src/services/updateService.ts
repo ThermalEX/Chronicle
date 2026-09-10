@@ -1,6 +1,8 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { UpdateChannel } from "./settings";
 
-const RELEASES_URL = "https://api.github.com/repos/ThermalEX/Chronicle/releases?per_page=20";
+const RELEASE_FEED_URL = "https://github.com/ThermalEX/Chronicle/releases.atom";
+const RELEASE_DOWNLOAD_BASE_URL = "https://github.com/ThermalEX/Chronicle/releases/download";
 
 export interface GithubReleaseAsset {
   name: string;
@@ -99,6 +101,71 @@ function isWindowsInstaller(name: string): boolean {
   return /^Chronicle_.+_x64-setup\.exe$/i.test(name);
 }
 
+function decodeXml(value: string): string {
+  return value.replace(/&#(x[0-9a-f]+|\d+);|&(amp|lt|gt|quot|apos);/gi, (entity, numeric) => {
+    if (numeric) {
+      const codePoint = numeric.toLowerCase().startsWith("x")
+        ? Number.parseInt(numeric.slice(1), 16)
+        : Number.parseInt(numeric, 10);
+      return String.fromCodePoint(codePoint);
+    }
+    return ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" } as Record<string, string>)[entity.slice(1, -1).toLowerCase()] ?? entity;
+  });
+}
+
+function atomTag(entry: string, name: string): string {
+  const match = new RegExp(`<${name}(?:\\s[^>]*)?>([\\s\\S]*?)</${name}>`, "i").exec(entry);
+  return decodeXml(match?.[1]?.trim() ?? "");
+}
+
+function atomReleaseUrl(entry: string): string | undefined {
+  const link = /<link\b(?=[^>]*\brel=["']alternate["'])[^>]*\bhref=["']([^"']+)["'][^>]*\/?\s*>/i.exec(entry);
+  return link ? decodeXml(link[1]) : undefined;
+}
+
+function releaseNotesFromHtml(html: string): string {
+  return html
+    .replace(/<h2[^>]*>/gi, "## ")
+    .replace(/<\/h2>/gi, "\n\n")
+    .replace(/<li[^>]*>/gi, "- ")
+    .replace(/<\/li>/gi, "\n")
+    .replace(/<br\s*\/?\s*>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function releaseAssets(tag: string): GithubReleaseAsset[] {
+  const version = tag.replace(/^v/, "");
+  const installerName = `Chronicle_${version}_x64-setup.exe`;
+  const releaseBaseUrl = `${RELEASE_DOWNLOAD_BASE_URL}/${encodeURIComponent(tag)}`;
+  return [
+    { name: installerName, browser_download_url: `${releaseBaseUrl}/${installerName}`, size: 0 },
+    { name: "SHA256SUMS.txt", browser_download_url: `${releaseBaseUrl}/SHA256SUMS.txt`, size: 0 },
+  ];
+}
+
+export function releasesFromAtom(feed: string): GithubRelease[] {
+  return [...feed.matchAll(/<entry(?:\s[^>]*)?>([\s\S]*?)<\/entry>/gi)].flatMap((match) => {
+    const entry = match[1];
+    const htmlUrl = atomReleaseUrl(entry);
+    const tag = htmlUrl?.match(/\/releases\/tag\/([^/?#]+)$/)?.[1];
+    if (!tag) return [];
+    const content = atomTag(entry, "content");
+    return [{
+      tag_name: tag,
+      name: atomTag(entry, "title") || `Chronicle ${tag}`,
+      body: releaseNotesFromHtml(content),
+      html_url: htmlUrl,
+      prerelease: /^v?\d+\.\d+\.\d+-/.test(tag),
+      draft: false,
+      published_at: atomTag(entry, "updated"),
+      assets: releaseAssets(tag),
+    }];
+  });
+}
+
 export function selectUpdate(
   releases: GithubRelease[],
   currentVersion: string,
@@ -136,10 +203,12 @@ export async function checkForUpdate(
   currentVersion: string,
   request: typeof fetch = fetch,
 ): Promise<ReleaseUpdate | undefined> {
-  const response = await request(RELEASES_URL, {
-    headers: { Accept: "application/vnd.github+json" },
-  });
-  if (!response.ok) throw new Error(`更新检查失败（HTTP ${response.status}）`);
-  const releases = await response.json() as GithubRelease[];
-  return selectUpdate(releases, currentVersion, channel);
+  const feed = isTauri()
+    ? await invoke<string>("fetch_release_feed")
+    : await (async () => {
+      const response = await request(RELEASE_FEED_URL, { headers: { Accept: "application/atom+xml" } });
+      if (!response.ok) throw new Error(`更新检查失败（HTTP ${response.status}）`);
+      return response.text();
+    })();
+  return selectUpdate(releasesFromAtom(feed), currentVersion, channel);
 }

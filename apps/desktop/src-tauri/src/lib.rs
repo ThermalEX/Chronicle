@@ -127,6 +127,7 @@ pub fn run() {
             commands::delete_snapshot,
             commands::verify_snapshot,
             commands::restore_snapshot,
+            update::fetch_release_feed,
             update::download_and_install_update,
             commands::load_settings,
             commands::save_settings,

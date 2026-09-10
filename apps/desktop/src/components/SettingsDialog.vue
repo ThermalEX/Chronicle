@@ -287,13 +287,13 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
           <section v-else aria-labelledby="about-title">
             <div class="section-heading"><h3 id="about-title">关于</h3><p>本地云端通用文件快照管理器。</p></div>
             <div class="about-card"><img class="about-logo" :src="appIcon" alt="Chronicle 图标" /><div><h4>{{ appMetadata.name }}</h4><p>版本 {{ appMetadata.version }}</p><p>作者 {{ appMetadata.author }}</p></div></div>
+            <dl class="about-list"><div><dt>存储引擎</dt><dd>Rust · 7z · SHA-256</dd></div><div><dt>桌面框架</dt><dd>Tauri 2 · Vue 3</dd></div><div><dt>许可证</dt><dd>尚未指定</dd></div></dl>
+            <a href="https://github.com/ThermalEX/Chronicle" target="_blank" rel="noreferrer">查看 GitHub 仓库</a>
             <div class="setting-group about-update-group">
               <label class="setting-row select-row"><span><b>更新频道</b><small>正式版只检查稳定发布；测试版同时接收预发布版本。</small></span><ThemedSelect :model-value="draft.updateChannel" :options="updateChannelOptions" label="更新频道" @update:model-value="updateUpdateChannel" /></label>
               <label class="setting-row"><span><b>启动时检查更新</b><small>发现新版本时显示更新说明，不会自动下载。</small></span><input v-model="draft.checkForUpdates" type="checkbox" role="switch" /></label>
               <div class="setting-row about-update-action"><span><b>手动检查</b><small>立即检查所选频道是否有新版本。</small></span><button :disabled="props.updateChecking" @click="emit('check-update', draft.updateChannel)"><RefreshCw :size="15" :class="{ spinning: props.updateChecking }" />{{ props.updateChecking ? '检查中' : '检查更新' }}</button></div>
             </div>
-            <dl class="about-list"><div><dt>存储引擎</dt><dd>Rust · 7z · SHA-256</dd></div><div><dt>桌面框架</dt><dd>Tauri 2 · Vue 3</dd></div><div><dt>许可证</dt><dd>尚未指定</dd></div></dl>
-            <a href="https://github.com/ThermalEX/Chronicle" target="_blank" rel="noreferrer">查看 GitHub 仓库</a>
           </section>
         </main>
       </div>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { selectUpdate, type GithubRelease } from "./updateService";
+import { releasesFromAtom, selectUpdate, type GithubRelease } from "./updateService";
 
 const releases: GithubRelease[] = [
   {
@@ -35,5 +35,28 @@ describe("selectUpdate", () => {
 
   it("does not return an update for an equal version", () => {
     expect(selectUpdate([releases[1]], "1.2.0", "stable")).toBeUndefined();
+  });
+});
+
+describe("releasesFromAtom", () => {
+  it("reads release metadata and derives the published installer links", () => {
+    const feed = `<?xml version="1.0"?><feed><entry>
+      <title>Chronicle v1.2.1-beta.1</title>
+      <link rel="alternate" type="text/html" href="https://github.com/ThermalEX/Chronicle/releases/tag/v1.2.1-beta.1" />
+      <updated>2026-09-10T00:00:00Z</updated>
+      <content type="html">&lt;h2&gt;修复&lt;/h2&gt;&lt;ul&gt;&lt;li&gt;修复更新检查&lt;/li&gt;&lt;/ul&gt;</content>
+    </entry></feed>`;
+
+    expect(releasesFromAtom(feed)).toEqual([expect.objectContaining({
+      tag_name: "v1.2.1-beta.1",
+      prerelease: true,
+      body: "## 修复\n\n- 修复更新检查",
+      assets: expect.arrayContaining([
+        expect.objectContaining({
+          name: "Chronicle_1.2.1-beta.1_x64-setup.exe",
+          browser_download_url: "https://github.com/ThermalEX/Chronicle/releases/download/v1.2.1-beta.1/Chronicle_1.2.1-beta.1_x64-setup.exe",
+        }),
+      ]),
+    })]);
   });
 });

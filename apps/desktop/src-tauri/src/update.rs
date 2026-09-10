@@ -9,6 +9,7 @@ use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
 const RELEASE_PATH: [&str; 4] = ["ThermalEX", "Chronicle", "releases", "download"];
+const RELEASE_FEED_URL: &str = "https://github.com/ThermalEX/Chronicle/releases.atom";
 
 fn is_windows_installer_file_name(file_name: &str) -> bool {
     file_name.starts_with("Chronicle_")
@@ -57,6 +58,24 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn installer_path(download_directory: &Path) -> PathBuf {
     download_directory.join(format!("Chronicle-update-{}.exe", Uuid::new_v4()))
+}
+
+#[tauri::command]
+pub async fn fetch_release_feed() -> Result<String, String> {
+    reqwest::Client::builder()
+        .user_agent("Chronicle update checker")
+        .build()
+        .map_err(|error| format!("更新检查失败：{error}"))?
+        .get(RELEASE_FEED_URL)
+        .header(reqwest::header::ACCEPT, "application/atom+xml")
+        .send()
+        .await
+        .map_err(|error| format!("更新检查失败：{error}"))?
+        .error_for_status()
+        .map_err(|error| format!("更新检查失败：{error}"))?
+        .text()
+        .await
+        .map_err(|error| format!("更新检查失败：{error}"))
 }
 
 #[tauri::command]
