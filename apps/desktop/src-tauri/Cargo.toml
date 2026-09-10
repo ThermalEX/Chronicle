@@ -1,6 +1,6 @@
 [package]
 name = "chronicle-desktop"
-version = "1.2.0-beta"
+version = "1.2.0"
 description = "Chronicle desktop application"
 authors = ["ThermalEX <2210692765@qq.com>"]
 edition = "2024"
