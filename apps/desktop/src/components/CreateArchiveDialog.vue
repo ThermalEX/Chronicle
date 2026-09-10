@@ -15,6 +15,7 @@ const props = defineProps<{
   editStoragePolicy?: StoragePolicy;
   editAutoBackupEnabled?: boolean;
   editAutomaticUploadEnabled?: boolean;
+  highlightSources?: boolean;
 }>();
 const emit = defineEmits<{
   close: [];
@@ -68,9 +69,9 @@ onMounted(() => nameInput.value?.focus());
           <small v-if="attempted && !name.trim()" class="field-error">请输入存档名称</small>
         </label>
 
-        <fieldset>
+        <fieldset :class="{ 'source-location-required': highlightSources }">
           <legend>存档内容</legend>
-          <p>一个存档可以同时包含多个文件和文件夹，每个时间节点会完整保存这些内容。</p>
+          <p>{{ highlightSources ? '请重新选择该存档在本机的文件或文件夹来源。' : '一个存档可以同时包含多个文件和文件夹，每个时间节点会完整保存这些内容。' }}</p>
           <div class="source-actions">
             <button type="button" :disabled="Boolean(picking) || submitting" @click="emit('pick', 'file')"><File :size="16" />{{ picking === 'file' ? '选择中' : '添加文件' }}</button>
             <button type="button" :disabled="Boolean(picking) || submitting" @click="emit('pick', 'folder')"><Folder :size="16" />{{ picking === 'folder' ? '选择中' : '添加文件夹' }}</button>
@@ -111,7 +112,7 @@ header button { display: grid; place-items: center; width: 38px; height: 38px; b
 main { overflow-y: auto; padding: 23px 26px 28px; }
 .field { display: flex; flex-direction: column; gap: 7px; } .field > span, legend { color: var(--text-2); font-size: 10px; font-weight: 700; }
 input[type="text"] { width: 100%; height: 38px; padding: 0 11px; color: #263431; background: #f8faf9; border: 1px solid var(--border-2); border-radius: 7px; font-size: 11px; } input[aria-invalid="true"] { border-color: #b83a32; }
-fieldset { margin: 20px 0; padding: 15px; border: 1px solid var(--border); border-radius: 9px; } legend { padding: 0 6px; } fieldset > p { margin: 0 0 12px; color: var(--text-3); font-size: 10px; }
+fieldset { margin: 20px 0; padding: 15px; border: 1px solid var(--border); border-radius: 9px; } legend { padding: 0 6px; } fieldset > p { margin: 0 0 12px; color: var(--text-3); font-size: 10px; }.source-location-required { background: #fff4d6; border-color: #f2cc60; box-shadow: 0 0 0 3px #f2cc6040; }.source-location-required > p { color: #9a6700; font-weight: 650; }.source-location-required .source-actions button { color: #9a6700; background: #fff9e8; border-color: #e4bc4d; }
 .source-actions { display: flex; gap: 8px; } .source-actions button { display: inline-flex; align-items: center; gap: 7px; min-height: 35px; padding: 0 11px; color: var(--primary-dark); background: var(--primary-soft); border: 1px solid #c5ded8; border-radius: 7px; font-size: 10px; font-weight: 650; }
 .source-list { margin-top: 12px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; } .source-list > div { display: grid; grid-template-columns: 32px minmax(0, 1fr) 34px; align-items: center; min-height: 54px; padding: 6px 8px; } .source-list > div + div { border-top: 1px solid var(--border); } .source-icon { display: grid; place-items: center; width: 28px; height: 28px; color: var(--primary); background: var(--primary-soft); border-radius: 6px; } .source-list span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 3px; } .source-list b { font-size: 10px; } .source-list small { overflow: hidden; color: var(--text-3); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; } .source-list button { display: grid; place-items: center; width: 32px; height: 32px; color: var(--text-3); background: transparent; border-radius: 6px; } .source-list button:hover { color: #b83a32; background: #fff0ef; }
 .storage-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; } .storage-options > label { display: grid; grid-template-columns: 0 22px 1fr; align-items: center; min-height: 60px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; } .storage-options > label.selected { color: var(--primary-dark); background: var(--primary-soft); border-color: #9fcfc5; } .storage-options input { opacity: 0; width: 0; } .storage-options span { display: flex; flex-direction: column; gap: 3px; } .storage-options b { font-size: 10px; } .storage-options small { color: var(--text-3); font-size: 8px; line-height: 1.35; }

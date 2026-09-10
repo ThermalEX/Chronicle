@@ -44,6 +44,25 @@ mod tests {
     }
 
     #[test]
+    fn move_destination_urls_percent_encode_archive_names() {
+        let client = WebDavClient::new(
+            WebDavSource {
+                endpoint: "https://dav.example.test/user/".into(),
+                username: "user".into(),
+                password: "secret".into(),
+                remote_path: "/Chronicle/".into(),
+            },
+            RequestPolicy::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            client.url("archives/新建文本文档.txt"),
+            "https://dav.example.test/user/Chronicle/archives/%E6%96%B0%E5%BB%BA%E6%96%87%E6%9C%AC%E6%96%87%E6%A1%A3.txt"
+        );
+    }
+
+    #[test]
     fn only_jianguoyun_uses_the_non_atomic_overwrite_fallback() {
         assert!(requires_delete_before_overwrite(
             "https://dav.jianguoyun.com/dav/"
@@ -102,12 +121,14 @@ impl WebDavClient {
         let endpoint = self.source.endpoint.trim_end_matches('/');
         let root = self.source.remote_path.trim_matches('/');
         let relative = relative.trim_start_matches('/');
-        match (root.is_empty(), relative.is_empty()) {
+        let url = match (root.is_empty(), relative.is_empty()) {
             (true, true) => endpoint.to_owned(),
             (true, false) => format!("{endpoint}/{relative}"),
             (false, true) => format!("{endpoint}/{root}"),
             (false, false) => format!("{endpoint}/{root}/{relative}"),
-        }
+        };
+        reqwest::Url::parse(&url)
+            .map_or(url, |parsed| parsed.to_string())
     }
 
     async fn request(

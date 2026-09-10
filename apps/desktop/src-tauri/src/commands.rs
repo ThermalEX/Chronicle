@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Command;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::AppState;
 
@@ -394,6 +394,8 @@ pub fn hide_main_window(app: AppHandle) -> Result<(), String> {
     app.get_webview_window("main")
         .ok_or_else(|| "主窗口不可用".to_owned())?
         .hide()
+        .map_err(|error| error.to_string())?;
+    app.emit("chronicle-hidden-to-tray", ())
         .map_err(|error| error.to_string())
 }
 
@@ -745,8 +747,18 @@ pub fn restore_snapshot(
     entry_id: String,
     snapshot_id: String,
 ) -> Result<(), String> {
-    let repository = state.repository.lock().map_err(|_| state_error())?;
-    repository
-        .restore_snapshot(&entry_id, &snapshot_id)
-        .map_err(|error| error.to_string())
+    state.auto_backup.begin_restore_suppression(&entry_id)?;
+    let restored = {
+        let repository = state.repository.lock().map_err(|_| state_error())?;
+        repository
+            .restore_snapshot(&entry_id, &snapshot_id)
+            .map_err(|error| error.to_string())
+    };
+    match restored {
+        Ok(()) => state.auto_backup.finish_restore_suppression(&entry_id),
+        Err(error) => {
+            let _ = state.auto_backup.cancel_restore_suppression(&entry_id);
+            Err(error)
+        }
+    }
 }

@@ -22,4 +22,14 @@ describe("icon button tooltips", () => {
 
     expect(missingTitles).toEqual([]);
   });
+
+  it("opens the archive editor with source selection highlighted from a location warning", () => {
+    const app = readFileSync(new URL("../App.vue", import.meta.url), "utf8");
+    const dialog = readFileSync(new URL("./CreateArchiveDialog.vue", import.meta.url), "utf8");
+
+    expect(app).toContain('openArchiveEditor(item, true)');
+    expect(app).toContain(':highlight-sources="highlightSources"');
+    expect(dialog).toContain('highlightSources?: boolean');
+    expect(dialog).toContain("source-location-required");
+  });
 });

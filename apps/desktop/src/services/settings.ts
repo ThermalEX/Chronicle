@@ -4,6 +4,7 @@ import { normalizeAppearance, type ColorMode, type ColorTheme } from "./appearan
 import { publicConfigKeys } from "./opendal";
 
 export type CloseBehavior = "ask" | "tray" | "exit";
+export type UpdateChannel = "stable" | "beta";
 export type BackupSchedule = "off" | "15m" | "1h" | "6h" | "daily";
 export type CloudProvider = "legacy_webdav" | "legacy_github" | "opendal";
 
@@ -13,6 +14,7 @@ export interface AppSettings {
   launchAtStartup: boolean;
   closeBehavior: CloseBehavior;
   checkForUpdates: boolean;
+  updateChannel: UpdateChannel;
   checkCloudOnLaunch: boolean;
   notifications: boolean;
   createInitialSnapshot: boolean;
@@ -84,6 +86,7 @@ const defaultAppSettings: AppSettings = {
   launchAtStartup: false,
   closeBehavior: "ask",
   checkForUpdates: true,
+  updateChannel: "stable",
   checkCloudOnLaunch: false,
   notifications: true,
   createInitialSnapshot: true,
@@ -118,10 +121,12 @@ export function normalizeAppSettings(value: LegacyAppSettings = {}): AppSettings
   const legacyDelay: Record<Exclude<BackupSchedule, "off">, number> = { "15m": 900, "1h": 3600, "6h": 21_600, daily: 86_400 };
   const legacySchedule = value.backupSchedule;
   const delay = Number(value.autoBackupDelaySeconds ?? (legacySchedule && legacySchedule !== "off" ? legacyDelay[legacySchedule] : 5));
-  const { backupSchedule: _backupSchedule, autoBackupEnabled: _autoBackupEnabled, automaticUploadEnabled: _automaticUploadEnabled, ...current } = value;
+  const requestedUpdateChannel: UpdateChannel = value.updateChannel === "beta" ? "beta" : "stable";
+  const { backupSchedule: _backupSchedule, autoBackupEnabled: _autoBackupEnabled, automaticUploadEnabled: _automaticUploadEnabled, updateChannel: _updateChannel, ...current } = value;
   return {
     ...defaultAppSettings,
     ...current,
+    updateChannel: requestedUpdateChannel,
     autoBackupDelaySeconds: Math.max(1, Math.min(300, Number.isFinite(delay) && delay >= 1 ? delay : 5)),
   };
 }

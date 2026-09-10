@@ -13,9 +13,11 @@ import AppToast from "./components/AppToast.vue";
 import CloudHealthDialog from "./components/CloudHealthDialog.vue";
 import ArchiveMetadata from "./components/ArchiveMetadata.vue";
 import ConfirmDialog from "./components/ConfirmDialog.vue";
+import { notifyTrayBackground } from "./services/trayNotification";
 import CreateCategoryDialog from "./components/CreateCategoryDialog.vue";
 import CreateArchiveDialog from "./components/CreateArchiveDialog.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
+import UpdateDialog from "./components/UpdateDialog.vue";
 import ThemedSelect, { type ThemedSelectOption } from "./components/ThemedSelect.vue";
 import type { ArchiveRecord, ArchiveSource, CategoryRecord, CreateArchiveInput, RepositoryInfo, SnapshotRecord, SourceKind } from "./domain";
 import { archiveRepository, isTauriRuntime } from "./services/repository";
@@ -32,6 +34,8 @@ import { appSettings, cloudLibraryIndicator, cloudSettings, enabledCloudSources,
 import { runAcrossEnabledSources, type SourceSyncOutcome } from "./services/multiSourceSync";
 import { categoryBreadcrumb } from "./services/categoryBreadcrumb";
 import { formatCurrentTime, millisecondsUntilNextMinute } from "./services/currentTime";
+import { appMetadata } from "./services/appMetadata";
+import { checkForUpdate, type ReleaseUpdate } from "./services/updateService";
 
 type CategoryTreeNode = CategoryRecord & {
   nodeType: "category";
@@ -94,6 +98,7 @@ const savingTags = ref(false);
 const savingSnapshotNote = ref(false);
 const repositoryInfo = ref<RepositoryInfo>({ path: "", totalBytes: 0 });
 const editingArchive = ref<ArchiveRecord>();
+const highlightSources = ref(false);
 const archiveMenuOpen = ref(false);
 const trashDropActive = ref(false);
 const treeMenu = ref<{ kind: "archive" | "category"; id: string }>();
@@ -103,6 +108,8 @@ const treeMenuStyle = computed(() => treeMenuAnchor.value
   : undefined);
 const confirmRequest = ref<{ title: string; message: string; confirmLabel: string; destructive: boolean }>();
 const closeRequestOpen = ref(false);
+const updateChecking = ref(false);
+const availableUpdate = ref<ReleaseUpdate>();
 let confirmResolver: ((confirmed: boolean) => void) | undefined;
 const notice = ref<{ type: "success" | "error" | "info"; message: string }>();
 let noticeTimer: number | undefined;
@@ -213,6 +220,20 @@ function showNotice(message: string, type: "success" | "error" | "info" = "succe
   notice.value = { message, type };
   window.clearTimeout(noticeTimer);
   noticeTimer = window.setTimeout(() => { notice.value = undefined; }, 3200);
+}
+
+async function checkForApplicationUpdate(manual = false, channel = appSettings.updateChannel): Promise<void> {
+  if (updateChecking.value) return;
+  updateChecking.value = true;
+  try {
+    const update = await checkForUpdate(channel, appMetadata.version);
+    if (update) availableUpdate.value = update;
+    else if (manual) showNotice("当前已是最新版本", "info");
+  } catch (error) {
+    if (manual) showNotice(error instanceof Error ? error.message : "检查更新失败", "error");
+  } finally {
+    updateChecking.value = false;
+  }
 }
 
 function readableError(error: unknown): string {
@@ -345,6 +366,7 @@ async function refreshSnapshots(archiveId?: string) {
 
 function openCreateArchive() {
   editingArchive.value = undefined;
+  highlightSources.value = false;
   pendingSources.value = [];
   createArchiveError.value = undefined;
   createDialogOpen.value = true;
@@ -355,9 +377,10 @@ function openEditArchive() {
   openArchiveEditor(selectedArchive.value);
 }
 
-function openArchiveEditor(archive: ArchiveRecord) {
+function openArchiveEditor(archive: ArchiveRecord, highlightSourceSelection = false) {
   selectArchive(archive.id);
   editingArchive.value = archive;
+  highlightSources.value = highlightSourceSelection;
   pendingSources.value = archive.sources.map((source) => ({ ...source }));
   createArchiveError.value = undefined;
   archiveMenuOpen.value = false;
@@ -367,6 +390,7 @@ function openArchiveEditor(archive: ArchiveRecord) {
 function closeArchiveDialog() {
   createDialogOpen.value = false;
   editingArchive.value = undefined;
+  highlightSources.value = false;
 }
 
 function requestConfirmation(title: string, message: string, confirmLabel: string, destructive = false): Promise<boolean> {
@@ -950,6 +974,7 @@ onMounted(async () => {
   try {
     await initializeSettings();
     applyAppearance(appSettings);
+    if (appSettings.checkForUpdates) void checkForApplicationUpdate();
     if (isTauriRuntime) {
       await archiveRepository.refreshAutoBackup();
       await listen<{ archiveId: string; error?: string }>("auto-backup-created", async ({ payload }) => {
@@ -960,6 +985,7 @@ onMounted(async () => {
       });
       await listen<{ archiveId: string; error?: string }>("auto-backup-failed", ({ payload }) => reportError(payload.error ?? "自动备份失败", { operation: "自动备份", archiveId: payload.archiveId }));
       await listen("chronicle-close-requested", () => { closeRequestOpen.value = true; });
+      await listen("chronicle-hidden-to-tray", () => { void notifyTrayBackground(appSettings.notifications); });
     }
     await refreshCategories();
     await refreshArchives();
@@ -1024,7 +1050,7 @@ onBeforeUnmount(() => {
         <div class="archive-list" :aria-busy="loading">
           <article v-for="item in filteredArchives" :key="item.id" class="archive-row" :class="{ selected: selectedArchiveId === item.id, 'needs-location': archiveNeedsLocation(item) }" draggable="true" tabindex="0" @dragstart="startArchiveDrag(item.id, $event)" @dragend="finishDrag" @click="selectArchive(item.id)" @keydown.enter="selectArchive(item.id)">
             <span class="file-icon"><Folder v-if="item.kind === 'folder'" :size="19" /><File v-else-if="item.kind === 'file'" :size="19" /><FolderArchive v-else :size="19" /></span>
-            <span class="archive-copy"><span class="row-title"><button class="archive-name" :aria-label="`编辑存档 ${item.name}`" :title="`编辑存档 ${item.name}`" @click.stop="openArchiveEditor(item)">{{ item.name }}</button><span class="automation-badges"><button class="automation-badge" :class="{ active: item.autoBackupEnabled }" :aria-label="`编辑 ${item.name} 的自动备份设置`" :title="`编辑 ${item.name} 的自动备份设置`" @click.stop="openArchiveEditor(item)">自动备份</button><button class="automation-badge" :class="{ active: item.automaticUploadEnabled }" :aria-label="`编辑 ${item.name} 的自动上传设置`" :title="`编辑 ${item.name} 的自动上传设置`" @click.stop="openArchiveEditor(item)">自动上传</button></span><i v-if="archiveNeedsLocation(item)" class="location-warning" title="等待定位本机来源"><AlertTriangle :size="13" /></i><i v-else :class="item.lastSnapshotAt ? 'synced' : 'local'"><Check v-if="item.lastSnapshotAt" :size="13" /><HardDrive v-else :size="13" /></i></span><small>{{ archiveNeedsLocation(item) ? '等待定位本机来源' : displaySourcePath(item.sourcePath) }}</small><span class="meta"><span>{{ item.category }}</span><span>{{ formatBytes(item.totalBytes) }}</span><span>{{ formatTime(item.lastSnapshotAt) }}</span></span></span>
+            <span class="archive-copy"><span class="row-title"><button class="archive-name" :aria-label="`编辑存档 ${item.name}`" :title="`编辑存档 ${item.name}`" @click.stop="openArchiveEditor(item)">{{ item.name }}</button><span class="automation-badges"><button class="automation-badge" :class="{ active: item.autoBackupEnabled }" :aria-label="`编辑 ${item.name} 的自动备份设置`" :title="`编辑 ${item.name} 的自动备份设置`" @click.stop="openArchiveEditor(item)">自动备份</button><button class="automation-badge" :class="{ active: item.automaticUploadEnabled }" :aria-label="`编辑 ${item.name} 的自动上传设置`" :title="`编辑 ${item.name} 的自动上传设置`" @click.stop="openArchiveEditor(item)">自动上传</button></span><button v-if="archiveNeedsLocation(item)" class="location-warning" :aria-label="`重新定位 ${item.name} 的本机来源`" title="重新定位本机来源" @click.stop="openArchiveEditor(item, true)"><AlertTriangle :size="13" /></button><i v-else :class="item.lastSnapshotAt ? 'synced' : 'local'"><Check v-if="item.lastSnapshotAt" :size="13" /><HardDrive v-else :size="13" /></i></span><small>{{ archiveNeedsLocation(item) ? '等待定位本机来源' : displaySourcePath(item.sourcePath) }}</small><span class="meta"><span>{{ item.category }}</span><span>{{ formatBytes(item.totalBytes) }}</span><span>{{ formatTime(item.lastSnapshotAt) }}</span></span></span>
           </article>
           <div v-if="!loading && !archives.length" class="empty-state"><span class="empty-icon"><FolderArchive :size="26" /></span><b>添加第一个存档</b><p>把一个或多个文件、文件夹组合为可查询和恢复的时间线。</p><button @click="openCreateArchive"><Plus :size="16" />添加存档</button></div>
           <div v-else-if="!loading && !filteredArchives.length" class="empty"><Search :size="22" /><span>没有找到匹配的存档</span></div>
@@ -1068,7 +1094,8 @@ onBeforeUnmount(() => {
     </main>
 
     <AppToast v-if="notice" :message="notice.message" :type="notice.type" @close="notice = undefined" />
-    <SettingsDialog v-if="settingsOpen" @close="settingsOpen = false" @saved="handleSettingsChanged" />
+    <SettingsDialog v-if="settingsOpen" :update-checking="updateChecking" @close="settingsOpen = false" @saved="handleSettingsChanged" @check-update="checkForApplicationUpdate(true, $event)" />
+    <UpdateDialog v-if="availableUpdate" :update="availableUpdate" @close="availableUpdate = undefined" />
     <CloudCenterDialog v-if="cloudSettingsOpen" @close="cloudSettingsOpen = false" @saved="handleCloudSettingsChanged" @downloaded="handleCloudDownload" @settings-downloaded="handleCloudSettingsDownload" />
     <CloudHealthDialog v-if="cloudHealthDialogOpen" :items="cloudHealthCheckItems" :running="cloudHealthCheckRunning" @close="cloudHealthDialogOpen = false" />
     <CreateCategoryDialog
@@ -1090,6 +1117,7 @@ onBeforeUnmount(() => {
       :edit-storage-policy="editingArchive?.storagePolicy"
       :edit-auto-backup-enabled="editingArchive?.autoBackupEnabled"
       :edit-automatic-upload-enabled="editingArchive?.automaticUploadEnabled"
+      :highlight-sources="highlightSources"
       @close="closeArchiveDialog"
       @pick="pickSources"
       @remove="pendingSources = pendingSources.filter((source) => source.id !== $event)"

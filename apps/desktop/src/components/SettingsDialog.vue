@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { BellRing, ClipboardCopy, FolderOpen, HardDrive, Info, Keyboard, RotateCcw, Settings2, Trash2, Undo2, X } from "@lucide/vue";
+import { BellRing, ClipboardCopy, FolderOpen, HardDrive, Info, Keyboard, RefreshCw, RotateCcw, Settings2, Trash2, Undo2, X } from "@lucide/vue";
 import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { computed, onMounted, reactive, ref, watch } from "vue";
-import { appSettings, resetAppSettings, saveAppSettings, type AppSettings, type CloseBehavior } from "../services/settings";
+import { appSettings, resetAppSettings, saveAppSettings, type AppSettings, type CloseBehavior, type UpdateChannel } from "../services/settings";
 import { type ColorMode, type ColorTheme } from "../services/appearance";
 import { archiveRepository } from "../services/repository";
 import { createBackdropDismissal } from "../services/dialogDismissal";
@@ -15,7 +15,8 @@ import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
 import appIcon from "../assets/icon.png";
 import { appMetadata } from "../services/appMetadata";
 
-const emit = defineEmits<{ close: []; saved: [] }>();
+const props = withDefaults(defineProps<{ updateChecking?: boolean }>(), { updateChecking: false });
+const emit = defineEmits<{ close: []; saved: []; "check-update": [channel: UpdateChannel] }>();
 const activeSection = ref<"software" | "notifications" | "backup" | "recycle" | "hotkeys" | "about">("software");
 const closeButton = ref<HTMLButtonElement>();
 const draft = reactive<AppSettings>({ ...appSettings });
@@ -39,6 +40,10 @@ const closeBehaviorOptions: ThemedSelectOption[] = [
   { value: "ask", label: "每次询问" },
   { value: "tray", label: "最小化到托盘" },
   { value: "exit", label: "退出 Chronicle" },
+];
+const updateChannelOptions: ThemedSelectOption[] = [
+  { value: "stable", label: "正式版" },
+  { value: "beta", label: "测试版（含正式版）" },
 ];
 const colorThemeOptions: ThemedSelectOption[] = [
   { value: "teal", label: "青绿" },
@@ -147,6 +152,10 @@ function updateCloseBehavior(value: string | null): void {
   if (value) draft.closeBehavior = value as CloseBehavior;
 }
 
+function updateUpdateChannel(value: string | null): void {
+  if (value === "stable" || value === "beta") draft.updateChannel = value;
+}
+
 function updateColorTheme(value: string | null): void {
   if (value) draft.colorTheme = value as ColorTheme;
 }
@@ -226,7 +235,6 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
               <label class="setting-row select-row"><span><b>配色主题</b><small>为 Chronicle 选择一组强调色。</small></span><ThemedSelect :model-value="draft.colorTheme" :options="colorThemeOptions" label="配色主题" @update:model-value="updateColorTheme" /></label>
               <label class="setting-row select-row"><span><b>显示模式</b><small>右上角太阳/月亮按钮可随时切换。</small></span><ThemedSelect :model-value="draft.colorMode" :options="colorModeOptions" label="显示模式" @update:model-value="updateColorMode" /></label>
               <label class="setting-row"><span><b>随系统启动</b><small>登录 Windows 后自动启动 Chronicle</small></span><input v-model="draft.launchAtStartup" type="checkbox" role="switch" /></label>
-              <label class="setting-row"><span><b>自动检查更新</b><small>启动后检查稳定版本更新</small></span><input v-model="draft.checkForUpdates" type="checkbox" role="switch" /></label>
               <label class="setting-row"><span><b>启动时检测云端</b><small>后台验证全部同步源的读写、列举与清理能力</small></span><input v-model="draft.checkCloudOnLaunch" type="checkbox" role="switch" /></label>
               <label class="setting-row"><span><b>桌面通知</b><small>备份、同步和恢复完成后显示通知</small></span><input v-model="draft.notifications" type="checkbox" role="switch" /></label>
               <label class="setting-row select-row"><span><b>关闭主窗口时</b><small>决定关闭按钮的默认行为</small></span><ThemedSelect :model-value="draft.closeBehavior" :options="closeBehaviorOptions" label="关闭主窗口时" @update:model-value="updateCloseBehavior" /></label>
@@ -242,10 +250,10 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
           </section>
 
           <section v-else-if="activeSection === 'backup'" aria-labelledby="backup-title">
-            <div class="section-heading"><h3 id="backup-title">存储与备份</h3><p>设置新存档、监听静默时间和本地版本保留方式。</p></div>
+            <div class="section-heading"><h3 id="backup-title">存储与备份</h3><p>设置新存档、监听合并时间和本地版本保留方式。</p></div>
             <div class="setting-group">
               <label class="setting-row"><span><b>立即创建首个备份</b><small>添加文件或文件夹后建立初始时间节点</small></span><input v-model="draft.createInitialSnapshot" type="checkbox" role="switch" /></label>
-              <label class="setting-row"><span><b>静默时间</b><small>连续变化停止后等待秒数，默认 5 秒</small></span><div class="number-control"><input v-model.number="draft.autoBackupDelaySeconds" class="number-input" type="number" min="1" max="300" aria-label="自动备份静默秒数" /><em>秒</em></div></label>
+              <label class="setting-row"><span><b>合并时间</b><small>首次变化立即备份；窗口结束时再保存一次最新状态，默认 5 秒</small></span><div class="number-control"><input v-model.number="draft.autoBackupDelaySeconds" class="number-input" type="number" min="1" max="300" aria-label="自动备份合并秒数" /><em>秒</em></div></label>
               <div class="setting-row automation-actions"><span><b>批量自动化</b><small>按存档分别保存；已开启的项目再次点击可全部关闭。</small></span><div><button :class="{ danger: allAutoBackupEnabled }" :disabled="automationBusy || !automationArchives.length" @click="toggleAllAutomation('backup')">{{ allAutoBackupEnabled ? '关闭所有自动备份' : '开启所有自动备份' }}</button><button :class="{ danger: allAutomaticUploadEnabled }" :disabled="automationBusy || !automationArchives.length" @click="toggleAllAutomation('upload')">{{ allAutomaticUploadEnabled ? '关闭所有自动上传' : '开启所有自动上传' }}</button></div></div>
               <div class="setting-row"><span><b>每个存档保留版本</b><small>默认保留全部版本；设置上限后清理最旧的普通备份</small></span><div class="retention-control"><input v-if="draft.retentionCount !== null" v-model.number="draft.retentionCount" aria-label="版本保留数量" class="number-input" type="number" min="1" max="999" /><label><span>无限制</span><input :checked="draft.retentionCount === null" type="checkbox" role="switch" @change="toggleRetentionLimit" /></label></div></div>
               <label class="setting-row"><span><b>启用回收站</b><small>删除的存档先移入回收站；关闭后直接永久删除</small></span><input v-model="draft.recycleBinEnabled" type="checkbox" role="switch" /></label>
@@ -279,6 +287,11 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
           <section v-else aria-labelledby="about-title">
             <div class="section-heading"><h3 id="about-title">关于</h3><p>本地云端通用文件快照管理器。</p></div>
             <div class="about-card"><img class="about-logo" :src="appIcon" alt="Chronicle 图标" /><div><h4>{{ appMetadata.name }}</h4><p>版本 {{ appMetadata.version }}</p><p>作者 {{ appMetadata.author }}</p></div></div>
+            <div class="setting-group about-update-group">
+              <label class="setting-row select-row"><span><b>更新频道</b><small>正式版只检查稳定发布；测试版同时接收预发布版本。</small></span><ThemedSelect :model-value="draft.updateChannel" :options="updateChannelOptions" label="更新频道" @update:model-value="updateUpdateChannel" /></label>
+              <label class="setting-row"><span><b>启动时检查更新</b><small>发现新版本时显示更新说明，不会自动下载。</small></span><input v-model="draft.checkForUpdates" type="checkbox" role="switch" /></label>
+              <div class="setting-row about-update-action"><span><b>手动检查</b><small>立即检查所选频道是否有新版本。</small></span><button :disabled="props.updateChecking" @click="emit('check-update', draft.updateChannel)"><RefreshCw :size="15" :class="{ spinning: props.updateChecking }" />{{ props.updateChecking ? '检查中' : '检查更新' }}</button></div>
+            </div>
             <dl class="about-list"><div><dt>存储引擎</dt><dd>Rust · 7z · SHA-256</dd></div><div><dt>桌面框架</dt><dd>Tauri 2 · Vue 3</dd></div><div><dt>许可证</dt><dd>尚未指定</dd></div></dl>
             <a href="https://github.com/ThermalEX/Chronicle" target="_blank" rel="noreferrer">查看 GitHub 仓库</a>
           </section>
@@ -311,6 +324,7 @@ main { min-width: 0; overflow-y: auto; padding: 28px 32px 36px; }
 .section-heading p { margin: 6px 0 0; color: var(--text-3); font-size: 11px; }
 .setting-group { overflow: hidden; border: 1px solid var(--border); border-radius: 10px; }
 .setting-row { display: flex; align-items: center; justify-content: space-between; min-height: 70px; gap: 28px; padding: 12px 16px; background: var(--surface); }
+.about-update-group { margin-top: 16px; }.about-update-action button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; min-height: 34px; padding: 0 12px; color: var(--primary-dark); background: var(--primary-soft); border: 1px solid var(--border-2); border-radius: 7px; font-size: 11px; font-weight: 650; }.about-update-action button:hover:not(:disabled) { background: var(--hover); }.about-update-action button:disabled { cursor: default; opacity: .62; }.spinning { animation: spin .85s linear infinite; }@keyframes spin { to { transform: rotate(360deg); } }
 .setting-row + .setting-row { border-top: 1px solid var(--border); }
 .setting-row > span { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
 .setting-row b { font-size: 12px; font-weight: 650; }

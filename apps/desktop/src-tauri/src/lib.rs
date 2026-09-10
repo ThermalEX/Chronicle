@@ -2,13 +2,21 @@ mod auto_backup;
 mod cloud;
 mod commands;
 mod storage_root;
+mod update;
 #[cfg(test)]
 mod storage_root_tests;
 
-use std::{io, sync::{Arc, Mutex}};
+use std::{
+    io,
+    sync::{Arc, Mutex},
+};
 
 use chronicle_storage::LocalRepository;
-use tauri::{Emitter, Manager, WindowEvent, menu::{Menu, MenuItem}, tray::TrayIconBuilder};
+use tauri::{
+    Emitter, Manager, WindowEvent,
+    menu::{Menu, MenuItem},
+    tray::TrayIconBuilder,
+};
 
 pub(crate) struct AppState {
     pub repository: Arc<Mutex<LocalRepository>>,
@@ -23,6 +31,7 @@ pub(crate) struct AppState {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let executable = std::env::current_exe()?;
@@ -34,27 +43,61 @@ pub fn run() {
                 .map_err(|error| io::Error::other(error.to_string()))?;
             let repository = Arc::new(Mutex::new(repository));
             app.manage(AppState {
-                auto_backup: auto_backup::AutoBackupManager::new(repository.clone(), app.handle().clone()),
+                auto_backup: auto_backup::AutoBackupManager::new(
+                    repository.clone(),
+                    app.handle().clone(),
+                ),
                 repository,
             });
             let show = MenuItem::with_id(app, "show", "显示 Chronicle", true, None::<&str>)?;
             let exit = MenuItem::with_id(app, "exit", "退出 Chronicle", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &exit])?;
-            let tray_icon = app.default_window_icon().cloned()
+            let tray_icon = app
+                .default_window_icon()
+                .cloned()
                 .ok_or_else(|| io::Error::other("Chronicle tray icon is missing"))?;
-            TrayIconBuilder::with_id("main-tray").icon(tray_icon).menu(&menu).on_menu_event(|app, event| match event.id.as_ref() {
-                "show" => { if let Some(window) = app.get_webview_window("main") { let _ = window.show(); let _ = window.set_focus(); } }
-                "exit" => app.exit(0),
-                _ => {}
-            }).build(app)?;
+            TrayIconBuilder::with_id("main-tray")
+                .icon(tray_icon)
+                .menu(&menu)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "exit" => app.exit(0),
+                    _ => {}
+                })
+                .build(app)?;
             Ok(())
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                let behavior = window.state::<AppState>().repository.lock().ok().and_then(|repository| repository.load_settings().ok()).and_then(|settings| settings.pointer("/app/closeBehavior").and_then(serde_json::Value::as_str).map(str::to_owned)).unwrap_or_else(|| "ask".into());
+                let behavior = window
+                    .state::<AppState>()
+                    .repository
+                    .lock()
+                    .ok()
+                    .and_then(|repository| repository.load_settings().ok())
+                    .and_then(|settings| {
+                        settings
+                            .pointer("/app/closeBehavior")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| "ask".into());
                 match behavior.as_str() {
-                    "tray" => { api.prevent_close(); let _ = window.hide(); }
-                    "ask" => { api.prevent_close(); let _ = window.emit("chronicle-close-requested", ()); }
+                    "tray" => {
+                        api.prevent_close();
+                        if window.hide().is_ok() {
+                            let _ = window.emit("chronicle-hidden-to-tray", ());
+                        }
+                    }
+                    "ask" => {
+                        api.prevent_close();
+                        let _ = window.emit("chronicle-close-requested", ());
+                    }
                     _ => {}
                 }
             }
@@ -84,6 +127,7 @@ pub fn run() {
             commands::delete_snapshot,
             commands::verify_snapshot,
             commands::restore_snapshot,
+            update::download_and_install_update,
             commands::load_settings,
             commands::save_settings,
             commands::append_diagnostic,

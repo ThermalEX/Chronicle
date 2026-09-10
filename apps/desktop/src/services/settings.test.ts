@@ -90,3 +90,13 @@ describe("automatic backup settings", () => {
     expect(settings).not.toHaveProperty("automaticUploadEnabled");
   });
 });
+
+describe("update channel settings", () => {
+  it("uses the stable channel when older settings do not contain a channel", () => {
+    expect(normalizeAppSettings({}).updateChannel).toBe("stable");
+  });
+
+  it("keeps the explicitly selected beta channel", () => {
+    expect(normalizeAppSettings({ updateChannel: "beta" } as any).updateChannel).toBe("beta");
+  });
+});
