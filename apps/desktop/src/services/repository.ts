@@ -18,6 +18,8 @@ export interface ArchiveRepository {
   pickSources(kind: SourceKind): Promise<ArchiveSource[]>;
   createArchive(input: CreateArchiveInput): Promise<ArchiveRecord>;
   updateArchive(archiveId: string, input: CreateArchiveInput): Promise<ArchiveRecord>;
+  setArchiveAutomation(archiveId: string, autoBackupEnabled: boolean, automaticUploadEnabled: boolean): Promise<void>;
+  refreshAutoBackup(): Promise<void>;
   deleteArchive(archiveId: string, recycleBinEnabled: boolean, recycleBinPath?: string): Promise<void>;
   deleteCategory(categoryId: string, recycleBinEnabled: boolean, recycleBinPath?: string): Promise<void>;
   listCategories(): Promise<CategoryRecord[]>;
@@ -86,6 +88,12 @@ class TauriArchiveRepository implements ArchiveRepository {
       syncMode: input.syncMode,
     });
   }
+
+  setArchiveAutomation(archiveId: string, autoBackupEnabled: boolean, automaticUploadEnabled: boolean): Promise<void> {
+    return invoke("set_entry_automation", { entryId: archiveId, autoBackupEnabled, automaticUploadEnabled });
+  }
+
+  refreshAutoBackup(): Promise<void> { return invoke("refresh_auto_backup"); }
 
   deleteArchive(archiveId: string, recycleBinEnabled: boolean, recycleBinPath?: string): Promise<void> {
     return invoke("delete_entry", { entryId: archiveId, recycleBinEnabled, recycleBinPath: recycleBinPath || null });

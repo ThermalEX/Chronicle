@@ -3,12 +3,12 @@ import { BellRing, ClipboardCopy, FolderOpen, HardDrive, Info, Keyboard, RotateC
 import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { computed, onMounted, reactive, ref, watch } from "vue";
-import { appSettings, resetAppSettings, saveAppSettings, type AppSettings, type BackupSchedule, type CloseBehavior } from "../services/settings";
+import { appSettings, resetAppSettings, saveAppSettings, type AppSettings, type CloseBehavior } from "../services/settings";
 import { type ColorMode, type ColorTheme } from "../services/appearance";
 import { archiveRepository } from "../services/repository";
 import { createBackdropDismissal } from "../services/dialogDismissal";
 import { diagnosticsRepository, type DiagnosticEntry } from "../services/diagnostics";
-import type { RecycleItem } from "../domain";
+import type { ArchiveRecord, RecycleItem } from "../domain";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import ShortcutRecorder from "./ShortcutRecorder.vue";
 import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
@@ -29,19 +29,16 @@ const diagnostics = ref<DiagnosticEntry[]>([]);
 const diagnosticsBusy = ref(false);
 const diagnosticsError = ref("");
 const repositoryPath = ref("");
+const automationArchives = ref<ArchiveRecord[]>([]);
+const automationBusy = ref(false);
 const confirmAction = ref<{ title: string; message: string; run: () => Promise<void> }>();
 const recycleLocation = computed(() => draft.recycleBinPath || (repositoryPath.value ? `${repositoryPath.value}\\recycle` : "Chronicle\\recycle"));
+const allAutoBackupEnabled = computed(() => automationArchives.value.length > 0 && automationArchives.value.every((archive) => archive.autoBackupEnabled));
+const allAutomaticUploadEnabled = computed(() => automationArchives.value.length > 0 && automationArchives.value.every((archive) => archive.automaticUploadEnabled));
 const closeBehaviorOptions: ThemedSelectOption[] = [
   { value: "ask", label: "每次询问" },
   { value: "tray", label: "最小化到托盘" },
   { value: "exit", label: "退出 Chronicle" },
-];
-const backupScheduleOptions: ThemedSelectOption[] = [
-  { value: "off", label: "关闭" },
-  { value: "15m", label: "每 15 分钟" },
-  { value: "1h", label: "每小时" },
-  { value: "6h", label: "每 6 小时" },
-  { value: "daily", label: "每天" },
 ];
 const colorThemeOptions: ThemedSelectOption[] = [
   { value: "teal", label: "青绿" },
@@ -130,6 +127,7 @@ async function save(): Promise<void> {
   if (draft.retentionCount !== null) {
     draft.retentionCount = Math.max(1, Math.min(999, Number(draft.retentionCount) || 30));
   }
+  draft.autoBackupDelaySeconds = Math.max(1, Math.min(300, Number(draft.autoBackupDelaySeconds) || 5));
   saving.value = true;
   try {
     await saveAppSettings({ ...draft });
@@ -147,10 +145,6 @@ function toggleRetentionLimit(event: Event): void {
 
 function updateCloseBehavior(value: string | null): void {
   if (value) draft.closeBehavior = value as CloseBehavior;
-}
-
-function updateBackupSchedule(value: string | null): void {
-  if (value) draft.backupSchedule = value as BackupSchedule;
 }
 
 function updateColorTheme(value: string | null): void {
@@ -181,10 +175,29 @@ async function openRecycleBin(): Promise<void> {
   }
 }
 
+async function toggleAllAutomation(kind: "backup" | "upload"): Promise<void> {
+  automationBusy.value = true;
+  try {
+    const archives = await archiveRepository.listArchives();
+    const enabled = kind === "backup" ? !archives.every((archive) => archive.autoBackupEnabled) : !archives.every((archive) => archive.automaticUploadEnabled);
+    await Promise.all(archives.map((archive) => archiveRepository.setArchiveAutomation(
+      archive.id,
+      kind === "backup" ? enabled : archive.autoBackupEnabled,
+      kind === "upload" ? enabled : archive.automaticUploadEnabled,
+    )));
+    if (kind === "backup") await archiveRepository.refreshAutoBackup();
+    automationArchives.value = await archiveRepository.listArchives();
+    emit("saved");
+  } finally {
+    automationBusy.value = false;
+  }
+}
+
 onMounted(() => {
   closeButton.value?.focus();
   void loadRecycleItems();
   void loadDiagnostics();
+  void archiveRepository.listArchives().then((archives) => { automationArchives.value = archives; });
   void archiveRepository.getRepositoryInfo().then((info) => { repositoryPath.value = info.path; });
 });
 
@@ -229,16 +242,16 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
           </section>
 
           <section v-else-if="activeSection === 'backup'" aria-labelledby="backup-title">
-            <div class="section-heading"><h3 id="backup-title">存储与备份</h3><p>设置新存档、自动备份和本地版本保留方式。</p></div>
+            <div class="section-heading"><h3 id="backup-title">存储与备份</h3><p>设置新存档、监听静默时间和本地版本保留方式。</p></div>
             <div class="setting-group">
               <label class="setting-row"><span><b>立即创建首个备份</b><small>添加文件或文件夹后建立初始时间节点</small></span><input v-model="draft.createInitialSnapshot" type="checkbox" role="switch" /></label>
-              <label class="setting-row select-row"><span><b>自动备份频率</b><small>仅在 Chronicle 运行时执行</small></span><ThemedSelect :model-value="draft.backupSchedule" :options="backupScheduleOptions" label="自动备份频率" @update:model-value="updateBackupSchedule" /></label>
-              <div class="setting-row"><span><b>每个存档保留版本</b><small>默认保留全部版本；设置上限后清理最旧的普通备份</small></span><div class="retention-control"><label><input :checked="draft.retentionCount === null" type="checkbox" role="switch" @change="toggleRetentionLimit" /><span>无限制</span></label><input v-if="draft.retentionCount !== null" v-model.number="draft.retentionCount" aria-label="版本保留数量" class="number-input" type="number" min="1" max="999" /></div></div>
+              <label class="setting-row"><span><b>静默时间</b><small>连续变化停止后等待秒数，默认 5 秒</small></span><div class="number-control"><input v-model.number="draft.autoBackupDelaySeconds" class="number-input" type="number" min="1" max="300" aria-label="自动备份静默秒数" /><em>秒</em></div></label>
+              <div class="setting-row automation-actions"><span><b>批量自动化</b><small>按存档分别保存；已开启的项目再次点击可全部关闭。</small></span><div><button :class="{ danger: allAutoBackupEnabled }" :disabled="automationBusy || !automationArchives.length" @click="toggleAllAutomation('backup')">{{ allAutoBackupEnabled ? '关闭所有自动备份' : '开启所有自动备份' }}</button><button :class="{ danger: allAutomaticUploadEnabled }" :disabled="automationBusy || !automationArchives.length" @click="toggleAllAutomation('upload')">{{ allAutomaticUploadEnabled ? '关闭所有自动上传' : '开启所有自动上传' }}</button></div></div>
+              <div class="setting-row"><span><b>每个存档保留版本</b><small>默认保留全部版本；设置上限后清理最旧的普通备份</small></span><div class="retention-control"><input v-if="draft.retentionCount !== null" v-model.number="draft.retentionCount" aria-label="版本保留数量" class="number-input" type="number" min="1" max="999" /><label><span>无限制</span><input :checked="draft.retentionCount === null" type="checkbox" role="switch" @change="toggleRetentionLimit" /></label></div></div>
               <label class="setting-row"><span><b>启用回收站</b><small>删除的存档先移入回收站；关闭后直接永久删除</small></span><input v-model="draft.recycleBinEnabled" type="checkbox" role="switch" /></label>
               <div class="setting-row recycle-path"><span><b>回收站位置</b><small>点击路径可在资源管理器中打开；右侧按钮用于选择新的位置</small></span><div><button class="recycle-location" type="button" :title="recycleLocation" :disabled="!isTauri()" @click="openRecycleBin">{{ recycleLocation }}</button><button aria-label="选择回收站文件夹" title="选择回收站文件夹" :disabled="!isTauri()" @click="chooseRecycleBinPath"><FolderOpen :size="15" /></button></div></div>
               <p v-if="recycleLocationError" class="recycle-location-error" role="alert">{{ recycleLocationError }}</p>
             </div>
-            <div class="path-card"><HardDrive :size="18" /><span><b>本地资料库</b><small>由 Chronicle 桌面应用数据目录管理</small></span><em>可用</em></div>
           </section>
 
           <section v-else-if="activeSection === 'recycle'" aria-labelledby="recycle-title">
@@ -264,7 +277,7 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
           </section>
 
           <section v-else aria-labelledby="about-title">
-            <div class="section-heading"><h3 id="about-title">关于</h3><p>本地优先的通用文件时间节点管理器。</p></div>
+            <div class="section-heading"><h3 id="about-title">关于</h3><p>本地云端通用文件快照管理器。</p></div>
             <div class="about-card"><img class="about-logo" :src="appIcon" alt="Chronicle 图标" /><div><h4>{{ appMetadata.name }}</h4><p>版本 {{ appMetadata.version }}</p><p>作者 {{ appMetadata.author }}</p></div></div>
             <dl class="about-list"><div><dt>存储引擎</dt><dd>Rust · 7z · SHA-256</dd></div><div><dt>桌面框架</dt><dd>Tauri 2 · Vue 3</dd></div><div><dt>许可证</dt><dd>尚未指定</dd></div></dl>
             <a href="https://github.com/ThermalEX/Chronicle" target="_blank" rel="noreferrer">查看 GitHub 仓库</a>
@@ -302,13 +315,17 @@ main { min-width: 0; overflow-y: auto; padding: 28px 32px 36px; }
 .setting-row > span { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
 .setting-row b { font-size: 12px; font-weight: 650; }
 .setting-row small { color: var(--text-3); font-size: 10px; line-height: 1.4; }
-.select-row :deep(.themed-select), .setting-row input[type="text"], .number-input { min-width: 152px; }
+.select-row :deep(.themed-select), .setting-row input[type="text"] { min-width: 152px; }
 .setting-row input[type="checkbox"] { position: relative; width: 38px; height: 22px; flex: none; appearance: none; background: #cbd5d1; border-radius: 20px; cursor: pointer; transition: background .16s ease; }
 .setting-row input[type="checkbox"]::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; background: #fff; border-radius: 50%; box-shadow: 0 1px 3px #102b2738; transition: transform .16s ease; }
 .setting-row input[type="checkbox"]:checked { background: var(--primary); }
 .setting-row input[type="checkbox"]:checked::after { transform: translateX(16px); }
-.number-input { min-width: 82px; width: 82px; }
-.retention-control { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }.retention-control label { display: flex; align-items: center; gap: 7px; color: var(--text-2); font-size: 10px; white-space: nowrap; }
+.number-control, .retention-control { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.number-control em { color: var(--text-3); font-size: 10px; font-style: normal; white-space: nowrap; }
+.number-input { width: 104px; height: 38px; padding: 0 10px; color: var(--text); background: var(--field); border: 1px solid var(--border-2); border-radius: 7px; font-size: 11px; font-variant-numeric: tabular-nums; }
+.number-input:focus { outline: 0; border-color: var(--primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 16%, transparent); }
+.retention-control label { display: flex; align-items: center; gap: 7px; color: var(--text-2); font-size: 10px; white-space: nowrap; }.retention-control .number-input { flex: 0 0 auto; }
+.automation-actions > div { display: flex; gap: 8px; }.automation-actions button { min-height: 34px; padding: 0 10px; color: var(--primary-dark); background: var(--primary-soft); border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border)); border-radius: 7px; font-size: 10px; font-weight: 650; }.automation-actions button.danger { color: var(--danger); background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 38%, var(--border)); }.automation-actions button:disabled { color: var(--text-3); background: var(--subtle); cursor: default; opacity: .65; }
 .recycle-path > div { display: flex; align-items: center; gap: 7px; }.recycle-path input { width: 220px; }.recycle-path button { display: grid; place-items: center; width: 34px; height: 34px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 6px; }.recycle-path button:hover:not(:disabled) { background: #d2e5e0; }.recycle-path button:disabled { color: var(--text-3); cursor: default; opacity: .55; }
 .path-card { display: grid; grid-template-columns: 22px 1fr auto; align-items: center; gap: 11px; margin-top: 16px; padding: 14px 16px; color: var(--primary); background: var(--primary-soft); border-radius: 9px; }
 .path-card span { display: flex; flex-direction: column; gap: 3px; color: #263431; }

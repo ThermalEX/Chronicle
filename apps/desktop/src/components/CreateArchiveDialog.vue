@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { File, Folder, HardDrive, Plus, Trash2, UploadCloud, X } from "@lucide/vue";
 import { onMounted, ref, watch } from "vue";
-import type { ArchiveSource, ArchiveSyncMode, CreateArchiveInput, SourceKind, StoragePolicy } from "../domain";
+import type { ArchiveSource, CreateArchiveInput, SourceKind, StoragePolicy } from "../domain";
 import { createBackdropDismissal } from "../services/dialogDismissal";
 import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
 
@@ -13,7 +13,8 @@ const props = defineProps<{
   error?: string;
   editName?: string;
   editStoragePolicy?: StoragePolicy;
-  editSyncMode?: ArchiveSyncMode;
+  editAutoBackupEnabled?: boolean;
+  editAutomaticUploadEnabled?: boolean;
 }>();
 const emit = defineEmits<{
   close: [];
@@ -24,15 +25,12 @@ const emit = defineEmits<{
 
 const name = ref(props.editName ?? "");
 const storagePolicy = ref<StoragePolicy>(props.editStoragePolicy ?? "local");
-const syncMode = ref<ArchiveSyncMode>(props.editSyncMode ?? "manual");
+const autoBackupEnabled = ref(props.editAutoBackupEnabled ?? false);
+const automaticUploadEnabled = ref(props.editAutomaticUploadEnabled ?? false);
 const createInitialSnapshot = ref(props.defaultInitialSnapshot);
 const nameInput = ref<HTMLInputElement>();
 const attempted = ref(false);
 const backdrop = createBackdropDismissal(() => emit("close"), () => !props.submitting);
-const syncModeOptions: ThemedSelectOption[] = [
-  { value: "manual", label: "手动同步" },
-  { value: "automatic", label: "本地变更后自动上传" },
-];
 
 watch(() => props.sources, (sources) => {
   if (!name.value && sources.length === 1) name.value = sources[0].name;
@@ -46,12 +44,10 @@ function submit(): void {
     sources: props.sources,
     storagePolicy: storagePolicy.value,
     createInitialSnapshot: createInitialSnapshot.value,
-    syncMode: syncMode.value,
+    syncMode: "manual",
+    autoBackupEnabled: autoBackupEnabled.value,
+    automaticUploadEnabled: automaticUploadEnabled.value,
   });
-}
-
-function updateSyncMode(value: string | null): void {
-  if (value === "manual" || value === "automatic") syncMode.value = value;
 }
 
 onMounted(() => nameInput.value?.focus());
@@ -94,7 +90,8 @@ onMounted(() => nameInput.value?.focus());
             <label :class="{ selected: storagePolicy === 'local_and_remote' }"><input v-model="storagePolicy" type="radio" value="local_and_remote" /><UploadCloud :size="16" /><span><b>本地与云端</b><small>云端接入后自动加入同步</small></span></label>
           </div></div>
 
-        <label v-if="storagePolicy === 'local_and_remote'" class="field sync-mode-field"><span>同步方案</span><ThemedSelect :model-value="syncMode" :options="syncModeOptions" label="同步方案" @update:model-value="updateSyncMode" /><small>自动模式不会在启动时下载远端内容。</small></label>
+        <label class="initial-toggle"><span><b>自动备份</b><small>监听该存档的本机来源；文件变化停止后，按设置的静默时间自动创建快照。</small></span><input v-model="autoBackupEnabled" type="checkbox" role="switch" /></label>
+        <label class="initial-toggle"><span><b>自动上传</b><small>该存档生成新快照后自动上传到启用的云端同步源；仅“本地与云端”存档可上传。</small></span><input v-model="automaticUploadEnabled" type="checkbox" role="switch" /></label>
 
         <label v-if="!editName" class="initial-toggle"><span><b>创建后立即备份</b><small>生成第一个可恢复的 7z 时间节点</small></span><input v-model="createInitialSnapshot" type="checkbox" role="switch" /></label>
         <p v-if="error" class="submit-error" role="alert">{{ error }}</p>

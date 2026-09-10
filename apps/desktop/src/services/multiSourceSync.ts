@@ -13,12 +13,15 @@ export type SourceSyncOutcome<T> = {
 export async function runAcrossEnabledSources<T>(
   sources: CloudSource[],
   action: (source: CloudSource) => Promise<T>,
+  onSettled?: () => void,
 ): Promise<SourceSyncOutcome<T>[]> {
   return Promise.all(sources.map(async (source): Promise<SourceSyncOutcome<T>> => {
     try {
       return { source, status: "fulfilled", value: await action(source) };
     } catch (reason) {
       return { source, status: "rejected", reason };
+    } finally {
+      onSettled?.();
     }
   }));
 }

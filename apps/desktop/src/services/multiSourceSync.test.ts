@@ -30,4 +30,10 @@ describe("runAcrossEnabledSources", () => {
     expect(outcomes[1].status).toBe("rejected");
     if (outcomes[1].status === "rejected") expect(outcomes[1].reason).toBeInstanceOf(Error);
   });
+
+  it("reports progress once for every settled source", async () => {
+    let settled = 0;
+    await runAcrossEnabledSources(sources, async () => undefined, () => { settled += 1; });
+    expect(settled).toBe(2);
+  });
 });

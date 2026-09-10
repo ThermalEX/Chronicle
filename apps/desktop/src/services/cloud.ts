@@ -53,13 +53,29 @@ export const cloudRepository = {
     if (!isTauri()) desktopOnly();
     return invoke("cloud_overwrite_upload", { sourceId, entryId });
   },
-  download(sourceId: string, entryId: string): Promise<void> {
+  download(sourceId: string, entryId: string, useCloudCategoryTree = false): Promise<void> {
     if (!isTauri()) desktopOnly();
-    return invoke("cloud_overwrite_download", { sourceId, entryId });
+    return invoke("cloud_overwrite_download", { sourceId, entryId, useCloudCategoryTree });
+  },
+  uploadApplicationSettings(sourceId: string): Promise<void> {
+    if (!isTauri()) desktopOnly();
+    return invoke("cloud_upload_application_settings", { sourceId });
+  },
+  uploadEntryCategoryTree(sourceId: string, entryId: string): Promise<void> {
+    if (!isTauri()) desktopOnly();
+    return invoke("cloud_upload_entry_category_tree", { sourceId, entryId });
+  },
+  downloadApplicationSettings(sourceId: string, apply = false): Promise<void> {
+    if (!isTauri()) desktopOnly();
+    return invoke("cloud_download_application_settings", { sourceId, apply });
   },
   delete(sourceId: string, entryIds: string[]): Promise<void> {
     if (!isTauri()) desktopOnly();
     return invoke("cloud_delete_entries", { sourceId, entryIds });
+  },
+  deleteConfigurations(sourceId: string, configurationIds: string[]): Promise<void> {
+    if (!isTauri()) desktopOnly();
+    return invoke("cloud_delete_configurations", { sourceId, configurationIds });
   },
   setSyncMode(sourceId: string, entryId: string, syncMode: ArchiveSyncMode): Promise<void> {
     if (!isTauri()) desktopOnly();

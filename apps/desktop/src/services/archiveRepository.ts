@@ -208,7 +208,7 @@ export class BrowserArchiveRepository {
     await transactionDone(transaction);
     database.close();
     return records
-      .map((archive) => ({ ...archive, tags: archive.tags ?? [], syncMode: archive.syncMode ?? "manual" }))
+      .map((archive) => ({ ...archive, tags: archive.tags ?? [], syncMode: archive.syncMode ?? "manual", autoBackupEnabled: archive.autoBackupEnabled ?? false, automaticUploadEnabled: archive.automaticUploadEnabled ?? false }))
       .sort((left, right) => right.updatedAt - left.updatedAt);
   }
 
@@ -245,6 +245,8 @@ export class BrowserArchiveRepository {
       kind: input.sources.length === 1 ? input.sources[0].kind : "collection",
       storagePolicy: input.storagePolicy,
       syncMode: input.syncMode,
+      autoBackupEnabled: input.autoBackupEnabled,
+      automaticUploadEnabled: input.automaticUploadEnabled,
       createdAt: now,
       updatedAt: now,
       totalBytes: 0,
@@ -264,11 +266,21 @@ export class BrowserArchiveRepository {
       kind: input.sources.length === 1 ? input.sources[0].kind : "collection",
       storagePolicy: input.storagePolicy,
       syncMode: input.syncMode,
+      autoBackupEnabled: input.autoBackupEnabled,
+      automaticUploadEnabled: input.automaticUploadEnabled,
       updatedAt: Date.now(),
     };
     await this.putArchive(updated);
     return updated;
   }
+
+  async setArchiveAutomation(archiveId: string, autoBackupEnabled: boolean, automaticUploadEnabled: boolean): Promise<void> {
+    const archive = (await this.listArchives()).find((item) => item.id === archiveId);
+    if (!archive) throw new Error("存档不存在");
+    await this.putArchive({ ...archive, autoBackupEnabled, automaticUploadEnabled, updatedAt: Date.now() });
+  }
+
+  async refreshAutoBackup(): Promise<void> {}
 
   async deleteArchive(archiveId: string, recycleBinEnabled: boolean): Promise<void> {
     const archive = (await this.listArchives()).find((item) => item.id === archiveId);

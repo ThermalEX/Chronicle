@@ -62,9 +62,11 @@ describe("cloud repository adapter", () => {
     await cloudRepository.upload("source-1", "entry-1");
     expect(invoke).toHaveBeenCalledWith("cloud_overwrite_upload", { sourceId: "source-1", entryId: "entry-1" });
     await cloudRepository.download("source-1", "entry-1");
-    expect(invoke).toHaveBeenCalledWith("cloud_overwrite_download", { sourceId: "source-1", entryId: "entry-1" });
+    expect(invoke).toHaveBeenCalledWith("cloud_overwrite_download", { sourceId: "source-1", entryId: "entry-1", useCloudCategoryTree: false });
     await cloudRepository.delete("source-1", ["entry-1", "entry-2"]);
     expect(invoke).toHaveBeenCalledWith("cloud_delete_entries", { sourceId: "source-1", entryIds: ["entry-1", "entry-2"] });
+    await cloudRepository.deleteConfigurations("source-1", ["config:app-settings"]);
+    expect(invoke).toHaveBeenCalledWith("cloud_delete_configurations", { sourceId: "source-1", configurationIds: ["config:app-settings"] });
   });
 
   it("stores a GitHub token through the provider-specific credential command", async () => {

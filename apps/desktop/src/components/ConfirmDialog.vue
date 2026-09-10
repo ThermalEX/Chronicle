@@ -22,6 +22,7 @@ onMounted(() => cancelButton.value?.focus());
     <section class="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message">
       <header><span :class="{ destructive }"><AlertTriangle :size="20" /></span><div><p>需要确认</p><h2 id="confirm-title">{{ title }}</h2></div><button aria-label="关闭确认窗口" title="关闭确认窗口" :disabled="busy" @click="emit('cancel')"><X :size="18" /></button></header>
       <p id="confirm-message" class="message">{{ message }}</p>
+      <slot name="body-extra" />
       <footer><button ref="cancelButton" class="cancel" :disabled="busy" @click="emit('cancel')">取消</button><slot name="extra-actions" /><button class="confirm" :class="{ destructive }" :disabled="busy" @click="emit('confirm')">{{ busy ? '处理中' : (confirmLabel || '确认') }}</button></footer>
     </section>
   </div>
@@ -35,7 +36,9 @@ header > span { display: grid; place-items: center; width: 38px; height: 38px; c
 header p, header h2 { margin: 0; }header p { color: var(--text-3); font-size: 9px; font-weight: 700; }header h2 { margin-top: 3px; font-size: 17px; }
 header button { display: grid; place-items: center; width: 38px; height: 38px; background: transparent; border-radius: 7px; }header button:hover { background: var(--hover); }
 .message { margin: 0; padding: 20px 22px; color: var(--text-2); font-size: 12px; line-height: 1.65; white-space: pre-line; }
-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 13px 18px; background: #f8faf9; border-top: 1px solid var(--border); }footer button { min-height: 36px; padding: 0 14px; border-radius: 7px; font-size: 11px; font-weight: 650; }.cancel { background: transparent; }.cancel:hover { background: var(--hover); }.confirm { color: #fff; background: var(--primary); }.confirm.destructive { background: #b42318; }.confirm.destructive:hover { background: #912018; }
+footer { display: flex; justify-content: flex-end; gap: 8px; padding: 13px 18px; background: #f8faf9; border-top: 1px solid var(--border); }footer button { min-height: 36px; padding: 0 14px; border: 1px solid transparent; border-radius: 7px; font-size: 11px; font-weight: 650; }.cancel { color: var(--text-2); background: var(--surface); border-color: var(--border-2); }.cancel:hover { color: var(--text); background: var(--hover); }.confirm { color: #fff; background: var(--primary); border-color: var(--primary); }.confirm.destructive { background: #b42318; border-color: #b42318; }.confirm.destructive:hover { background: #912018; }.exit-button { color: var(--danger); background: var(--surface); border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }.exit-button:hover { background: var(--danger-soft); }
 .confirm-dialog, footer { background: var(--surface); }
 .confirm { color: var(--on-primary); }
+::v-slotted(.exit-button) { min-height: 36px; padding: 0 14px; color: var(--danger); background: var(--surface); border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border)); border-radius: 7px; font-size: 11px; font-weight: 650; }
+::v-slotted(.exit-button:hover) { background: var(--danger-soft); }
 </style>

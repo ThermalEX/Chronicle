@@ -44,6 +44,8 @@ function archiveFor(handle: MemoryFileHandle): ArchiveRecord {
     kind: "file",
     storagePolicy: "local",
     syncMode: "manual",
+    autoBackupEnabled: false,
+    automaticUploadEnabled: false,
     createdAt: 1,
     updatedAt: 1,
     totalBytes: 0,
@@ -72,6 +74,8 @@ describe("ArchiveRepository", () => {
       sources,
       storagePolicy: "local",
       syncMode: "manual",
+      autoBackupEnabled: false,
+      automaticUploadEnabled: false,
       createInitialSnapshot: false,
     });
 
@@ -105,5 +109,17 @@ describe("ArchiveRepository", () => {
     expect(history).toHaveLength(3);
     expect(history[0].title).toBe("恢复前安全快照");
     expect(history[0].safety).toBe(true);
+  });
+
+  it("persists both per-archive automation options", async () => {
+    const repository = new BrowserArchiveRepository();
+    const archive = archiveFor(new MemoryFileHandle("settings.json", "version one"));
+    await repository.putArchive(archive);
+
+    await repository.setArchiveAutomation(archive.id, true, true);
+
+    const [updated] = await repository.listArchives();
+    expect(updated.autoBackupEnabled).toBe(true);
+    expect(updated.automaticUploadEnabled).toBe(true);
   });
 });

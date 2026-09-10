@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cloudLibraryIndicator, enabledCloudSources, normalizedCloud, shortcutFromKeyboardEvent, shortcutMatches, type CloudSettings } from "./settings";
+import { cloudLibraryIndicator, enabledCloudSources, normalizeAppSettings, normalizedCloud, shortcutFromKeyboardEvent, shortcutMatches, type CloudSettings } from "./settings";
 
 function keyEvent(key: string, options: Partial<KeyboardEvent> = {}): KeyboardEvent {
   return { key, ctrlKey: false, shiftKey: false, altKey: false, metaKey: false, ...options } as KeyboardEvent;
@@ -73,5 +73,20 @@ describe("multi-source cloud settings", () => {
 
     expect(migrated.sources[0].syncEnabled).toBe(false);
     expect(enabledCloudSources(migrated)).toEqual([]);
+  });
+});
+
+describe("automatic backup settings", () => {
+  it("migrates an old schedule into the global backup delay only", () => {
+    expect(normalizeAppSettings({ backupSchedule: "15m" })).toMatchObject({
+      autoBackupDelaySeconds: 300,
+    });
+  });
+
+  it("removes legacy global automation flags while keeping a five-second default", () => {
+    const settings = normalizeAppSettings({ autoBackupEnabled: true, automaticUploadEnabled: true, autoBackupDelaySeconds: 0 });
+    expect(settings.autoBackupDelaySeconds).toBe(5);
+    expect(settings).not.toHaveProperty("autoBackupEnabled");
+    expect(settings).not.toHaveProperty("automaticUploadEnabled");
   });
 });

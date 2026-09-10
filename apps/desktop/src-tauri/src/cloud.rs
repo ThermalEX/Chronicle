@@ -71,6 +71,10 @@ struct CatalogEntry {
     #[serde(default)]
     sync_mode: Value,
     #[serde(default)]
+    auto_backup_enabled: bool,
+    #[serde(default)]
+    automatic_upload_enabled: bool,
+    #[serde(default)]
     source_count: usize,
     #[serde(default)]
     snapshot_count: usize,
@@ -762,6 +766,26 @@ fn preview_from_catalog(
             updated_at: None,
             sync_mode: "manual".into(),
         },
+        RemoteItemDto {
+            id: "config:app-settings".into(),
+            name: "app-settings.json".into(),
+            kind: "config".into(),
+            protected: true,
+            snapshot_count: 0,
+            size_bytes: 0,
+            updated_at: None,
+            sync_mode: "manual".into(),
+        },
+        RemoteItemDto {
+            id: "config:category-tree".into(),
+            name: "category-tree.json".into(),
+            kind: "config".into(),
+            protected: true,
+            snapshot_count: 0,
+            size_bytes: 0,
+            updated_at: None,
+            sync_mode: "manual".into(),
+        },
     ];
     if let Some(catalog) = catalog {
         items.extend(catalog.entries.into_iter().map(|entry| RemoteItemDto {
@@ -785,6 +809,16 @@ fn preview_from_catalog(
     }
 }
 
+fn configuration_path(id: &str) -> Option<&'static str> {
+    match id {
+        "config:library" => Some("library.json"),
+        "config:catalog" => Some("catalog.json"),
+        "config:app-settings" => Some("app-settings.json"),
+        "config:category-tree" => Some("category-tree.json"),
+        _ => None,
+    }
+}
+
 async fn ensure_remote_layout(client: &RemoteStore) -> Result<(), String> {
     for path in ["", "archives"] {
         client
@@ -805,6 +839,53 @@ fn updated_library(root: &Path) -> Result<Value, String> {
     library["updatedAtMs"] = Value::from(unix_millis());
     write_json_atomic(&library_path, &library)?;
     Ok(library)
+}
+
+fn application_settings(root: &Path) -> Result<Value, String> {
+    let settings: Value = read_json(&root.join("config").join("settings.json"))?;
+    Ok(serde_json::json!({
+        "formatVersion": 1,
+        "updatedAtMs": unix_millis(),
+        "app": settings.get("app").cloned().unwrap_or_else(|| serde_json::json!({})),
+    }))
+}
+
+fn category_tree_for_entry(catalog: &Value, entry_id: &str) -> Result<Value, String> {
+    let entry = catalog.get("entries").and_then(Value::as_array).and_then(|entries| entries.iter().find(|entry| entry.get("id").and_then(Value::as_str) == Some(entry_id))).ok_or_else(|| "本地存档不存在".to_owned())?;
+    let all = catalog.get("categories").and_then(Value::as_array).cloned().unwrap_or_default();
+    let mut categories = Vec::new();
+    let mut parent = entry.get("category_id").and_then(Value::as_str).map(str::to_owned);
+    while let Some(id) = parent {
+        let Some(category) = all.iter().find(|item| item.get("id").and_then(Value::as_str) == Some(id.as_str())) else { break; };
+        parent = category.get("parent_id").and_then(Value::as_str).map(str::to_owned);
+        categories.push(category.clone());
+    }
+    Ok(serde_json::json!({
+        "formatVersion": 1,
+        "updatedAtMs": unix_millis(),
+        "categories": categories,
+    }))
+}
+
+fn apply_cloud_configuration(root: &Path, settings: &Value) -> Result<(), String> {
+    let settings_path = root.join("config").join("settings.json");
+    let mut local_settings: Value = read_json(&settings_path)?;
+    local_settings["app"] = settings.get("app").cloned().unwrap_or_else(|| serde_json::json!({}));
+    write_json_atomic(&settings_path, &local_settings)?;
+    Ok(())
+}
+
+fn merge_entry_category_tree(catalog: &mut Value, tree: &Value, entry_id: &str) {
+    let Some(categories) = tree.get("entries").and_then(Value::as_object).and_then(|entries| entries.get(entry_id)).and_then(Value::as_array) else { return; };
+    if !catalog["categories"].is_array() {
+        catalog["categories"] = Value::Array(Vec::new());
+    }
+    let local = catalog["categories"].as_array_mut().expect("categories initialized");
+    for category in categories {
+        let id = category.get("id").and_then(Value::as_str);
+        local.retain(|existing| existing.get("id").and_then(Value::as_str) != id);
+        local.push(category.clone());
+    }
 }
 
 async fn ensure_remote_library(client: &RemoteStore, root: &Path) -> Result<Value, String> {
@@ -960,6 +1041,7 @@ async fn github_overwrite_download(
     root: &Path,
     source_id: &str,
     entry_id: &str,
+    use_cloud_category_tree: bool,
 ) -> Result<(), String> {
     let remote_catalog_value: Value = client
         .get_json("catalog.json")
@@ -1032,6 +1114,7 @@ async fn github_overwrite_download(
         .cloned()
         .ok_or_else(|| "远端清单缺少存档".to_owned())?;
     entries.push(summary);
+    if use_cloud_category_tree { if let Ok(tree) = client.get_json::<Value>("category-tree.json").await { merge_entry_category_tree(&mut local_catalog, &tree, entry_id); } }
     if let Err(error) = write_json_atomic(&local_catalog_path, &local_catalog) {
         let _ = fs::remove_dir_all(&target);
         if backup.exists() {
@@ -1222,7 +1305,7 @@ async fn github_sync_entry(
             })
         }
         (None, Some(_)) => {
-            github_overwrite_download(client, root, source_id, entry_id).await?;
+            github_overwrite_download(client, root, source_id, entry_id, false).await?;
             Ok(SyncResultDto {
                 status: "downloaded".into(),
                 message: "已从 GitHub 下载存档".into(),
@@ -1283,7 +1366,7 @@ async fn github_sync_entry(
                 });
             }
             if remote_only {
-                github_overwrite_download(client, root, source_id, entry_id).await?;
+                github_overwrite_download(client, root, source_id, entry_id, false).await?;
                 return Ok(SyncResultDto {
                     status: "downloaded".into(),
                     message: "已下载 GitHub 新增时间节点".into(),
@@ -1677,11 +1760,69 @@ pub async fn cloud_overwrite_upload(
 }
 
 #[tauri::command(async)]
+pub async fn cloud_upload_application_settings(
+    state: State<'_, AppState>,
+    source_id: String,
+) -> Result<(), String> {
+    let (configured_source, root, request_policy) = configured_source(&state, &source_id)?;
+    let settings = application_settings(&root)?;
+    if configured_source.provider == "legacy_github" {
+        let client = github_client(&configured_source, credential(&configured_source)?, request_policy)?;
+        return client.commit_changes("Sync Chronicle application settings", vec![
+            GitHubChange { path: "app-settings.json".into(), contents: Some(serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?) },
+        ]).await.map_err(|error| error.to_string());
+    }
+    let (client, _, _) = configured_client(&state, &source_id)?;
+    client.put_json("app-settings.json", &settings).await.map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
+pub async fn cloud_upload_entry_category_tree(
+    state: State<'_, AppState>,
+    source_id: String,
+    entry_id: String,
+) -> Result<(), String> {
+    let (configured_source, root, request_policy) = configured_source(&state, &source_id)?;
+    let catalog: Value = read_json(&root.join("catalog.json"))?;
+    let branch = category_tree_for_entry(&catalog, &entry_id)?;
+    let mut tree = serde_json::json!({ "formatVersion": 1, "updatedAtMs": unix_millis(), "entries": {} });
+    if configured_source.provider == "legacy_github" {
+        let client = github_client(&configured_source, credential(&configured_source)?, request_policy)?;
+        if let Ok(existing) = client.get_json::<Value>("category-tree.json").await { tree = existing; }
+        tree["entries"][&entry_id] = branch["categories"].clone();
+        return client.commit_changes("Sync Chronicle archive category tree", vec![GitHubChange { path: "category-tree.json".into(), contents: Some(serde_json::to_vec_pretty(&tree).map_err(|error| error.to_string())?) }]).await.map_err(|error| error.to_string());
+    }
+    let (client, _, _) = configured_client(&state, &source_id)?;
+    if let Ok(existing) = client.get_json::<Value>("category-tree.json").await { tree = existing; }
+    tree["entries"][&entry_id] = branch["categories"].clone();
+    client.put_json("category-tree.json", &tree).await.map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
+pub async fn cloud_download_application_settings(
+    state: State<'_, AppState>,
+    source_id: String,
+    apply: bool,
+) -> Result<Value, String> {
+    let (configured_source, root, request_policy) = configured_source(&state, &source_id)?;
+    let settings: Value = if configured_source.provider == "legacy_github" {
+        let client = github_client(&configured_source, credential(&configured_source)?, request_policy)?;
+        client.get_json("app-settings.json").await.map_err(|error| error.to_string())?
+    } else {
+        let (client, _, _) = configured_client(&state, &source_id)?;
+        client.get_json("app-settings.json").await.map_err(|error| error.to_string())?
+    };
+    if apply { apply_cloud_configuration(&root, &settings)?; }
+    Ok(settings)
+}
+
+#[tauri::command(async)]
 #[allow(clippy::too_many_lines)]
 pub async fn cloud_overwrite_download(
     state: State<'_, AppState>,
     source_id: String,
     entry_id: String,
+    use_cloud_category_tree: bool,
 ) -> Result<(), String> {
     let (configured_source, root, request_policy) = configured_source(&state, &source_id)?;
     if configured_source.provider == "legacy_github" {
@@ -1690,7 +1831,7 @@ pub async fn cloud_overwrite_download(
             credential(&configured_source)?,
             request_policy,
         )?;
-        return github_overwrite_download(&client, &root, &source_id, &entry_id).await;
+        return github_overwrite_download(&client, &root, &source_id, &entry_id, use_cloud_category_tree).await;
     }
     let (client, _, root) = configured_client(&state, &source_id)?;
     let remote_catalog_value: Value = client
@@ -1763,6 +1904,7 @@ pub async fn cloud_overwrite_download(
         .cloned()
         .ok_or_else(|| "远端清单缺少存档".to_owned())?;
     entries.push(summary);
+    if use_cloud_category_tree { if let Ok(tree) = client.get_json::<Value>("category-tree.json").await { merge_entry_category_tree(&mut local_catalog, &tree, &entry_id); } }
     if let Err(error) = write_json_atomic(&local_catalog_path, &local_catalog) {
         let _ = fs::remove_dir_all(&target);
         if backup.exists() {
@@ -1914,7 +2056,7 @@ pub async fn cloud_sync_entry(
             })
         }
         (None, Some(_)) => {
-            cloud_overwrite_download(state, source_id, entry_id).await?;
+            cloud_overwrite_download(state, source_id, entry_id, false).await?;
             Ok(SyncResultDto {
                 status: "downloaded".into(),
                 message: "已下载远端存档".into(),
@@ -1982,7 +2124,7 @@ pub async fn cloud_sync_entry(
                 });
             }
             if remote_only {
-                cloud_overwrite_download(state, source_id, entry_id).await?;
+                cloud_overwrite_download(state, source_id, entry_id, false).await?;
                 return Ok(SyncResultDto {
                     status: "downloaded".into(),
                     message: "已下载远端新增时间节点".into(),
@@ -2096,6 +2238,41 @@ pub async fn cloud_delete_entries(
 }
 
 #[tauri::command(async)]
+pub async fn cloud_delete_configurations(
+    state: State<'_, AppState>,
+    source_id: String,
+    configuration_ids: Vec<String>,
+) -> Result<(), String> {
+    let paths = configuration_ids
+        .iter()
+        .map(|id| configuration_path(id).ok_or_else(|| "不支持删除该云端设置".to_owned()))
+        .collect::<Result<Vec<_>, _>>()?;
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let (configured_source, _, request_policy) = configured_source(&state, &source_id)?;
+    if configured_source.provider == "legacy_github" {
+        let client = github_client(&configured_source, credential(&configured_source)?, request_policy)?;
+        let changes = paths
+            .into_iter()
+            .map(|path| GitHubChange { path: path.into(), contents: None })
+            .collect();
+        return client
+            .commit_changes("Delete Chronicle cloud settings", changes)
+            .await
+            .map_err(|error| error.to_string());
+    }
+    let (client, _, _) = configured_client(&state, &source_id)?;
+    for path in paths {
+        match client.delete(path).await {
+            Ok(()) | Err(WebDavError::NotFound(_)) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command(async)]
 pub async fn cloud_set_entry_sync_mode(
     state: State<'_, AppState>,
     source_id: String,
@@ -2163,7 +2340,14 @@ pub async fn cloud_set_entry_sync_mode(
 mod tests {
     use serde_json::json;
 
-    use super::{merge_catalog_entry, missing_snapshot_archives};
+    use super::{category_tree_for_entry, configuration_path, merge_catalog_entry, missing_snapshot_archives, preview_from_catalog};
+
+    #[test]
+    fn configuration_deletion_only_targets_known_setting_files() {
+        assert_eq!(configuration_path("config:app-settings"), Some("app-settings.json"));
+        assert_eq!(configuration_path("config:category-tree"), Some("category-tree.json"));
+        assert_eq!(configuration_path("archive-1"), None);
+    }
 
     #[test]
     fn opendal_verification_binds_secrets_and_target_but_not_map_order() {
@@ -2289,5 +2473,28 @@ mod tests {
             missing_snapshot_archives(&local, &["already-there".into()]).unwrap(),
             vec!["new.7z"]
         );
+    }
+
+    #[test]
+    fn preview_exposes_application_settings_and_category_tree() {
+        let preview = preview_from_catalog("Cloud".into(), &json!({}), None);
+        let names = preview.items.into_iter().map(|item| item.name).collect::<Vec<_>>();
+        assert!(names.contains(&"app-settings.json".into()));
+        assert!(names.contains(&"category-tree.json".into()));
+    }
+
+    #[test]
+    fn category_tree_contains_only_the_downloaded_archive_branch() {
+        let catalog = json!({
+            "entries": [{ "id": "entry", "category_id": "child" }],
+            "categories": [
+                { "id": "root", "parent_id": null },
+                { "id": "child", "parent_id": "root" },
+                { "id": "other", "parent_id": null }
+            ]
+        });
+        let tree = category_tree_for_entry(&catalog, "entry").unwrap();
+        let ids = tree["categories"].as_array().unwrap().iter().map(|item| item["id"].as_str().unwrap()).collect::<Vec<_>>();
+        assert_eq!(ids, vec!["child", "root"]);
     }
 }

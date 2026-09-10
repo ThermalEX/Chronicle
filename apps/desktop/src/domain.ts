@@ -24,6 +24,8 @@ export type CreateArchiveInput = {
   storagePolicy: StoragePolicy;
   createInitialSnapshot: boolean;
   syncMode: ArchiveSyncMode;
+  autoBackupEnabled: boolean;
+  automaticUploadEnabled: boolean;
 };
 
 export type ArchiveRecord = {
@@ -37,6 +39,8 @@ export type ArchiveRecord = {
   kind: ArchiveKind;
   storagePolicy: StoragePolicy;
   syncMode: ArchiveSyncMode;
+  autoBackupEnabled: boolean;
+  automaticUploadEnabled: boolean;
   createdAt: number;
   updatedAt: number;
   totalBytes: number;

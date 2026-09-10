@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Command;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::AppState;
 
@@ -25,6 +25,8 @@ pub struct EntryDto {
     kind: &'static str,
     storage_policy: &'static str,
     sync_mode: &'static str,
+    auto_backup_enabled: bool,
+    automatic_upload_enabled: bool,
     created_at: u64,
     updated_at: u64,
     total_bytes: u64,
@@ -145,6 +147,8 @@ fn entry_dto(entry: Entry, latest: Option<&Snapshot>, category_name: Option<Stri
             SyncMode::Manual => "manual",
             SyncMode::Automatic => "automatic",
         },
+        auto_backup_enabled: entry.auto_backup_enabled,
+        automatic_upload_enabled: entry.automatic_upload_enabled,
         created_at: entry.created_at_ms,
         updated_at: latest.map_or(entry.created_at_ms, |snapshot| snapshot.created_at_ms),
         total_bytes: latest.map_or(0, |snapshot| {
@@ -383,6 +387,19 @@ fn snapshot_dto(snapshot: Snapshot) -> SnapshotDto {
 
 fn state_error() -> String {
     "Chronicle 本地仓库状态不可用".into()
+}
+
+#[tauri::command(async)]
+pub fn hide_main_window(app: AppHandle) -> Result<(), String> {
+    app.get_webview_window("main")
+        .ok_or_else(|| "主窗口不可用".to_owned())?
+        .hide()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
+pub fn exit_chronicle(app: AppHandle) {
+    app.exit(0);
 }
 
 #[tauri::command(async)]
@@ -671,6 +688,20 @@ pub fn create_snapshot(
     repository
         .create_snapshot(&entry_id, title, device_id, safety)
         .map(snapshot_dto)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
+pub fn set_entry_automation(
+    state: State<'_, AppState>,
+    entry_id: String,
+    auto_backup_enabled: bool,
+    automatic_upload_enabled: bool,
+) -> Result<(), String> {
+    let repository = state.repository.lock().map_err(|_| state_error())?;
+    repository
+        .set_entry_automation(&entry_id, auto_backup_enabled, automatic_upload_enabled)
+        .map(|_| ())
         .map_err(|error| error.to_string())
 }
 

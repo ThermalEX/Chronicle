@@ -23,6 +23,8 @@ describe("desktop repository adapter", () => {
       sources,
       storagePolicy: "local_and_remote",
       syncMode: "manual",
+      autoBackupEnabled: false,
+      automaticUploadEnabled: false,
       createInitialSnapshot: true,
     });
 

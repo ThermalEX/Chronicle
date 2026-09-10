@@ -16,7 +16,7 @@ export interface AppSettings {
   checkCloudOnLaunch: boolean;
   notifications: boolean;
   createInitialSnapshot: boolean;
-  backupSchedule: BackupSchedule;
+  autoBackupDelaySeconds: number;
   retentionCount: number | null;
   recycleBinEnabled: boolean;
   recycleBinPath: string;
@@ -87,7 +87,7 @@ const defaultAppSettings: AppSettings = {
   checkCloudOnLaunch: false,
   notifications: true,
   createInitialSnapshot: true,
-  backupSchedule: "off",
+  autoBackupDelaySeconds: 5,
   retentionCount: null,
   recycleBinEnabled: true,
   recycleBinPath: "",
@@ -111,6 +111,20 @@ type LegacyCloudSettings = Partial<CloudSettings> & {
   username?: string;
   remotePath?: string;
 };
+
+type LegacyAppSettings = Partial<AppSettings> & { backupSchedule?: BackupSchedule; autoBackupEnabled?: boolean; automaticUploadEnabled?: boolean };
+
+export function normalizeAppSettings(value: LegacyAppSettings = {}): AppSettings {
+  const legacyDelay: Record<Exclude<BackupSchedule, "off">, number> = { "15m": 900, "1h": 3600, "6h": 21_600, daily: 86_400 };
+  const legacySchedule = value.backupSchedule;
+  const delay = Number(value.autoBackupDelaySeconds ?? (legacySchedule && legacySchedule !== "off" ? legacyDelay[legacySchedule] : 5));
+  const { backupSchedule: _backupSchedule, autoBackupEnabled: _autoBackupEnabled, automaticUploadEnabled: _automaticUploadEnabled, ...current } = value;
+  return {
+    ...defaultAppSettings,
+    ...current,
+    autoBackupDelaySeconds: Math.max(1, Math.min(300, Number.isFinite(delay) && delay >= 1 ? delay : 5)),
+  };
+}
 
 export function normalizedCloud(value?: LegacyCloudSettings): CloudSettings {
   const raw = value ?? {};
@@ -176,13 +190,13 @@ function settingsDocument(): SettingsDocument {
 export async function initializeSettings(): Promise<void> {
   if (isTauri()) {
     const saved = await invoke<Partial<SettingsDocument> & { cloud?: LegacyCloudSettings }>("load_settings");
-    Object.assign(appSettings, defaultAppSettings, saved.app ?? {}, normalizeAppearance(saved.app ?? {}));
+    Object.assign(appSettings, normalizeAppSettings(saved.app), normalizeAppearance(saved.app ?? {}));
     Object.assign(cloudSettings, normalizedCloud(saved.cloud));
     if (saved.formatVersion !== 3) await persistSettings();
     return;
   }
   const savedApp = loadSettings(APP_SETTINGS_KEY, defaultAppSettings);
-  Object.assign(appSettings, savedApp, normalizeAppearance(savedApp));
+  Object.assign(appSettings, normalizeAppSettings(savedApp), normalizeAppearance(savedApp));
   Object.assign(cloudSettings, normalizedCloud(loadSettings(CLOUD_SETTINGS_KEY, defaultCloudSettings)));
 }
 

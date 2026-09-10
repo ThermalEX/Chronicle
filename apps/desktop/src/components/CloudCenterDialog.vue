@@ -14,7 +14,7 @@ import { initialExpandedSourceIds, toggleExpandedSource } from "../services/sour
 import { newCloudSource, toggleSourceSync } from "../services/cloudSourceControls";
 import AppToast from "./AppToast.vue";
 
-const emit = defineEmits<{ close: []; saved: [] }>();
+const emit = defineEmits<{ close: []; saved: []; downloaded: []; settingsDownloaded: [] }>();
 const tab = ref<"repository" | "sources">("repository");
 const draft = reactive<CloudSettings>({ ...cloudSettings, sources: cloudSettings.sources.map((source) => ({ ...source, ...(source.config ? { config: { ...source.config } } : {}), ...(source.secretKeys ? { secretKeys: [...source.secretKeys] } : {}) })) });
 const passwords = reactive<Record<string, string>>({});
@@ -30,7 +30,6 @@ function requiresTest(source: CloudSource): boolean {
 const newRepositoryNames = reactive<Record<string, string>>({});
 const closeButton = ref<HTMLButtonElement>();
 const preview = ref<CloudPreview>();
-const selected = ref<string[]>([]);
 const busy = ref("");
 const backdrop = createBackdropDismissal(() => requestClose(), () => !busy.value);
 const toast = ref<{ type: "success" | "error"; message: string }>();
@@ -41,7 +40,11 @@ const closeConfirmationOpen = ref(false);
 const repositorySourceId = ref<string | null>(draft.sources[0]?.id ?? null);
 const repositorySource = computed(() => draft.sources.find((source) => source.id === repositorySourceId.value));
 const cloudSearch = ref("");
+const useCloudCategoryTree = ref(true);
+const confirmingDownload = ref(false);
+const selected = ref<string[]>([]);
 const remoteArchives = computed(() => (preview.value?.items ?? []).filter((item) => item.kind === "archive"));
+const remoteConfigs = computed(() => (preview.value?.items ?? []).filter((item) => item.id === "config:app-settings"));
 const visibleRemoteArchives = computed(() => {
   const query = cloudSearch.value.trim().toLocaleLowerCase();
   if (!query) return remoteArchives.value;
@@ -126,7 +129,7 @@ async function loadSourceStatuses(): Promise<void> {
 async function loadPreview(): Promise<void> {
   if (!repositorySource.value) return;
   busy.value = "preview";
-  try { preview.value = await cloudRepository.preview(repositorySource.value.id); selected.value = []; }
+  try { preview.value = await cloudRepository.preview(repositorySource.value.id); }
   catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
   finally { busy.value = ""; }
 }
@@ -183,13 +186,15 @@ async function runItemAction(item: RemoteItem, action: "sync" | "upload" | "down
   try {
     if (action === "sync") showToast("success", (await cloudRepository.sync(repositorySource.value.id, item.id)).message);
     if (action === "upload") { await cloudRepository.upload(repositorySource.value.id, item.id); showToast("success", "已用本地存档覆盖远端"); }
-    if (action === "download") { await cloudRepository.download(repositorySource.value.id, item.id); showToast("success", "已用远端存档覆盖本地仓库，来源文件未改动"); }
+    if (action === "download") { await cloudRepository.download(repositorySource.value.id, item.id, useCloudCategoryTree.value); emit("downloaded"); showToast("success", "已下载远端存档"); }
     await loadPreview();
   } catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
   finally { busy.value = ""; }
 }
 
 function confirmOverwrite(item: RemoteItem, direction: "upload" | "download"): void {
+  confirmingDownload.value = direction === "download";
+  if (confirmingDownload.value) useCloudCategoryTree.value = true;
   confirmAction.value = {
     title: direction === "upload" ? "覆盖上传" : "覆盖下载",
     message: direction === "upload" ? `远端“${item.name}”将被本地仓库完整替换。` : `本地仓库中的“${item.name}”将被远端版本完整替换，原始来源文件不会改动。`,
@@ -197,11 +202,45 @@ function confirmOverwrite(item: RemoteItem, direction: "upload" | "download"): v
   };
 }
 
+async function uploadApplicationSettings(): Promise<void> {
+  if (!repositorySource.value) return;
+  busy.value = "app-settings-upload";
+  try { await cloudRepository.uploadApplicationSettings(repositorySource.value.id); showToast("success", "本机应用设置已上传"); await loadPreview(); }
+  catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
+  finally { busy.value = ""; }
+}
+
+async function confirmDownloadApplicationSettings(): Promise<void> {
+  if (!repositorySource.value) return;
+  confirmingDownload.value = false;
+  busy.value = "app-settings-download";
+  try { await cloudRepository.downloadApplicationSettings(repositorySource.value.id); }
+  catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); return; }
+  finally { busy.value = ""; }
+  confirmAction.value = {
+    title: "应用云端设置",
+    message: "云端应用设置与分类层级已下载。确定后立即应用，当前云端连接配置不会被覆盖。",
+    run: async () => {
+      busy.value = "app-settings-download";
+      try { await cloudRepository.downloadApplicationSettings(repositorySource.value!.id, true); emit("settingsDownloaded"); showToast("success", "已下载并应用云端设置"); }
+      finally { busy.value = ""; }
+    },
+  };
+}
+
 function confirmDelete(ids: string[]): void {
-  const deletable = ids.filter((id) => remoteArchives.value.some((item) => item.id === id));
-  if (!deletable.length || !repositorySource.value) return;
-  confirmAction.value = { title: "删除云端存档", message: `${deletable.length} 个云端存档及其全部时间节点将永久删除。`, run: async () => {
-    await cloudRepository.delete(repositorySource.value!.id, deletable); await loadPreview();
+  const archives = ids.filter((id) => remoteArchives.value.some((item) => item.id === id));
+  const configurations = ids.filter((id) => remoteConfigs.value.some((item) => item.id === id));
+  if ((!archives.length && !configurations.length) || !repositorySource.value) return;
+  confirmingDownload.value = false;
+  const configurationNames = remoteConfigs.value.filter((item) => configurations.includes(item.id)).map((item) => item.name);
+  const archiveMessage = archives.length ? `${archives.length} 个云端存档及其全部时间节点将永久删除。` : "";
+  const configurationMessage = configurations.length ? `云端设置 ${configurationNames.join("、")} 将被删除。` : "";
+  confirmAction.value = { title: configurations.length ? "删除云端设置" : "删除云端存档", message: [configurationMessage, archiveMessage].filter(Boolean).join(" "), run: async () => {
+    if (archives.length) await cloudRepository.delete(repositorySource.value!.id, archives);
+    if (configurations.length) await cloudRepository.deleteConfigurations(repositorySource.value!.id, configurations);
+    selected.value = [];
+    await loadPreview();
   } };
 }
 
@@ -216,6 +255,7 @@ async function changeSyncMode(item: RemoteItem, mode: string | null): Promise<vo
 function selectRepositorySource(sourceId: string | null): void {
   repositorySourceId.value = sourceId;
   expandedSourceIds.value = initialExpandedSourceIds();
+  selected.value = [];
   preview.value = undefined;
   if (repositorySource.value) void loadPreview();
 }
@@ -233,7 +273,7 @@ function toggleSourceExpanded(sourceId: string): void {
 }
 
 async function runConfirmed(): Promise<void> {
-  const action = confirmAction.value; confirmAction.value = undefined;
+  const action = confirmAction.value; confirmAction.value = undefined; confirmingDownload.value = false;
   if (!action) return;
   busy.value = "confirmed";
   try { await action.run(); }
@@ -282,20 +322,20 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer));
             <div class="repository-summary" aria-live="polite"><span>远端 {{ remoteArchives.length }} 个存档</span><span>共 {{ remoteSnapshotTotal }} 个时间节点</span><span>{{ preview?.libraryId ? '仓库已初始化' : '等待首次上传' }}</span></div>
             <div class="repository-controls">
               <label class="archive-search"><Search :size="16" /><input v-model="cloudSearch" type="search" placeholder="搜索存档标题" aria-label="搜索云端存档标题" /></label>
-              <button class="danger" :disabled="!selected.length || Boolean(busy)" @click="confirmDelete(selected)"><Trash2 :size="15" />删除所选</button>
+              <button class="danger" :disabled="Boolean(busy) || !selected.length" @click="confirmDelete(selected)"><Trash2 :size="14" />删除所选</button>
             </div>
             <div v-if="busy === 'preview' && !preview" class="loading">正在读取远端清单…</div>
-            <div v-else-if="remoteArchives.length" class="remote-table-wrap">
+            <div v-else-if="preview" class="remote-table-wrap">
               <table class="remote-table">
                 <thead><tr><th scope="col" class="selection-column"><span class="sr-only">选择</span></th><th scope="col">存档</th><th scope="col">同步方案</th><th scope="col">云端时间线</th><th scope="col">最后更新</th><th scope="col" class="actions-column">操作</th></tr></thead>
                 <tbody>
-                  <tr v-for="item in visibleRemoteArchives" :key="item.id">
+                  <tr v-for="item in [...remoteConfigs, ...visibleRemoteArchives]" :key="item.id" :class="{ 'configuration-row': item.kind === 'config' }">
                     <td class="selection-column"><input v-model="selected" type="checkbox" :value="item.id" :aria-label="`选择 ${item.name}`" /></td>
-                    <td class="archive-name"><b :title="item.name">{{ item.name }}</b></td>
-                    <td><ThemedSelect :model-value="item.syncMode" :options="syncOptions" :disabled="Boolean(busy)" :label="`${item.name} 同步方案`" @update:model-value="changeSyncMode(item, $event)" /></td>
-                    <td><span class="timeline-count">{{ item.snapshotCount }} 个节点</span><small>{{ formatBytes(item.sizeBytes) }}</small></td>
-                    <td class="updated-at">{{ formatUpdatedAt(item.updatedAt) }}</td>
-                    <td><div class="item-actions"><button :disabled="Boolean(busy)" :aria-label="`同步 ${item.name}`" :title="`同步 ${item.name}`" @click="runItemAction(item, 'sync')"><RefreshCw :size="14" />同步</button><button :disabled="Boolean(busy)" :aria-label="`覆盖下载 ${item.name}`" :title="`覆盖下载 ${item.name}`" @click="confirmOverwrite(item, 'download')"><Download :size="14" /></button><button :disabled="Boolean(busy)" :aria-label="`覆盖上传 ${item.name}`" :title="`覆盖上传 ${item.name}`" @click="confirmOverwrite(item, 'upload')"><Upload :size="14" /></button></div></td>
+                    <td class="archive-name"><b :title="item.name">{{ item.name }}</b><small v-if="item.kind === 'config'">云端设置文件</small></td>
+                    <td><ThemedSelect v-if="item.kind === 'archive'" :model-value="item.syncMode" :options="syncOptions" :disabled="Boolean(busy)" :label="`${item.name} 同步方案`" @update:model-value="changeSyncMode(item, $event)" /><span v-else class="configuration-label">系统配置</span></td>
+                    <td><template v-if="item.kind === 'archive'"><span class="timeline-count">{{ item.snapshotCount }} 个节点</span><small>{{ formatBytes(item.sizeBytes) }}</small></template><span v-else class="configuration-label">—</span></td>
+                    <td class="updated-at">{{ item.kind === 'archive' ? formatUpdatedAt(item.updatedAt) : '设置文件' }}</td>
+                    <td><div v-if="item.kind === 'archive'" class="item-actions"><button :disabled="Boolean(busy)" :aria-label="`同步 ${item.name}`" :title="`同步 ${item.name}`" @click="runItemAction(item, 'sync')"><RefreshCw :size="14" />同步</button><button :disabled="Boolean(busy)" :aria-label="`覆盖下载 ${item.name}`" :title="`覆盖下载 ${item.name}`" @click="confirmOverwrite(item, 'download')"><Download :size="14" /></button><button :disabled="Boolean(busy)" :aria-label="`覆盖上传 ${item.name}`" :title="`覆盖上传 ${item.name}`" @click="confirmOverwrite(item, 'upload')"><Upload :size="14" /></button></div><div v-else class="item-actions"><button :disabled="Boolean(busy)" title="使用云端设置" @click="confirmDownloadApplicationSettings"><Download :size="14" />使用设置</button><button :disabled="Boolean(busy)" title="上传本机设置" @click="uploadApplicationSettings"><Upload :size="14" />上传设置</button></div></td>
                   </tr>
                 </tbody>
               </table>
@@ -318,7 +358,7 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer));
       <footer><button class="cancel" :disabled="Boolean(busy)" @click="requestClose">取消</button><button class="save" :disabled="Boolean(busy)" @click="saveAndClose">{{ busy === 'save' ? '保存中…' : '保存云端设置' }}</button></footer>
     </section>
     <AppToast v-if="toast" :message="toast.message" :type="toast.type" @close="toast = undefined" />
-    <ConfirmDialog v-if="confirmAction" :title="confirmAction.title" :message="confirmAction.message" confirm-label="确定" destructive @cancel="confirmAction = undefined" @confirm="runConfirmed" />
+    <ConfirmDialog v-if="confirmAction" :title="confirmAction.title" :message="confirmAction.message" confirm-label="确定" :destructive="!confirmingDownload" @cancel="confirmAction = undefined; confirmingDownload = false" @confirm="runConfirmed"><template #body-extra><label v-if="confirmingDownload" class="download-tree-option"><input v-model="useCloudCategoryTree" type="checkbox" />使用云端资料库分类层级</label></template></ConfirmDialog>
     <ConfirmDialog v-if="closeConfirmationOpen" title="保存云端配置？" message="云端配置或同步开关已更改。保存后才会生效。" confirm-label="保存" :busy="Boolean(busy)" @cancel="closeConfirmationOpen = false" @confirm="saveAndClose">
       <template #extra-actions><button class="discard" :disabled="Boolean(busy)" @click="discardAndClose">不保存</button></template>
     </ConfirmDialog>
@@ -332,6 +372,7 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer));
 .github-token-field>div{display:flex;gap:8px}.github-token-field input{min-width:0;flex:1}.github-token-field button,.create-repository-button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:34px;padding:0 10px;color:var(--primary-dark);background:var(--primary-soft);border:1px solid transparent;border-radius:6px;font-size:10px;font-weight:650;white-space:nowrap}.github-token-field small{color:var(--text-3);font-size:9px;line-height:1.4}.create-repository-button{align-self:end}.github-token-field button:hover,.create-repository-button:hover{background:var(--hover);border-color:var(--border-2)}.github-token-field button:focus-visible{outline:2px solid var(--primary);outline-offset:2px}@media(max-width:900px){.github-token-field>div{align-items:stretch;flex-direction:column}}
 .repository-controls .danger, .icon-danger { color: var(--danger); background: var(--danger-soft); }
 .repository-summary span, .remote-table tbody tr:hover, .archive-search, .fields input, fieldset input, .item-actions button, .remote-table .item-actions button { background: var(--subtle); }
+.remote-table tbody tr.configuration-row { background: var(--surface); }.remote-table tbody tr.configuration-row:hover { background: var(--subtle); }.configuration-row .archive-name b { color: var(--text); }.configuration-row .item-actions button { color: var(--primary-dark); background: var(--primary-soft); }.remote-table .item-actions button { border: 1px solid var(--border-2); }.configuration-label { color: var(--text-3); font-size: 9px; }.download-tree-option { display: flex; align-items: center; gap: 7px; padding: 0 22px 18px; color: var(--text-2); font-size: 11px; }
 .fields input, fieldset input { color: var(--text); }
 .source-card.active { border-color: color-mix(in srgb, var(--primary) 45%, var(--border)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 12%, transparent); }
 .icon-sync { display: grid; place-items: center; width: 32px; height: 32px; margin-left: 0; color: #2563eb; background: #eff6ff; border-radius: 6px; }.icon-sync:hover { background: #dbeafe; }.icon-sync.paused { color: #15803d; background: #ecfdf3; }.icon-sync.paused:hover { background: #dcfce7; }.icon-danger { margin-left: 0; }

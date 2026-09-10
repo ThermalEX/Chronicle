@@ -1,6 +1,6 @@
 [package]
 name = "chronicle-desktop"
-version = "1.1.0"
+version = "1.2.0-beta"
 description = "Chronicle desktop application"
 authors = ["ThermalEX <2210692765@qq.com>"]
 edition = "2024"
@@ -23,7 +23,8 @@ uuid = { version = "1.18.1", features = ["v4"] }
 walkdir = "2.5.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-tauri = { version = "2.11.5", features = [] }
+notify = "8.2.0"
+tauri = { version = "2.11.5", features = ["tray-icon"] }
 tauri-plugin-dialog = "2.7.3"
 tauri-plugin-opener = "2.5.5"
 

@@ -88,6 +88,10 @@ struct CatalogEntry {
     storage_policy: StoragePolicy,
     #[serde(default)]
     sync_mode: SyncMode,
+    #[serde(default)]
+    auto_backup_enabled: bool,
+    #[serde(default)]
+    automatic_upload_enabled: bool,
     source_count: usize,
     snapshot_count: usize,
     stored_bytes: u64,
@@ -291,6 +295,8 @@ impl LocalRepository {
             tags: Vec::new(),
             storage_policy,
             sync_mode,
+            auto_backup_enabled: false,
+            automatic_upload_enabled: false,
             created_at_ms: unix_millis(SystemTime::now()),
         };
         let directory = self.entries_dir().join(&folder);
@@ -305,6 +311,8 @@ impl LocalRepository {
             tags: entry.tags.clone(),
             storage_policy,
             sync_mode,
+            auto_backup_enabled: entry.auto_backup_enabled,
+            automatic_upload_enabled: entry.automatic_upload_enabled,
             source_count: entry.sources.len(),
             snapshot_count: 0,
             stored_bytes: 0,
@@ -394,6 +402,23 @@ impl LocalRepository {
             .find(|item| item.id == entry_id)
             .ok_or_else(|| StorageError::EntryNotFound(entry_id.into()))?;
         summary.sync_mode = sync_mode;
+        self.write_catalog(&mut catalog)?;
+        Ok(entry)
+    }
+
+    /// Updates the automatic backup and upload options for one entry.
+    pub fn set_entry_automation(&self, entry_id: &str, auto_backup_enabled: bool, automatic_upload_enabled: bool) -> Result<Entry> {
+        let mut entry = self.get_entry(entry_id)?;
+        entry.auto_backup_enabled = auto_backup_enabled;
+        entry.automatic_upload_enabled = automatic_upload_enabled;
+        let mut catalog = self.read_catalog()?;
+        let summary = catalog
+            .entries
+            .iter_mut()
+            .find(|item| item.id == entry_id)
+            .ok_or_else(|| StorageError::EntryNotFound(entry_id.into()))?;
+        summary.auto_backup_enabled = auto_backup_enabled;
+        summary.automatic_upload_enabled = automatic_upload_enabled;
         self.write_catalog(&mut catalog)?;
         Ok(entry)
     }
@@ -739,6 +764,8 @@ impl LocalRepository {
             tags: summary.tags,
             storage_policy: summary.storage_policy,
             sync_mode: summary.sync_mode,
+            auto_backup_enabled: summary.auto_backup_enabled,
+            automatic_upload_enabled: summary.automatic_upload_enabled,
             created_at_ms: summary.created_at_ms,
         };
         let bindings = self.read_bindings()?;
@@ -1917,5 +1944,21 @@ mod tests {
         repository.delete_snapshot(&entry.id, &snapshot.id).unwrap();
         assert!(repository.list_snapshots(&entry.id).unwrap().is_empty());
         assert!(!archive.exists());
+    }
+
+    #[test]
+    fn automation_settings_survive_entry_updates() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("save.dat");
+        fs::write(&source, b"save").unwrap();
+        let repository = LocalRepository::open(workspace.path().join("Chronicle")).unwrap();
+        let entry = repository.add_entry(&source, Some("Save"), None).unwrap();
+
+        let updated = repository.set_entry_automation(&entry.id, true, true).unwrap();
+
+        assert!(updated.auto_backup_enabled);
+        assert!(updated.automatic_upload_enabled);
+        assert!(repository.get_entry(&entry.id).unwrap().auto_backup_enabled);
+        assert!(repository.get_entry(&entry.id).unwrap().automatic_upload_enabled);
     }
 }

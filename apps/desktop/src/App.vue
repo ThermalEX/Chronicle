@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import {
-  Check, ChevronLeft, ChevronRight, Clock3, CloudCog, File, Info,
+  AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, Clock3, CloudCog, File, Info,
   Folder, FolderArchive, FolderOpen, HardDrive, LockKeyhole, MoreHorizontal, Moon, Pencil, Plus, RotateCcw, Save,
-  Search, Settings2, SlidersHorizontal, UploadCloud, X,
+  RefreshCw, Search, Settings2, SlidersHorizontal, UploadCloud, X,
   Sun, Trash2,
 } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import CloudCenterDialog from "./components/CloudCenterDialog.vue";
 import AppToast from "./components/AppToast.vue";
 import CloudHealthDialog from "./components/CloudHealthDialog.vue";
@@ -15,7 +17,7 @@ import CreateCategoryDialog from "./components/CreateCategoryDialog.vue";
 import CreateArchiveDialog from "./components/CreateArchiveDialog.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
 import ThemedSelect, { type ThemedSelectOption } from "./components/ThemedSelect.vue";
-import type { ArchiveRecord, ArchiveSource, CategoryRecord, CreateArchiveInput, RepositoryInfo, SnapshotProgress, SnapshotRecord, SourceKind } from "./domain";
+import type { ArchiveRecord, ArchiveSource, CategoryRecord, CreateArchiveInput, RepositoryInfo, SnapshotRecord, SourceKind } from "./domain";
 import { archiveRepository, isTauriRuntime } from "./services/repository";
 import { cloudRepository, type CloudSyncResult } from "./services/cloud";
 import { runCloudHealthCheck, type CloudHealthCheckItem } from "./services/cloudHealthCheck";
@@ -30,7 +32,6 @@ import { appSettings, cloudLibraryIndicator, cloudSettings, enabledCloudSources,
 import { runAcrossEnabledSources, type SourceSyncOutcome } from "./services/multiSourceSync";
 import { categoryBreadcrumb } from "./services/categoryBreadcrumb";
 import { formatCurrentTime, millisecondsUntilNextMinute } from "./services/currentTime";
-import { snapshotButtonProgress } from "./services/snapshotButtonProgress";
 
 type CategoryTreeNode = CategoryRecord & {
   nodeType: "category";
@@ -66,6 +67,7 @@ const timelineSortOptions: ThemedSelectOption[] = [
 const searchTerm = ref("");
 const searchInput = ref<HTMLInputElement>();
 const loading = ref(true);
+const refreshingLibrary = ref(false);
 const createDialogOpen = ref(false);
 const pendingSources = ref<ArchiveSource[]>([]);
 const pickingSource = ref<SourceKind>();
@@ -84,7 +86,9 @@ const createCategoryError = ref<string>();
 const settingsOpen = ref(false);
 const cloudSettingsOpen = ref(false);
 const syncingArchive = ref(false);
-const snapshotProgress = ref<SnapshotProgress>();
+const syncingAllArchives = ref(false);
+const syncProgress = ref<{ current: number; total: number }>();
+const syncProgressTarget = ref<"current" | "all">();
 const busyAction = ref<"snapshot" | "restore">();
 const savingTags = ref(false);
 const savingSnapshotNote = ref(false);
@@ -98,10 +102,10 @@ const treeMenuStyle = computed(() => treeMenuAnchor.value
   ? floatingMenuStyle(positionFloatingMenu(treeMenuAnchor.value, { width: 168, height: 96 }, { width: window.innerWidth, height: window.innerHeight }))
   : undefined);
 const confirmRequest = ref<{ title: string; message: string; confirmLabel: string; destructive: boolean }>();
+const closeRequestOpen = ref(false);
 let confirmResolver: ((confirmed: boolean) => void) | undefined;
 const notice = ref<{ type: "success" | "error" | "info"; message: string }>();
 let noticeTimer: number | undefined;
-const automaticSyncTimers = new Map<string, number>();
 const cloudHealth = ref<CloudHealth>({ status: "unchecked" });
 const cloudHealthDialogOpen = ref(false);
 const cloudHealthCheckRunning = ref(false);
@@ -119,6 +123,11 @@ function refreshCurrentTime(): void {
   currentTime.value = formatCurrentTime(now);
   window.clearTimeout(clockTimer);
   clockTimer = window.setTimeout(refreshCurrentTime, millisecondsUntilNextMinute(now));
+}
+
+async function hideMainWindowToTray(): Promise<void> {
+  closeRequestOpen.value = false;
+  await invoke("hide_main_window");
 }
 
 async function checkCloudSources(showDialog = false): Promise<void> {
@@ -140,19 +149,6 @@ async function checkCloudSources(showDialog = false): Promise<void> {
 function openCloudHealthDialog(): void {
   if (!cloudHealthCheckRunning.value) void checkCloudSources(true);
   else cloudHealthDialogOpen.value = true;
-}
-
-function queueAutomaticUpload(archive?: ArchiveRecord): void {
-  const sources = enabledCloudSources(cloudSettings);
-  if (!archive || !isTauriRuntime || archive.storagePolicy !== "local_and_remote" || archive.syncMode !== "automatic" || !sources.length) return;
-  window.clearTimeout(automaticSyncTimers.get(archive.id));
-  automaticSyncTimers.set(archive.id, window.setTimeout(async () => {
-    automaticSyncTimers.delete(archive.id);
-    const outcomes = await runAcrossEnabledSources(sources, (source) => cloudRepository.upload(source.id, archive.id));
-    reportSourceFailures(outcomes, archive, "自动上传");
-    const completed = outcomes.filter((outcome) => outcome.status === "fulfilled").length;
-    if (completed) showNotice(`“${archive.name}”已自动上传到 ${completed} 个同步源`);
-  }, 1200));
 }
 
 const descendantIds = (categoryId: string): Set<string> => {
@@ -208,7 +204,10 @@ const filteredArchives = computed(() => {
 const selectedArchive = computed(() => archives.value.find((archive) => archive.id === selectedArchiveId.value));
 const selectedSnapshot = computed(() => snapshots.value.find((snapshot) => snapshot.id === selectedSnapshotId.value));
 const visibleSnapshots = computed(() => filterTimeline(snapshots.value, snapshotSearch.value, snapshotSort.value));
-const snapshotButtonState = computed(() => snapshotButtonProgress(snapshotProgress.value));
+const syncProgressFraction = computed(() => syncProgress.value ? syncProgress.value.current / syncProgress.value.total : 0);
+const currentSyncProgressFraction = computed(() => syncProgressTarget.value === "current" ? syncProgressFraction.value : 0);
+const allSyncProgressFraction = computed(() => syncProgressTarget.value === "all" ? syncProgressFraction.value : 0);
+const syncProgressText = computed(() => syncProgress.value ? `${syncProgress.value.current} / ${syncProgress.value.total}` : "");
 
 function showNotice(message: string, type: "success" | "error" | "info" = "success") {
   notice.value = { message, type };
@@ -253,6 +252,10 @@ function displaySourcePath(path: string): string {
   return path.split(" · ").map((part) => part.startsWith("\\\\?\\") ? part.slice(4) : part).join(" · ");
 }
 
+function archiveNeedsLocation(archive: ArchiveRecord): boolean {
+  return archive.sources.some((source) => !source.path);
+}
+
 function snapshotDetail(snapshot: SnapshotRecord): string {
   const { added, modified, deleted } = snapshot.changes;
   if (!added && !modified && !deleted) return "内容与上一个时间节点一致";
@@ -273,8 +276,17 @@ async function refreshRepositoryInfo() {
   repositoryInfo.value = await archiveRepository.getRepositoryInfo();
 }
 
+async function refreshLibrary(): Promise<void> {
+  if (refreshingLibrary.value) return;
+  refreshingLibrary.value = true;
+  try { await handleCloudDownload(); }
+  catch (error) { reportError(error, { operation: "刷新资料库" }); }
+  finally { refreshingLibrary.value = false; }
+}
+
 async function handleSettingsChanged() {
   applyAppearance(appSettings);
+  if (isTauriRuntime) await archiveRepository.refreshAutoBackup();
   await Promise.all([refreshArchives(), refreshCategories(), refreshRepositoryInfo()]);
   showNotice("设置已保存");
 }
@@ -283,6 +295,19 @@ function handleCloudSettingsChanged(): void {
   cloudHealth.value = { status: "unchecked" };
   cloudHealthCheckItems.value = [];
   showNotice("云端设置已保存");
+}
+
+async function handleCloudDownload(): Promise<void> {
+  await Promise.all([refreshArchives(selectedArchiveId.value), refreshCategories(), refreshRepositoryInfo()]);
+  if (selectedArchive.value) await refreshSnapshots(selectedArchive.value.id);
+  showNotice("云端存档已下载，资料库已刷新");
+}
+
+async function handleCloudSettingsDownload(): Promise<void> {
+  await initializeSettings();
+  applyAppearance(appSettings);
+  await handleCloudDownload();
+  showNotice("云端应用设置已应用");
 }
 
 async function openRepositoryFolder() {
@@ -327,8 +352,13 @@ function openCreateArchive() {
 
 function openEditArchive() {
   if (!selectedArchive.value) return;
-  editingArchive.value = selectedArchive.value;
-  pendingSources.value = selectedArchive.value.sources.map((source) => ({ ...source }));
+  openArchiveEditor(selectedArchive.value);
+}
+
+function openArchiveEditor(archive: ArchiveRecord) {
+  selectArchive(archive.id);
+  editingArchive.value = archive;
+  pendingSources.value = archive.sources.map((source) => ({ ...source }));
   createArchiveError.value = undefined;
   archiveMenuOpen.value = false;
   createDialogOpen.value = true;
@@ -375,15 +405,18 @@ async function createArchive(input: CreateArchiveInput) {
     if (editingArchive.value) {
       const archiveId = editingArchive.value.id;
       await archiveRepository.updateArchive(archiveId, input);
+      await archiveRepository.setArchiveAutomation(archiveId, input.autoBackupEnabled, input.automaticUploadEnabled);
+      await archiveRepository.refreshAutoBackup();
       closeArchiveDialog();
       await refreshArchives(archiveId);
       await refreshRepositoryInfo();
-      queueAutomaticUpload(archives.value.find((archive) => archive.id === archiveId));
       showNotice("存档设置已更新");
       return;
     }
     const categoryId = selectedCategoryId.value === "all" ? undefined : selectedCategoryId.value;
     const archive = await archiveRepository.createArchive({ ...input, categoryId });
+    await archiveRepository.setArchiveAutomation(archive.id, input.autoBackupEnabled, input.automaticUploadEnabled);
+    await archiveRepository.refreshAutoBackup();
     createDialogOpen.value = false;
     if (categoryId) expandedCategoryIds.value = new Set([...expandedCategoryIds.value, categoryId]);
     await refreshArchives(archive.id);
@@ -509,29 +542,43 @@ async function moveCategoryFromMenu(categoryId: string, value: string | null) {
 async function createSnapshot(title = "手动备份") {
   if (!selectedArchive.value || busyAction.value) return;
   busyAction.value = "snapshot";
-  snapshotProgress.value = { current: 0, total: 0, currentPath: "正在扫描文件" };
   try {
-    const snapshot = await archiveRepository.createSnapshot(
-      selectedArchive.value, title, false,
-      (progress) => { snapshotProgress.value = progress; },
-    );
+    const snapshot = await archiveRepository.createSnapshot(selectedArchive.value, title, false);
     await refreshArchives(selectedArchive.value.id);
     await refreshSnapshots(selectedArchive.value.id);
     await refreshRepositoryInfo();
     selectedSnapshotId.value = snapshot.id;
-    queueAutomaticUpload(archives.value.find((archive) => archive.id === selectedArchive.value?.id));
+    await uploadNewSnapshot(selectedArchive.value);
     showNotice(`时间节点已创建，保存 ${snapshot.files.length} 个文件`);
   } catch (error) {
     reportError(error, { operation: "创建备份", archiveId: selectedArchive.value?.id });
   } finally {
     busyAction.value = undefined;
-    snapshotProgress.value = undefined;
   }
+}
+
+async function uploadNewSnapshot(archive: ArchiveRecord): Promise<void> {
+  if (!archive.automaticUploadEnabled || archive.storagePolicy !== "local_and_remote") return;
+  const outcomes = await syncArchiveToSources(archive, enabledCloudSources(cloudSettings));
+  reportSourceFailures(outcomes, archive, "自动上传");
+}
+
+function syncArchiveToSources(archive: ArchiveRecord, sources: ReturnType<typeof enabledCloudSources>) {
+  return runAcrossEnabledSources(
+    sources,
+    async (source) => {
+      const result = await cloudRepository.sync(source.id, archive.id);
+      await cloudRepository.uploadApplicationSettings(source.id);
+      await cloudRepository.uploadEntryCategoryTree(source.id, archive.id);
+      return result;
+    },
+    () => { if (syncProgress.value) syncProgress.value.current += 1; },
+  );
 }
 
 async function syncSelectedArchive() {
   const archive = selectedArchive.value;
-  if (!archive || syncingArchive.value) return;
+  if (!archive || syncingArchive.value || syncingAllArchives.value) return;
   if (!isTauriRuntime) {
     showNotice("云同步仅在 Chronicle 桌面端可用", "error");
     return;
@@ -547,8 +594,10 @@ async function syncSelectedArchive() {
     return;
   }
   syncingArchive.value = true;
+  syncProgressTarget.value = "current";
+  syncProgress.value = { current: 0, total: sources.length };
   try {
-    const outcomes = await runAcrossEnabledSources(sources, (source) => cloudRepository.sync(source.id, archive.id));
+    const outcomes = await syncArchiveToSources(archive, sources);
     reportSourceFailures(outcomes, archive, "同步存档");
     await refreshArchives(archive.id);
     await refreshSnapshots(archive.id);
@@ -561,6 +610,50 @@ async function syncSelectedArchive() {
     reportError(error, { operation: "同步存档", archiveId: archive.id });
   } finally {
     syncingArchive.value = false;
+    syncProgress.value = undefined;
+    syncProgressTarget.value = undefined;
+  }
+}
+
+async function syncAllArchives() {
+  if (syncingArchive.value || syncingAllArchives.value) return;
+  if (!isTauriRuntime) {
+    showNotice("云同步仅在 Chronicle 桌面端可用", "error");
+    return;
+  }
+  const sources = enabledCloudSources(cloudSettings);
+  if (!sources.length) {
+    cloudSettingsOpen.value = true;
+    showNotice("请先添加同步源，并点击开始同步", "info");
+    return;
+  }
+  const remoteArchives = archives.value.filter((archive) => archive.storagePolicy === "local_and_remote");
+  if (!remoteArchives.length) {
+    showNotice("没有启用云端保存的存档", "info");
+    return;
+  }
+  syncingAllArchives.value = true;
+  syncProgressTarget.value = "all";
+  syncProgress.value = { current: 0, total: remoteArchives.length * sources.length };
+  try {
+    let completed = 0;
+    let conflicts = false;
+    for (const archive of remoteArchives) {
+      const outcomes = await syncArchiveToSources(archive, sources);
+      reportSourceFailures(outcomes, archive, "同步全部存档");
+      const succeeded = outcomes.filter((outcome): outcome is Extract<SourceSyncOutcome<CloudSyncResult>, { status: "fulfilled" }> => outcome.status === "fulfilled");
+      completed += succeeded.length;
+      conflicts ||= succeeded.some((outcome) => outcome.value.status === "conflict");
+    }
+    await refreshArchives(selectedArchiveId.value);
+    if (selectedArchive.value) await refreshSnapshots(selectedArchive.value.id);
+    showNotice(`已完成 ${completed} / ${remoteArchives.length * sources.length} 项同步`, conflicts ? "info" : "success");
+  } catch (error) {
+    reportError(error, { operation: "同步全部存档" });
+  } finally {
+    syncingAllArchives.value = false;
+    syncProgress.value = undefined;
+    syncProgressTarget.value = undefined;
   }
 }
 
@@ -591,7 +684,6 @@ async function saveSnapshotNote(): Promise<void> {
   try {
     const updated = await archiveRepository.updateSnapshotNote(archive.id, snapshot.id, snapshotNote.value);
     snapshots.value = snapshots.value.map((item) => item.id === updated.id ? updated : item);
-    queueAutomaticUpload(archives.value.find((item) => item.id === archive.id));
     showNotice("快照备注已保存");
   } catch (error) {
     reportError(error, { operation: "保存快照备注", archiveId: archive.id });
@@ -615,7 +707,6 @@ async function deleteSnapshot(snapshot: SnapshotRecord): Promise<void> {
     await refreshArchives(archive.id);
     await refreshSnapshots(archive.id);
     await refreshRepositoryInfo();
-    queueAutomaticUpload(archives.value.find((item) => item.id === archive.id));
     showNotice("时间节点已永久删除");
   } catch (error) {
     reportError(error, { operation: "删除时间节点", archiveId: archive.id });
@@ -859,6 +950,17 @@ onMounted(async () => {
   try {
     await initializeSettings();
     applyAppearance(appSettings);
+    if (isTauriRuntime) {
+      await archiveRepository.refreshAutoBackup();
+      await listen<{ archiveId: string; error?: string }>("auto-backup-created", async ({ payload }) => {
+        await Promise.all([refreshArchives(payload.archiveId), refreshSnapshots(payload.archiveId), refreshRepositoryInfo()]);
+        const archive = archives.value.find((item) => item.id === payload.archiveId);
+        if (archive) await uploadNewSnapshot(archive);
+        showNotice(archive ? `“${archive.name}”已自动备份` : "已自动备份");
+      });
+      await listen<{ archiveId: string; error?: string }>("auto-backup-failed", ({ payload }) => reportError(payload.error ?? "自动备份失败", { operation: "自动备份", archiveId: payload.archiveId }));
+      await listen("chronicle-close-requested", () => { closeRequestOpen.value = true; });
+    }
     await refreshCategories();
     await refreshArchives();
     await refreshRepositoryInfo();
@@ -871,7 +973,6 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleShortcut);
   window.clearTimeout(noticeTimer);
   window.clearTimeout(clockTimer);
-  automaticSyncTimers.forEach((timer) => window.clearTimeout(timer));
 });
 </script>
 
@@ -879,14 +980,14 @@ onBeforeUnmount(() => {
   <div class="app-shell">
     <header class="titlebar">
       <div class="brand"><time :datetime="currentTime">{{ currentTime }}</time></div>
-      <div class="sync-states"><button class="sync-state sync-state-button" title="打开本地资料库" @click="openRepositoryFolder"><i></i>本地资料库可用</button><button class="sync-state sync-state-button" :class="cloudStateClass" :title="cloudHealth.reason || '检测云端资料库'" @click="openCloudHealthDialog"><i :class="{ pulse: cloudHealth.status === 'checking' }"></i>{{ cloudLibrary.label }}</button></div>
+      <div class="sync-states"><button class="sync-state sync-state-button" title="打开本地资料库" @click="openRepositoryFolder"><i></i>本地资料库可用</button><button class="sync-state sync-state-button" :class="cloudStateClass" :title="cloudHealth.reason || '检测云端资料库'" @click="openCloudHealthDialog"><i :class="{ pulse: cloudHealth.status === 'checking' }"></i>{{ cloudLibrary.label }}</button><button class="sync-state sync-state-button sync-progress-button" :style="{ '--sync-progress': allSyncProgressFraction }" :disabled="syncingArchive || syncingAllArchives" title="同步所有启用云端保存的存档" @click="syncAllArchives"><span><UploadCloud :size="16" />{{ syncingAllArchives ? `正在同步 ${syncProgressText}` : '同步所有存档' }}</span></button></div>
       <div class="toolbar"><button class="toolbar-action mode-toggle" :class="{ 'is-dark': appSettings.colorMode === 'dark' }" :aria-label="appSettings.colorMode === 'dark' ? '切换到日间模式' : '切换到夜间模式'" :title="appSettings.colorMode === 'dark' ? '切换到日间模式' : '切换到夜间模式'" :aria-pressed="appSettings.colorMode === 'dark'" @click="toggleColorMode"><Sun v-if="appSettings.colorMode === 'dark'" :size="17" /><Moon v-else :size="17" /></button><button class="toolbar-action" aria-label="云端设置" title="云端设置" @click="cloudSettingsOpen = true"><CloudCog :size="17" /></button><button class="toolbar-action" aria-label="应用设置" title="应用设置" @click="settingsOpen = true"><Settings2 :size="17" /></button></div>
     </header>
 
     <aside class="sidebar">
       <div class="add-control"><button class="add-button" @click="openCreateArchive"><Plus :size="18" />添加存档</button></div>
       <nav aria-label="存档分类">
-        <div class="nav-heading"><p class="label">资料库</p><button aria-label="添加分类" title="添加分类" @click="openCategoryDialog"><Plus :size="15" /></button></div>
+        <div class="nav-heading"><p class="label">资料库</p><span><button :disabled="refreshingLibrary" aria-label="刷新资料库" title="刷新资料库" @click="refreshLibrary"><RefreshCw :size="15" /></button><button aria-label="添加分类" title="添加分类" @click="openCategoryDialog"><Plus :size="15" /></button></span></div>
         <template v-for="node in categoryTreeNodes" :key="`${node.nodeType}:${node.id}`">
           <div
             v-if="node.nodeType === 'category'"
@@ -903,9 +1004,9 @@ onBeforeUnmount(() => {
             <button class="category-select" :draggable="node.id !== 'all'" :title="node.id === 'all' ? '将分类或存档拖到这里可移至根目录' : undefined" @dragstart.stop="node.id !== 'all' && startCategoryDrag(node.id, $event)" @click="selectCategory(node.id)"><component :is="node.icon" :size="17" /><span>{{ node.name }}</span><span class="category-suffix"><LockKeyhole v-if="node.id === 'all'" :size="12" aria-label="固定根目录" /><small>{{ node.count }}</small></span></button>
             <div v-if="node.id !== 'all'" class="tree-more"><button aria-label="分类操作" title="分类操作" :aria-expanded="treeMenu?.kind === 'category' && treeMenu.id === node.id" @click="toggleTreeMenu('category', node.id, $event)"><MoreHorizontal :size="14" /></button><Teleport to="body"><div v-if="treeMenu?.kind === 'category' && treeMenu.id === node.id" class="tree-menu" :style="treeMenuStyle"><label>移动到<ThemedSelect :model-value="node.parentId ?? null" :options="categoryMoveOptions(node.id)" :label="`移动分类 ${node.name}`" @update:model-value="moveCategoryFromMenu(node.id, $event)" /></label><button class="danger" @click="deleteCategory(node.id)"><Trash2 :size="13" />删除分类</button></div></Teleport></div>
           </div>
-          <div v-else class="archive-tree-row" :class="{ active: activeTreeNodeId === `archive:${node.id}` }" :style="{ paddingLeft: `${4 + node.depth * 16}px` }" @dragend="finishDrag">
+          <div v-else class="archive-tree-row" :class="{ active: activeTreeNodeId === `archive:${node.id}`, 'needs-location': archiveNeedsLocation(node.archive) }" :style="{ paddingLeft: `${4 + node.depth * 16}px` }" @dragend="finishDrag">
             <span class="disclosure-spacer"></span>
-            <button class="archive-tree-select" draggable="true" :title="node.archive.name" @dragstart.stop="startArchiveDrag(node.id, $event)" @click="selectArchiveFromTree(node.archive)"><File :size="16" /><span>{{ node.archive.name }}</span></button>
+            <button class="archive-tree-select" draggable="true" :title="archiveNeedsLocation(node.archive) ? `${node.archive.name}：等待定位本机来源` : node.archive.name" @dragstart.stop="startArchiveDrag(node.id, $event)" @click="selectArchiveFromTree(node.archive)"><AlertTriangle v-if="archiveNeedsLocation(node.archive)" :size="16" /><File v-else :size="16" /><span>{{ node.archive.name }}</span></button>
             <div class="tree-more"><button aria-label="存档移动操作" title="存档移动操作" :aria-expanded="treeMenu?.kind === 'archive' && treeMenu.id === node.id" @click="toggleTreeMenu('archive', node.id, $event)"><MoreHorizontal :size="14" /></button><Teleport to="body"><div v-if="treeMenu?.kind === 'archive' && treeMenu.id === node.id" class="tree-menu" :style="treeMenuStyle"><label>移动到<ThemedSelect :model-value="node.archive.categoryId ?? null" :options="archiveMoveOptions()" :label="`移动存档 ${node.archive.name}`" @update:model-value="moveArchiveFromMenu(node.id, $event)" /></label><button class="danger" @click="deleteArchive(node.archive)"><Trash2 :size="13" />删除存档</button></div></Teleport></div>
           </div>
         </template>
@@ -921,10 +1022,10 @@ onBeforeUnmount(() => {
         <div class="panel-title"><div><h1 id="archives-title">{{ selectedCategoryName }}</h1><p class="category-path">{{ selectedCategoryPath }}</p></div><div class="sort-control"><button class="icon-button" aria-label="排列方式" title="排列方式" :aria-expanded="sortMenuOpen" @click="sortMenuOpen = !sortMenuOpen"><SlidersHorizontal :size="18" /></button><div v-if="sortMenuOpen" class="sort-menu"><button :class="{ active: sortMode === 'newest' }" @click="sortMode = 'newest'; sortMenuOpen = false">时间 新–旧</button><button :class="{ active: sortMode === 'oldest' }" @click="sortMode = 'oldest'; sortMenuOpen = false">时间 旧–新</button><button :class="{ active: sortMode === 'nameAsc' }" @click="sortMode = 'nameAsc'; sortMenuOpen = false">名称 A–Z</button><button :class="{ active: sortMode === 'nameDesc' }" @click="sortMode = 'nameDesc'; sortMenuOpen = false">名称 Z–A</button></div></div></div>
         <label class="search"><Search :size="17" /><input ref="searchInput" v-model="searchTerm" type="search" placeholder="搜索名称、来源或标签" /><kbd>Ctrl K</kbd></label>
         <div class="archive-list" :aria-busy="loading">
-          <button v-for="item in filteredArchives" :key="item.id" class="archive-row" :class="{ selected: selectedArchiveId === item.id }" draggable="true" @dragstart="startArchiveDrag(item.id, $event)" @dragend="finishDrag" @click="selectArchive(item.id)">
+          <article v-for="item in filteredArchives" :key="item.id" class="archive-row" :class="{ selected: selectedArchiveId === item.id, 'needs-location': archiveNeedsLocation(item) }" draggable="true" tabindex="0" @dragstart="startArchiveDrag(item.id, $event)" @dragend="finishDrag" @click="selectArchive(item.id)" @keydown.enter="selectArchive(item.id)">
             <span class="file-icon"><Folder v-if="item.kind === 'folder'" :size="19" /><File v-else-if="item.kind === 'file'" :size="19" /><FolderArchive v-else :size="19" /></span>
-            <span class="archive-copy"><span class="row-title"><b>{{ item.name }}</b><i :class="item.lastSnapshotAt ? 'synced' : 'local'"><Check v-if="item.lastSnapshotAt" :size="13" /><HardDrive v-else :size="13" /></i></span><small>{{ displaySourcePath(item.sourcePath) }}</small><span class="meta"><span>{{ item.category }}</span><span>{{ formatBytes(item.totalBytes) }}</span><span>{{ formatTime(item.lastSnapshotAt) }}</span></span></span>
-          </button>
+            <span class="archive-copy"><span class="row-title"><button class="archive-name" :aria-label="`编辑存档 ${item.name}`" :title="`编辑存档 ${item.name}`" @click.stop="openArchiveEditor(item)">{{ item.name }}</button><span class="automation-badges"><button class="automation-badge" :class="{ active: item.autoBackupEnabled }" :aria-label="`编辑 ${item.name} 的自动备份设置`" :title="`编辑 ${item.name} 的自动备份设置`" @click.stop="openArchiveEditor(item)">自动备份</button><button class="automation-badge" :class="{ active: item.automaticUploadEnabled }" :aria-label="`编辑 ${item.name} 的自动上传设置`" :title="`编辑 ${item.name} 的自动上传设置`" @click.stop="openArchiveEditor(item)">自动上传</button></span><i v-if="archiveNeedsLocation(item)" class="location-warning" title="等待定位本机来源"><AlertTriangle :size="13" /></i><i v-else :class="item.lastSnapshotAt ? 'synced' : 'local'"><Check v-if="item.lastSnapshotAt" :size="13" /><HardDrive v-else :size="13" /></i></span><small>{{ archiveNeedsLocation(item) ? '等待定位本机来源' : displaySourcePath(item.sourcePath) }}</small><span class="meta"><span>{{ item.category }}</span><span>{{ formatBytes(item.totalBytes) }}</span><span>{{ formatTime(item.lastSnapshotAt) }}</span></span></span>
+          </article>
           <div v-if="!loading && !archives.length" class="empty-state"><span class="empty-icon"><FolderArchive :size="26" /></span><b>添加第一个存档</b><p>把一个或多个文件、文件夹组合为可查询和恢复的时间线。</p><button @click="openCreateArchive"><Plus :size="16" />添加存档</button></div>
           <div v-else-if="!loading && !filteredArchives.length" class="empty"><Search :size="22" /><span>没有找到匹配的存档</span></div>
         </div>
@@ -934,18 +1035,18 @@ onBeforeUnmount(() => {
 
       <section v-if="selectedArchive" class="detail-panel" aria-labelledby="detail-title">
         <header class="detail-header">
-          <div class="identity"><span class="detail-icon"><Folder v-if="selectedArchive.kind === 'folder'" /><File v-else-if="selectedArchive.kind === 'file'" /><FolderArchive v-else /></span><div class="title-line"><h2 id="detail-title">{{ selectedArchive.name }}</h2></div></div>
-          <div class="actions"><button class="secondary" :disabled="syncingArchive" @click="syncSelectedArchive"><UploadCloud :size="17" />{{ syncingArchive ? '同步中' : '同步' }}</button><div class="more-control"><button class="icon-button" aria-label="更多操作" title="更多操作" :aria-expanded="archiveMenuOpen" @click="archiveMenuOpen = !archiveMenuOpen"><MoreHorizontal :size="19" /></button><div v-if="archiveMenuOpen" class="archive-actions-menu"><button @click="openSelectedArchiveSources"><FolderOpen :size="15" />打开来源</button><button @click="openSelectedArchiveStorage"><HardDrive :size="15" />打开资料库</button><button @click="openEditArchive"><Pencil :size="15" />编辑存档</button><button class="danger" @click="selectedArchive && deleteArchive(selectedArchive)"><Trash2 :size="15" />删除存档</button></div></div></div>
+          <div class="identity"><span class="detail-icon"><Folder v-if="selectedArchive.kind === 'folder'" /><File v-else-if="selectedArchive.kind === 'file'" /><FolderArchive v-else /></span><div class="title-line"><h2 id="detail-title"><button class="detail-archive-name" :title="`编辑存档 ${selectedArchive.name}`" @click="openEditArchive">{{ selectedArchive.name }}</button></h2><span class="automation-badges"><button class="automation-badge" :class="{ active: selectedArchive.autoBackupEnabled }" :title="`编辑 ${selectedArchive.name} 的自动备份设置`" @click="openEditArchive">自动备份</button><button class="automation-badge" :class="{ active: selectedArchive.automaticUploadEnabled }" :title="`编辑 ${selectedArchive.name} 的自动上传设置`" @click="openEditArchive">自动上传</button></span></div></div>
+          <div class="actions"><button class="secondary sync-progress-button" :style="{ '--sync-progress': currentSyncProgressFraction }" :disabled="syncingArchive || syncingAllArchives" @click="syncSelectedArchive"><span><UploadCloud :size="17" />{{ syncingArchive ? `同步中 ${syncProgressText}` : '同步' }}</span></button><div class="more-control"><button class="icon-button" aria-label="更多操作" title="更多操作" :aria-expanded="archiveMenuOpen" @click="archiveMenuOpen = !archiveMenuOpen"><MoreHorizontal :size="19" /></button><div v-if="archiveMenuOpen" class="archive-actions-menu"><button @click="openSelectedArchiveSources"><FolderOpen :size="15" />打开来源</button><button @click="openSelectedArchiveStorage"><HardDrive :size="15" />打开资料库</button><button @click="openEditArchive"><Pencil :size="15" />编辑存档</button><button class="danger" @click="selectedArchive && deleteArchive(selectedArchive)"><Trash2 :size="15" />删除存档</button></div></div></div>
         </header>
 
         <ArchiveMetadata :archive="selectedArchive" :saving-tags="savingTags" @add-tag="addArchiveTag" @remove-tag="removeArchiveTag" />
 
         <div class="detail-content">
           <section class="timeline-area">
-            <div class="section-title"><div><p class="label">版本历史</p><h3>时间节点</h3></div><button class="link-button" @click="showNotice('保留策略将在自动备份阶段接入', 'info')">管理保留策略</button></div>
-            <div class="snapshot-create"><input v-model="snapshotDescription" maxlength="160" placeholder="输入新存档描述信息（可留空）" @keydown.enter.prevent="createSnapshotFromDetail" /><button class="accent snapshot-create-button" :class="`is-${snapshotButtonState.state}`" :style="{ '--snapshot-progress': snapshotButtonState.percent / 100 }" :disabled="busyAction !== undefined" @click="createSnapshotFromDetail"><span><Plus :size="16" />{{ busyAction === 'snapshot' ? '创建中' : '创建新快照' }}</span></button></div>
+            <div class="section-title"><div><p class="label">版本历史</p><h3>时间节点</h3></div></div>
+            <div class="snapshot-create"><input v-model="snapshotDescription" maxlength="160" placeholder="输入新存档描述信息（可留空）" @keydown.enter.prevent="createSnapshotFromDetail" /><button class="accent" :disabled="busyAction !== undefined" @click="createSnapshotFromDetail"><Plus :size="16" />{{ busyAction === 'snapshot' ? '创建中' : '创建新快照' }}</button></div>
             <div class="timeline-toolbar"><label><Search :size="15" /><input v-model="snapshotSearch" type="search" placeholder="搜索快照描述" /></label><ThemedSelect :model-value="snapshotSort" :options="timelineSortOptions" label="时间线排序" @update:model-value="updateTimelineSort" /></div>
-            <div v-if="visibleSnapshots.length" class="timeline-table"><div class="timeline-table-head"><span>备份时间</span><span>描述</span><span>位置 / 大小</span><span>操作</span></div><article v-for="snapshot in visibleSnapshots" :key="snapshot.id" :class="{ selected: selectedSnapshotId === snapshot.id }" tabindex="0" @click="selectedSnapshotId = snapshot.id" @keydown.enter="selectedSnapshotId = snapshot.id"><time>{{ formatTime(snapshot.createdAt) }}</time><span><b>{{ snapshot.title }}</b><small>{{ snapshot.note || snapshotDetail(snapshot) }}</small></span><span>本机 · {{ formatBytes(snapshot.totalBytes) }}</span><div class="timeline-actions"><button class="info" :class="{ active: activityPanelOpen && selectedSnapshotId === snapshot.id }" :aria-label="`查看 ${formatTime(snapshot.createdAt)} 的时间节点详情`" :title="`查看 ${formatTime(snapshot.createdAt)} 的时间节点详情`" :aria-pressed="activityPanelOpen && selectedSnapshotId === snapshot.id" @click.stop="selectedSnapshotId = snapshot.id; activityPanelOpen = true"><Info :size="16" /></button><button :disabled="busyAction !== undefined" :aria-label="`恢复 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="`恢复 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="selectedSnapshotId = snapshot.id; restoreSnapshot()"><RotateCcw :size="16" /><span>恢复</span></button><button :disabled="syncingArchive" :aria-label="`同步 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="`同步 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="selectedSnapshotId = snapshot.id; syncSelectedArchive()"><UploadCloud :size="16" /><span>同步</span></button><button class="danger" :disabled="busyAction !== undefined" :aria-label="`删除 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="`删除 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="deleteSnapshot(snapshot)"><Trash2 :size="16" /></button></div></article></div>
+            <div v-if="visibleSnapshots.length" class="timeline-table"><div class="timeline-table-head"><span>备份时间</span><span>描述</span><span>位置 / 大小</span><span>操作</span></div><article v-for="snapshot in visibleSnapshots" :key="snapshot.id" :class="{ selected: selectedSnapshotId === snapshot.id }" tabindex="0" @click="selectedSnapshotId = snapshot.id" @keydown.enter="selectedSnapshotId = snapshot.id"><time>{{ formatTime(snapshot.createdAt) }}</time><span><b>{{ snapshot.title }}</b><small>{{ snapshot.note || snapshotDetail(snapshot) }}</small></span><span>本机 · {{ formatBytes(snapshot.totalBytes) }}</span><div class="timeline-actions"><button class="info" :class="{ active: activityPanelOpen && selectedSnapshotId === snapshot.id }" :aria-label="`查看 ${formatTime(snapshot.createdAt)} 的时间节点详情`" :title="`查看 ${formatTime(snapshot.createdAt)} 的时间节点详情`" :aria-pressed="activityPanelOpen && selectedSnapshotId === snapshot.id" @click.stop="selectedSnapshotId = snapshot.id; activityPanelOpen = true"><Info :size="16" /></button><button :disabled="busyAction !== undefined" :aria-label="`恢复 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="`恢复 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="selectedSnapshotId = snapshot.id; restoreSnapshot()"><RotateCcw :size="16" /><span>恢复</span></button><button :disabled="syncingArchive || syncingAllArchives" :aria-label="`同步 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="`同步 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="selectedSnapshotId = snapshot.id; syncSelectedArchive()"><UploadCloud :size="16" /><span>同步</span></button><button class="danger" :disabled="busyAction !== undefined" :aria-label="`删除 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="`删除 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="deleteSnapshot(snapshot)"><Trash2 :size="16" /></button></div></article></div>
             <div v-else class="timeline-empty"><Clock3 :size="25" /><b>还没有时间节点</b><p>创建首个备份后，可以从这里查看和恢复历史版本。</p><button :disabled="busyAction !== undefined" @click="createSnapshot('初始版本')">创建首个备份</button></div>
           </section>
 
@@ -963,12 +1064,12 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section v-else class="detail-panel detail-placeholder"><span><FolderArchive :size="31" /></span><h2>本地优先的时间节点管理</h2><p>从左侧添加文件或文件夹，开始保存和恢复历史状态。</p></section>
+      <section v-else class="detail-panel detail-placeholder"><span><FolderArchive :size="31" /></span><h2>本地云端通用文件快照管理器</h2><p>从左侧添加文件或文件夹，开始保存和恢复历史状态。</p></section>
     </main>
 
     <AppToast v-if="notice" :message="notice.message" :type="notice.type" @close="notice = undefined" />
     <SettingsDialog v-if="settingsOpen" @close="settingsOpen = false" @saved="handleSettingsChanged" />
-    <CloudCenterDialog v-if="cloudSettingsOpen" @close="cloudSettingsOpen = false" @saved="handleCloudSettingsChanged" />
+    <CloudCenterDialog v-if="cloudSettingsOpen" @close="cloudSettingsOpen = false" @saved="handleCloudSettingsChanged" @downloaded="handleCloudDownload" @settings-downloaded="handleCloudSettingsDownload" />
     <CloudHealthDialog v-if="cloudHealthDialogOpen" :items="cloudHealthCheckItems" :running="cloudHealthCheckRunning" @close="cloudHealthDialogOpen = false" />
     <CreateCategoryDialog
       v-if="categoryDialogOpen"
@@ -987,12 +1088,14 @@ onBeforeUnmount(() => {
       :error="createArchiveError"
       :edit-name="editingArchive?.name"
       :edit-storage-policy="editingArchive?.storagePolicy"
-      :edit-sync-mode="editingArchive?.syncMode"
+      :edit-auto-backup-enabled="editingArchive?.autoBackupEnabled"
+      :edit-automatic-upload-enabled="editingArchive?.automaticUploadEnabled"
       @close="closeArchiveDialog"
       @pick="pickSources"
       @remove="pendingSources = pendingSources.filter((source) => source.id !== $event)"
       @submit="createArchive"
     />
     <ConfirmDialog v-if="confirmRequest" :title="confirmRequest.title" :message="confirmRequest.message" :confirm-label="confirmRequest.confirmLabel" :destructive="confirmRequest.destructive" @cancel="answerConfirmation(false)" @confirm="answerConfirmation(true)" />
+    <ConfirmDialog v-if="closeRequestOpen" title="关闭 Chronicle" message="最小化到托盘后，自动备份仍会在后台运行。" confirm-label="最小化到托盘" @cancel="closeRequestOpen = false" @confirm="hideMainWindowToTray"><template #extra-actions><button class="exit-button" @click="invoke('exit_chronicle')">退出 Chronicle</button></template></ConfirmDialog>
   </div>
 </template>

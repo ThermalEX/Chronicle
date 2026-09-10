@@ -77,6 +77,12 @@ pub struct Entry {
     /// Per-entry cloud synchronization behavior.
     #[serde(default)]
     pub sync_mode: SyncMode,
+    /// Whether filesystem changes should create snapshots automatically.
+    #[serde(default)]
+    pub auto_backup_enabled: bool,
+    /// Whether new snapshots should be uploaded to enabled cloud sources automatically.
+    #[serde(default)]
+    pub automatic_upload_enabled: bool,
     /// Time the entry was registered, expressed as Unix milliseconds.
     pub created_at_ms: u64,
 }
