@@ -875,8 +875,7 @@ fn apply_cloud_configuration(root: &Path, settings: &Value) -> Result<(), String
     Ok(())
 }
 
-fn merge_entry_category_tree(catalog: &mut Value, tree: &Value, entry_id: &str) {
-    let Some(categories) = tree.get("entries").and_then(Value::as_object).and_then(|entries| entries.get(entry_id)).and_then(Value::as_array) else { return; };
+fn merge_categories(catalog: &mut Value, categories: &[Value]) {
     if !catalog["categories"].is_array() {
         catalog["categories"] = Value::Array(Vec::new());
     }
@@ -886,6 +885,19 @@ fn merge_entry_category_tree(catalog: &mut Value, tree: &Value, entry_id: &str) 
         local.retain(|existing| existing.get("id").and_then(Value::as_str) != id);
         local.push(category.clone());
     }
+}
+
+fn merge_entry_category_tree(catalog: &mut Value, tree: &Value, entry_id: &str) -> bool {
+    let Some(categories) = tree.get("entries").and_then(Value::as_object).and_then(|entries| entries.get(entry_id)).and_then(Value::as_array) else { return false; };
+    merge_categories(catalog, categories);
+    true
+}
+
+fn merge_entry_categories_from_catalog(catalog: &mut Value, remote_catalog: &Value, entry_id: &str) -> Result<(), String> {
+    let branch = category_tree_for_entry(remote_catalog, entry_id)?;
+    let categories = branch.get("categories").and_then(Value::as_array).ok_or_else(|| "云端分类层级格式无效".to_owned())?;
+    merge_categories(catalog, categories);
+    Ok(())
 }
 
 async fn ensure_remote_library(client: &RemoteStore, root: &Path) -> Result<Value, String> {
@@ -1114,7 +1126,15 @@ async fn github_overwrite_download(
         .cloned()
         .ok_or_else(|| "远端清单缺少存档".to_owned())?;
     entries.push(summary);
-    if use_cloud_category_tree { if let Ok(tree) = client.get_json::<Value>("category-tree.json").await { merge_entry_category_tree(&mut local_catalog, &tree, entry_id); } }
+    if use_cloud_category_tree {
+        let applied_from_tree = client
+            .get_json::<Value>("category-tree.json")
+            .await
+            .is_ok_and(|tree| merge_entry_category_tree(&mut local_catalog, &tree, entry_id));
+        if !applied_from_tree {
+            merge_entry_categories_from_catalog(&mut local_catalog, &remote_catalog_value, entry_id)?;
+        }
+    }
     if let Err(error) = write_json_atomic(&local_catalog_path, &local_catalog) {
         let _ = fs::remove_dir_all(&target);
         if backup.exists() {
@@ -1904,7 +1924,15 @@ pub async fn cloud_overwrite_download(
         .cloned()
         .ok_or_else(|| "远端清单缺少存档".to_owned())?;
     entries.push(summary);
-    if use_cloud_category_tree { if let Ok(tree) = client.get_json::<Value>("category-tree.json").await { merge_entry_category_tree(&mut local_catalog, &tree, &entry_id); } }
+    if use_cloud_category_tree {
+        let applied_from_tree = client
+            .get_json::<Value>("category-tree.json")
+            .await
+            .is_ok_and(|tree| merge_entry_category_tree(&mut local_catalog, &tree, &entry_id));
+        if !applied_from_tree {
+            merge_entry_categories_from_catalog(&mut local_catalog, &remote_catalog_value, &entry_id)?;
+        }
+    }
     if let Err(error) = write_json_atomic(&local_catalog_path, &local_catalog) {
         let _ = fs::remove_dir_all(&target);
         if backup.exists() {
@@ -2340,7 +2368,7 @@ pub async fn cloud_set_entry_sync_mode(
 mod tests {
     use serde_json::json;
 
-    use super::{category_tree_for_entry, configuration_path, merge_catalog_entry, missing_snapshot_archives, preview_from_catalog};
+    use super::{category_tree_for_entry, configuration_path, merge_catalog_entry, merge_entry_categories_from_catalog, missing_snapshot_archives, preview_from_catalog};
 
     #[test]
     fn configuration_deletion_only_targets_known_setting_files() {
@@ -2495,6 +2523,28 @@ mod tests {
         });
         let tree = category_tree_for_entry(&catalog, "entry").unwrap();
         let ids = tree["categories"].as_array().unwrap().iter().map(|item| item["id"].as_str().unwrap()).collect::<Vec<_>>();
+        assert_eq!(ids, vec!["child", "root"]);
+    }
+
+    #[test]
+    fn category_download_falls_back_to_only_the_selected_archive_branch_in_catalog() {
+        let remote_catalog = json!({
+            "entries": [
+                { "id": "selected", "category_id": "child" },
+                { "id": "other", "category_id": "other-category" }
+            ],
+            "categories": [
+                { "id": "root", "parent_id": null },
+                { "id": "child", "parent_id": "root" },
+                { "id": "other-category", "parent_id": null }
+            ]
+        });
+        let mut local_catalog = json!({ "entries": [], "categories": [] });
+
+        merge_entry_categories_from_catalog(&mut local_catalog, &remote_catalog, "selected").unwrap();
+
+        let ids = local_catalog["categories"].as_array().unwrap().iter()
+            .map(|category| category["id"].as_str().unwrap()).collect::<Vec<_>>();
         assert_eq!(ids, vec!["child", "root"]);
     }
 }
