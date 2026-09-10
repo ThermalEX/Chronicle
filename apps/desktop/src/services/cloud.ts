@@ -83,6 +83,12 @@ export const cloudRepository = {
   },
 };
 
+/** Upload the archive payload and only that archive's category ancestry. */
+export async function uploadArchiveWithCategoryTree(sourceId: string, entryId: string): Promise<void> {
+  await cloudRepository.upload(sourceId, entryId);
+  await cloudRepository.uploadEntryCategoryTree(sourceId, entryId);
+}
+
 /** Do not enable sources until every credential write has succeeded. */
 export async function saveCloudConfiguration(settings: CloudSettings, credentials: {
   source: CloudSource;

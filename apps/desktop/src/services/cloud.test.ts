@@ -69,6 +69,16 @@ describe("cloud repository adapter", () => {
     expect(invoke).toHaveBeenCalledWith("cloud_delete_configurations", { sourceId: "source-1", configurationIds: ["config:app-settings"] });
   });
 
+  it("uploads an archive's own category branch with an overwrite upload", async () => {
+    invoke.mockResolvedValue(undefined);
+    const { uploadArchiveWithCategoryTree } = await import("./cloud");
+
+    await uploadArchiveWithCategoryTree("source-1", "entry-1");
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "cloud_overwrite_upload", { sourceId: "source-1", entryId: "entry-1" });
+    expect(invoke).toHaveBeenNthCalledWith(2, "cloud_upload_entry_category_tree", { sourceId: "source-1", entryId: "entry-1" });
+  });
+
   it("stores a GitHub token through the provider-specific credential command", async () => {
     const { cloudRepository } = await import("./cloud");
     await cloudRepository.saveCredential({

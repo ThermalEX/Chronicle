@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ChevronDown, CloudCog, Download, ExternalLink, Pause, Play, Plus, RefreshCw, Search, Server, Trash2, Upload, X } from "@lucide/vue";
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
-import { cloudRepository, saveCloudConfiguration, type CloudPreview, type RemoteItem } from "../services/cloud";
+import { cloudRepository, saveCloudConfiguration, uploadArchiveWithCategoryTree, type CloudPreview, type RemoteItem } from "../services/cloud";
 import { cloudSettings, type CloudProvider, type CloudSettings, type CloudSource } from "../services/settings";
 import { createBackdropDismissal } from "../services/dialogDismissal";
 import ConfirmDialog from "./ConfirmDialog.vue";
@@ -185,7 +185,7 @@ async function runItemAction(item: RemoteItem, action: "sync" | "upload" | "down
   busy.value = `${action}:${item.id}`;
   try {
     if (action === "sync") showToast("success", (await cloudRepository.sync(repositorySource.value.id, item.id)).message);
-    if (action === "upload") { await cloudRepository.upload(repositorySource.value.id, item.id); showToast("success", "已用本地存档覆盖远端"); }
+    if (action === "upload") { await uploadArchiveWithCategoryTree(repositorySource.value.id, item.id); showToast("success", "已用本地存档覆盖远端"); }
     if (action === "download") { await cloudRepository.download(repositorySource.value.id, item.id, useCloudCategoryTree.value); emit("downloaded"); showToast("success", "已下载远端存档"); }
     await loadPreview();
   } catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
@@ -219,7 +219,7 @@ async function confirmDownloadApplicationSettings(): Promise<void> {
   finally { busy.value = ""; }
   confirmAction.value = {
     title: "应用云端设置",
-    message: "云端应用设置与分类层级已下载。确定后立即应用，当前云端连接配置不会被覆盖。",
+    message: "云端应用设置已下载。确定后立即应用，当前云端连接配置不会被覆盖。",
     run: async () => {
       busy.value = "app-settings-download";
       try { await cloudRepository.downloadApplicationSettings(repositorySource.value!.id, true); emit("settingsDownloaded"); showToast("success", "已下载并应用云端设置"); }
