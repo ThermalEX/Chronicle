@@ -25,6 +25,10 @@ pub struct GitHubChange {
     pub contents: Option<Vec<u8>>,
 }
 
+fn deletion_tree_entry(path: &str) -> Value {
+    json!({ "path": path, "mode": "100644", "type": "blob", "sha": Value::Null })
+}
+
 #[derive(Debug, Error)]
 pub enum GitHubError {
     #[error("GitHub request failed: {0}")]
@@ -74,6 +78,7 @@ fn valid_new_repository_name(name: &str) -> Result<String> {
 #[derive(Clone)]
 pub struct GitHubClient {
     client: Client,
+    api_root: String,
     source: GitHubSource,
     policy: RequestPolicy,
 }
@@ -172,16 +177,17 @@ impl GitHubClient {
         }
         Ok(Self {
             client: Client::builder().timeout(Duration::from_mins(1)).build()?,
+            api_root: format!("https://api.github.com/repos/{}", source.repository),
             source,
             policy,
         })
     }
 
     fn api(&self, suffix: &str) -> String {
-        let root = format!("https://api.github.com/repos/{}", self.source.repository);
+        let root = &self.api_root;
         let suffix = suffix.trim_start_matches('/');
         if suffix.is_empty() {
-            root
+            root.clone()
         } else {
             format!("{root}/{suffix}")
         }
@@ -341,26 +347,17 @@ impl GitHubClient {
     async fn head(&self) -> Result<(String, String)> {
         let branch = urlencoding::encode(&self.source.branch);
         let reference: Value = self
-            .request(
-                reqwest::Method::GET,
-                format!("git/ref/heads/{branch}"),
-                None,
-            )
+            .request(reqwest::Method::GET, format!("branches/{branch}"), None)
             .await?
             .json()
             .await?;
         let head = reference
-            .pointer("/object/sha")
+            .pointer("/commit/sha")
             .and_then(Value::as_str)
             .ok_or(GitHubError::InvalidPath)?
             .to_owned();
-        let commit: Value = self
-            .request(reqwest::Method::GET, format!("git/commits/{head}"), None)
-            .await?
-            .json()
-            .await?;
-        let tree = commit
-            .pointer("/tree/sha")
+        let tree = reference
+            .pointer("/commit/commit/tree/sha")
             .and_then(Value::as_str)
             .ok_or(GitHubError::InvalidPath)?
             .to_owned();
@@ -391,6 +388,16 @@ impl GitHubClient {
         let mut tree = Vec::with_capacity(scoped_changes.len());
         for (path, contents) in scoped_changes {
             let entry = if let Some(contents) = contents {
+                // Inline small JSON metadata in the tree; archives still use lossless base64 blobs.
+                if std::path::Path::new(&path)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+                    && contents.len() <= 1024 * 1024
+                    && let Ok(content) = std::str::from_utf8(&contents)
+                {
+                    tree.push(json!({ "path": path, "mode": "100644", "type": "blob", "content": content }));
+                    continue;
+                }
                 let blob: Value = self
                     .request(
                         reqwest::Method::POST,
@@ -402,7 +409,7 @@ impl GitHubClient {
                     .await?;
                 json!({ "path": path, "mode": "100644", "type": "blob", "sha": blob.get("sha") })
             } else {
-                json!({ "path": path, "mode": Value::Null, "type": Value::Null, "sha": Value::Null })
+                deletion_tree_entry(&path)
             };
             tree.push(entry);
         }
@@ -419,6 +426,9 @@ impl GitHubClient {
             .get("sha")
             .and_then(Value::as_str)
             .ok_or(GitHubError::InvalidPath)?;
+        if tree_sha == base_tree {
+            return Ok(());
+        }
         let commit: Value = self
             .request(
                 reqwest::Method::POST,
@@ -438,6 +448,8 @@ impl GitHubClient {
             format!("git/refs/heads/{branch}"),
             Some(json!({ "sha": commit_sha, "force": false })),
         )
+        .await?
+        .bytes()
         .await?;
         Ok(())
     }
@@ -445,8 +457,216 @@ impl GitHubClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{GitHubClient, GitHubSource, valid_new_repository_name};
+    use super::{
+        GitHubChange, GitHubClient, GitHubSource, deletion_tree_entry, valid_new_repository_name,
+    };
     use crate::RequestPolicy;
+    use serde_json::{Value, json};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    type RecordedRequests = Arc<Mutex<Vec<(String, Value)>>>;
+
+    // Only HTTP is faked: exercise the real request/commit pipeline and inspect its payloads.
+    fn git_server(unchanged: bool, conflict: bool) -> (GitHubClient, RecordedRequests) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::downgrade(&requests);
+        std::thread::spawn(move || {
+            while let Some(recorded) = recorded.upgrade() {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    drop(recorded);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    continue;
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let route = line
+                    .split_whitespace()
+                    .take(2)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                recorded.lock().unwrap().push((route.clone(), body));
+                let response = match route.as_str() {
+                    "GET /branches/main" => {
+                        json!({"commit": {"sha": "head", "commit": {"tree": {"sha": "base"}}}})
+                    }
+                    "GET /git/ref/heads/main" => json!({"object": {"sha": "head"}}),
+                    "GET /git/commits/head" => json!({"tree": {"sha": "base"}}),
+                    "POST /git/blobs" => json!({"sha": "blob"}),
+                    "POST /git/trees" => json!({"sha": if unchanged { "base" } else { "tree" }}),
+                    "POST /git/commits" => json!({"sha": "commit"}),
+                    "PATCH /git/refs/heads/main" => json!({"object": {"sha": "commit"}}),
+                    _ => panic!("unexpected request: {route}"),
+                }
+                .to_string();
+                let status = if conflict && route.starts_with("PATCH") {
+                    "422 Unprocessable Entity"
+                } else {
+                    "200 OK"
+                };
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+            }
+        });
+        let mut client = GitHubClient::new(
+            GitHubSource {
+                repository: "owner/repository".into(),
+                branch: "main".into(),
+                remote_path: "/Chronicle".into(),
+                token: "test-only".into(),
+            },
+            RequestPolicy {
+                request_delay_ms: 0,
+                retry_limit: 0,
+                ..RequestPolicy::default()
+            },
+        )
+        .unwrap();
+        client.api_root = format!("http://{address}");
+        client.client = reqwest::Client::builder().no_proxy().build().unwrap();
+        (client, requests)
+    }
+
+    #[tokio::test]
+    async fn deletion_and_catalog_update_need_only_four_requests() {
+        let (client, requests) = git_server(false, false);
+        let catalog = "{\"name\":\"中文存档\"}";
+        client
+            .commit_changes(
+                "delete",
+                vec![
+                    GitHubChange {
+                        path: "archives/a/old.7z".into(),
+                        contents: None,
+                    },
+                    GitHubChange {
+                        path: "catalog.json".into(),
+                        contents: Some(catalog.as_bytes().to_vec()),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            4,
+            "metadata must not cost an extra blob upload or head lookup"
+        );
+        let tree = &requests
+            .iter()
+            .find(|(route, _)| route == "POST /git/trees")
+            .unwrap()
+            .1;
+        assert_eq!(tree["base_tree"], "base");
+        assert_eq!(
+            tree["tree"][0],
+            json!({"path":"Chronicle/archives/a/old.7z","mode":"100644","type":"blob","sha":null})
+        );
+        assert_eq!(tree["tree"][1]["content"], catalog);
+        assert!(tree["tree"][1].get("sha").is_none());
+        assert_eq!(
+            requests.last().unwrap().1,
+            json!({"sha":"commit","force":false})
+        );
+    }
+
+    #[tokio::test]
+    async fn binary_snapshot_upload_keeps_exact_bytes() {
+        use base64::Engine;
+        let (client, requests) = git_server(false, false);
+        client
+            .commit_changes(
+                "upload",
+                vec![GitHubChange {
+                    path: "archives/a/new.7z".into(),
+                    contents: Some(vec![0, 255, 128, 42]),
+                }],
+            )
+            .await
+            .unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        let blob = &requests
+            .iter()
+            .find(|(route, _)| route == "POST /git/blobs")
+            .unwrap()
+            .1;
+        assert_eq!(blob["encoding"], "base64");
+        assert_eq!(
+            super::STANDARD
+                .decode(blob["content"].as_str().unwrap())
+                .unwrap(),
+            [0, 255, 128, 42]
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_tree_does_not_create_a_commit_or_update_the_branch() {
+        let (client, requests) = git_server(true, false);
+        client
+            .commit_changes(
+                "unchanged",
+                vec![GitHubChange {
+                    path: "category-tree.json".into(),
+                    contents: Some(b"{}".to_vec()),
+                }],
+            )
+            .await
+            .unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            !requests
+                .iter()
+                .any(|(route, _)| route.starts_with("PATCH") || route == "POST /git/commits")
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_branch_change_is_reported_without_force_push() {
+        let (client, requests) = git_server(false, true);
+        assert!(
+            client
+                .commit_changes(
+                    "update",
+                    vec![GitHubChange {
+                        path: "catalog.json".into(),
+                        contents: Some(b"{}".to_vec()),
+                    }]
+                )
+                .await
+                .is_err()
+        );
+        let requests = requests.lock().unwrap();
+        let patches: Vec<_> = requests
+            .iter()
+            .filter(|(route, _)| route.starts_with("PATCH"))
+            .collect();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].1["force"], false);
+    }
 
     #[test]
     fn repository_path_stays_under_the_chronicle_root() {
@@ -465,6 +685,16 @@ mod tests {
             "Chronicle/catalog.json"
         );
         assert!(client.scoped_path("../settings.json").is_err());
+    }
+
+    #[test]
+    fn deletion_tree_entries_keep_the_required_blob_mode_and_type() {
+        let entry = deletion_tree_entry("Chronicle/archives/archive/snapshot.7z");
+
+        assert_eq!(entry["path"], "Chronicle/archives/archive/snapshot.7z");
+        assert_eq!(entry["mode"], "100644");
+        assert_eq!(entry["type"], "blob");
+        assert!(entry["sha"].is_null());
     }
 
     #[test]

@@ -10,6 +10,8 @@ pub enum EntryKind {
     File,
     /// A directory tree.
     Directory,
+    /// An explicitly selected Windows registry key and its descendants.
+    Registry,
 }
 
 /// One local file or directory included in an entry.
@@ -83,6 +85,9 @@ pub struct Entry {
     /// Whether new snapshots should be uploaded to enabled cloud sources automatically.
     #[serde(default)]
     pub automatic_upload_enabled: bool,
+    /// Source-relative file patterns omitted from new snapshots and watcher triggers.
+    #[serde(default)]
+    pub exclude_patterns: Vec<String>,
     /// Time the entry was registered, expressed as Unix milliseconds.
     pub created_at_ms: u64,
 }
@@ -144,4 +149,13 @@ pub struct Snapshot {
     pub changes: ChangeSummary,
     /// Whether this was created automatically before a restore.
     pub safety: bool,
+    /// Protected snapshots require explicit unlocking before deletion.
+    #[serde(default)]
+    pub locked: bool,
+    /// Last user edit of mutable note/lock annotations.
+    #[serde(default)]
+    pub metadata_updated_at_ms: u64,
+    /// Capture-time exclusions retained to protect omitted files during restoration.
+    #[serde(default)]
+    pub exclude_patterns: Vec<String>,
 }

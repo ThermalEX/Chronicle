@@ -417,6 +417,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -583,14 +593,14 @@ dependencies = [
 
 [[package]]
 name = "chronicle-core"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "chronicle-desktop"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "chronicle-core",
  "chronicle-storage",
@@ -612,9 +622,10 @@ dependencies = [
 
 [[package]]
 name = "chronicle-storage"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "chronicle-core",
+ "globset",
  "serde",
  "serde_json",
  "sevenz-rust",
@@ -623,11 +634,12 @@ dependencies = [
  "time",
  "uuid",
  "walkdir",
+ "winreg",
 ]
 
 [[package]]
 name = "chronicle-sync"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "base64 0.22.1",
  "chronicle-core",
@@ -1765,6 +1777,19 @@ name = "glob"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
+name = "globset"
+version = "0.4.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07c34a9410465b45bd9787443bc7370f37735bad04b0f0cd57ff1a3186c98988"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
+]
 
 [[package]]
 name = "gloo-timers"

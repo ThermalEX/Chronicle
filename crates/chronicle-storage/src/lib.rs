@@ -1,5 +1,7 @@
 #![doc = "Local metadata and immutable object storage adapters."]
 
+pub mod exclusions;
+pub mod registry;
 mod repository;
 
 use chronicle_core::Snapshot;

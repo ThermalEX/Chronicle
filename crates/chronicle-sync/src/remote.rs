@@ -1,4 +1,4 @@
-//! Root-confined remote I/O shared by the legacy WebDAV and OpenDAL protocols.
+//! Root-confined remote I/O shared by the legacy `WebDAV` and `OpenDAL` protocols.
 use crate::{RequestPolicy, WebDavClient, WebDavError};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use opendal::{
@@ -36,7 +36,9 @@ fn invalid(message: &str) -> WebDavError {
     WebDavError::Remote(message.into())
 }
 
-/// Validate before OpenDAL can normalize a path or an HTTP server can decode it.
+/// Validate before `OpenDAL` can normalize a path or an HTTP server can decode it.
+/// # Errors
+/// Returns an error for invalid configuration, paths, serialization or failed I/O.
 pub fn validate_relative_path(path: &str) -> Result<()> {
     if path.starts_with('/')
         || path.contains(['\\', ':', '\0'])
@@ -47,6 +49,7 @@ pub fn validate_relative_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::needless_pass_by_value)] // Direct Result::map_err adapter.
 fn remote_error(error: opendal::Error) -> WebDavError {
     // OpenDAL's full error chain may contain credentials and request URLs.
     if error.kind() == ErrorKind::NotFound {
@@ -84,6 +87,9 @@ pub enum RemoteStore {
 }
 
 impl RemoteStore {
+    /// # Errors
+    /// Returns an error for invalid configuration, paths, serialization or failed I/O.
+    #[allow(clippy::needless_pass_by_value)] // Consume credential input at the client boundary.
     pub fn opendal(
         source: OpenDalSource,
         secrets: HashMap<String, String>,
@@ -145,8 +151,8 @@ impl RemoteStore {
             .map_err(remote_error)?
             .layer(
                 TimeoutLayer::new()
-                    .with_timeout(Duration::from_secs(60))
-                    .with_io_timeout(Duration::from_secs(300)),
+                    .with_timeout(Duration::from_mins(1))
+                    .with_io_timeout(Duration::from_mins(5)),
             )
             .layer(
                 RetryLayer::new()
@@ -177,10 +183,13 @@ impl RemoteStore {
         }
     }
 
+    #[must_use]
     pub fn is_opendal(&self) -> bool {
         matches!(self, Self::OpenDal(..))
     }
 
+    /// # Errors
+    /// Returns an error for invalid configuration, paths, serialization or failed I/O.
     pub fn require_capabilities(&self) -> Result<()> {
         if let Self::OpenDal(op, ..) = self {
             let caps = op.info().capability();
@@ -191,6 +200,8 @@ impl RemoteStore {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error for invalid configuration, paths, serialization or failed I/O.
     pub async fn ensure_collection(&self, path: &str) -> Result<()> {
         self.pace().await;
         validate_relative_path(path)?;
@@ -203,6 +214,8 @@ impl RemoteStore {
             Self::OpenDal(..) => Ok(()),
         }
     }
+    /// # Errors
+    /// Returns an error for invalid configuration, paths, serialization or failed I/O.
     pub async fn get_bytes(&self, path: &str) -> Result<Vec<u8>> {
         self.pace().await;
         validate_relative_path(path)?;
@@ -215,9 +228,13 @@ impl RemoteStore {
                 .map_err(remote_error),
         }
     }
+    /// # Errors
+    /// Returns an error for invalid configuration, paths, serialization or failed I/O.
     pub async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         Ok(serde_json::from_slice(&self.get_bytes(path).await?)?)
     }
+    /// # Errors
+    /// Returns an error for invalid configuration, paths, serialization or failed I/O.
     pub async fn put_atomic(&self, path: &str, bytes: Vec<u8>) -> Result<()> {
         self.pace().await;
         validate_relative_path(path)?;
@@ -230,13 +247,19 @@ impl RemoteStore {
                 .map_err(remote_error),
         }
     }
+    /// # Errors
+    /// Returns an error for invalid configuration, paths, serialization or failed I/O.
     pub async fn put_json<T: Serialize>(&self, path: &str, value: &T) -> Result<()> {
         self.put_atomic(path, serde_json::to_vec_pretty(value)?)
             .await
     }
+    /// # Errors
+    /// Returns an error for invalid configuration, paths, serialization or failed I/O.
     pub async fn upload_file(&self, path: &str, local: &Path) -> Result<()> {
         self.put_atomic(path, tokio::fs::read(local).await?).await
     }
+    /// # Errors
+    /// Returns an error for invalid configuration, paths, serialization or failed I/O.
     pub async fn download_file(&self, path: &str, local: &Path) -> Result<()> {
         let bytes = self.get_bytes(path).await?;
         if let Some(parent) = local.parent() {
@@ -246,6 +269,8 @@ impl RemoteStore {
         Ok(())
     }
     /// Recursive deletion is always confined to an explicit directory prefix.
+    /// # Errors
+    /// Returns an error for invalid configuration, paths, serialization or failed I/O.
     pub async fn delete(&self, path: &str) -> Result<()> {
         self.pace().await;
         validate_relative_path(path)?;
@@ -264,6 +289,8 @@ impl RemoteStore {
             }
         }
     }
+    /// # Errors
+    /// Returns an error for invalid configuration, paths, serialization or failed I/O.
     pub async fn move_object(&self, source: &str, destination: &str) -> Result<()> {
         self.pace().await;
         validate_relative_path(source)?;
@@ -276,6 +303,8 @@ impl RemoteStore {
             Self::OpenDal(..) => Err(invalid("服务不支持重命名")),
         }
     }
+    /// # Errors
+    /// Returns an error for invalid configuration, paths, serialization or failed I/O.
     pub async fn test_capabilities(&self) -> Result<()> {
         self.require_capabilities()?;
         let Self::OpenDal(op, ..) = self else {

@@ -6,8 +6,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chronicle_core::Entry;
-use chronicle_storage::LocalRepository;
+use chronicle_core::{Entry, EntryKind, Snapshot};
+use chronicle_storage::{LocalRepository, exclusions::ExclusionRules};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
@@ -22,28 +22,19 @@ pub struct AutoBackupManager {
     restore_suppressions: Arc<Mutex<HashMap<String, Option<Instant>>>>,
 }
 
-/// Returns whether this is the first change in an archive's active coalescing window.
-/// Later changes are remembered so the window can create one final, latest snapshot.
+/// Returns whether this change starts an archive's coalescing window.
+/// The window creates exactly one snapshot after its delay, using the latest file state.
 fn record_auto_backup_change(windows: &mut HashMap<String, bool>, entry_id: &str) -> bool {
-    if let Some(has_follow_up_change) = windows.get_mut(entry_id) {
-        *has_follow_up_change = true;
-        false
-    } else {
-        windows.insert(entry_id.to_owned(), false);
-        true
-    }
+    windows.insert(entry_id.to_owned(), true).is_none()
 }
 
 fn take_trailing_backup(windows: &mut HashMap<String, bool>, entry_id: &str) -> bool {
-    windows.remove(entry_id).unwrap_or(false)
+    windows.remove(entry_id).is_some()
 }
 
 /// Blocks watcher events while a restore is writing, then for one merge window afterwards.
 /// `None` represents an in-progress restore whose completion time is not known yet.
-fn begin_restore_suppression(
-    suppressions: &mut HashMap<String, Option<Instant>>,
-    entry_id: &str,
-) {
+fn begin_restore_suppression(suppressions: &mut HashMap<String, Option<Instant>>, entry_id: &str) {
     suppressions.insert(entry_id.to_owned(), None);
 }
 
@@ -56,10 +47,7 @@ fn finish_restore_suppression(
     suppressions.insert(entry_id.to_owned(), Some(now + delay));
 }
 
-fn cancel_restore_suppression(
-    suppressions: &mut HashMap<String, Option<Instant>>,
-    entry_id: &str,
-) {
+fn cancel_restore_suppression(suppressions: &mut HashMap<String, Option<Instant>>, entry_id: &str) {
     suppressions.remove(entry_id);
 }
 
@@ -77,6 +65,53 @@ fn is_restore_suppressed(
         }
         None => false,
     }
+}
+
+fn retention_candidates(snapshots: &[Snapshot], limit: usize) -> Vec<String> {
+    let mut ordinary: Vec<_> = snapshots
+        .iter()
+        .filter(|snapshot| !snapshot.safety && !snapshot.locked)
+        .collect();
+    ordinary.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.created_at_ms));
+    ordinary
+        .into_iter()
+        .skip(limit)
+        .map(|snapshot| snapshot.id.clone())
+        .collect()
+}
+
+fn entry_accepts_event(entry: &Entry, event: &notify::Event) -> bool {
+    if !matches!(
+        event.kind,
+        notify::EventKind::Create(_) | notify::EventKind::Modify(_) | notify::EventKind::Remove(_)
+    ) {
+        return false;
+    }
+    let Ok(rules) = ExclusionRules::new(&entry.exclude_patterns) else {
+        return false;
+    };
+    entry
+        .sources
+        .iter()
+        .filter(|source| source.kind != EntryKind::Registry)
+        .any(|source| {
+            let root = PathBuf::from(&source.path);
+            event.paths.iter().any(|changed| {
+                if source.kind == EntryKind::File {
+                    changed == &root
+                        && !rules.is_excluded(std::path::Path::new(&source.name), false)
+                } else {
+                    let is_dir = changed.is_dir()
+                        || matches!(
+                            event.kind,
+                            notify::EventKind::Remove(notify::event::RemoveKind::Folder)
+                        );
+                    changed
+                        .strip_prefix(&root)
+                        .is_ok_and(|relative| !rules.is_excluded(relative, is_dir))
+                }
+            })
+        })
 }
 
 fn create_auto_backup_snapshot(
@@ -97,14 +132,9 @@ fn create_auto_backup_snapshot(
         let snapshots = repository
             .list_snapshots(entry_id)
             .map_err(|error| error.to_string())?;
-        let ordinary: Vec<_> = snapshots
-            .iter()
-            .filter(|snapshot| !snapshot.safety)
-            .collect();
-        let excess = ordinary.len().saturating_sub(limit);
-        for snapshot in ordinary.into_iter().take(excess) {
+        for snapshot_id in retention_candidates(&snapshots, limit) {
             repository
-                .delete_snapshot(entry_id, &snapshot.id)
+                .delete_snapshot(entry_id, &snapshot_id)
                 .map_err(|error| error.to_string())?;
         }
     }
@@ -220,11 +250,17 @@ impl AutoBackupManager {
             .into_iter()
             .filter(|entry| {
                 entry.auto_backup_enabled
-                    && entry.sources.iter().any(|source| !source.path.is_empty())
+                    && entry
+                        .sources
+                        .iter()
+                        .any(|source| source.kind != EntryKind::Registry && !source.path.is_empty())
             })
             .collect();
         for entry in entries.clone() {
             for source in &entry.sources {
+                if source.kind == EntryKind::Registry {
+                    continue;
+                }
                 let path = PathBuf::from(&source.path);
                 if !path.exists() {
                     continue;
@@ -239,32 +275,29 @@ impl AutoBackupManager {
                         let Ok(event) = event else {
                             return;
                         };
-                        for entry in roots.iter().filter(|entry| {
-                            entry.sources.iter().any(|source| {
-                                let source_path = PathBuf::from(&source.path);
-                                event.paths.iter().any(|changed| {
-                                    changed.starts_with(&source_path)
-                                        || (source_path.is_file() && changed == &source_path)
-                                })
-                            })
-                        }) {
-                            let suppressed = restore_suppressions.lock().ok().is_some_and(
-                                |mut suppressions| {
-                                    is_restore_suppressed(
-                                        &mut suppressions,
-                                        &entry.id,
-                                        Instant::now(),
-                                    )
-                                },
-                            );
+                        for entry in roots
+                            .iter()
+                            .filter(|entry| entry_accepts_event(entry, &event))
+                        {
+                            let suppressed =
+                                restore_suppressions
+                                    .lock()
+                                    .ok()
+                                    .is_some_and(|mut suppressions| {
+                                        is_restore_suppressed(
+                                            &mut suppressions,
+                                            &entry.id,
+                                            Instant::now(),
+                                        )
+                                    });
                             if suppressed {
                                 continue;
                             }
-                            let should_create_initial_snapshot = {
+                            let should_start_merge_window = {
                                 let mut pending = pending.lock().expect("auto backup pending lock");
                                 record_auto_backup_change(&mut pending, &entry.id)
                             };
-                            if !should_create_initial_snapshot {
+                            if !should_start_merge_window {
                                 continue;
                             }
                             let repository = repository.clone();
@@ -272,12 +305,6 @@ impl AutoBackupManager {
                             let app = app.clone();
                             let entry_id = entry.id.clone();
                             thread::spawn(move || {
-                                emit_auto_backup_result(
-                                    &app,
-                                    entry_id.clone(),
-                                    create_auto_backup_snapshot(&repository, &entry_id, retention),
-                                );
-
                                 thread::sleep(Duration::from_secs(delay));
                                 let should_create_latest_snapshot =
                                     pending.lock().ok().is_some_and(|mut windows| {
@@ -325,6 +352,56 @@ pub fn refresh_auto_backup(state: State<'_, AppState>) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn exclusions_filter_watcher_events_but_registry_paths_never_trigger() {
+        let entry: chronicle_core::Entry = serde_json::from_value(serde_json::json!({
+            "id":"entry","name":"Save","category_id":null,"storage_policy":"local","created_at_ms":0,
+            "exclude_patterns":["*.tmp","cache/"],
+            "sources":[{"id":"folder","name":"save","kind":"directory","path":"C:\\save"},
+                       {"id":"reg","name":"Registry","kind":"registry","path":"HKEY_CURRENT_USER\\Software\\Test"}]
+        })).unwrap();
+        let change = |path: &str| {
+            notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+                .add_path(path.into())
+        };
+        assert!(!super::entry_accepts_event(
+            &entry,
+            &change(r"C:\save\cache\gone.dat")
+        ));
+        assert!(!super::entry_accepts_event(
+            &entry,
+            &change(r"C:\save\log.tmp")
+        ));
+        assert!(super::entry_accepts_event(
+            &entry,
+            &change(r"C:\save\progress.dat")
+        ));
+        assert!(!super::entry_accepts_event(
+            &entry,
+            &change(r"HKEY_CURRENT_USER\Software\Test")
+        ));
+        assert!(!super::entry_accepts_event(
+            &entry,
+            &notify::Event::new(notify::EventKind::Access(notify::event::AccessKind::Any))
+                .add_path(r"C:\save\progress.dat".into())
+        ));
+    }
+
+    #[test]
+    fn retention_keeps_locked_and_safety_snapshots_outside_the_normal_limit() {
+        let items = vec![
+            serde_json::json!({"id":"old","safety":false,"locked":false}),
+            serde_json::json!({"id":"locked","safety":false,"locked":true}),
+            serde_json::json!({"id":"new","safety":false,"locked":false}),
+            serde_json::json!({"id":"safety","safety":true,"locked":false}),
+        ];
+        let snapshots: Vec<chronicle_core::Snapshot> = items.into_iter().enumerate().map(|(time,mut value)| {
+            let object = value.as_object_mut().unwrap();
+            object.extend(serde_json::json!({"entry_id":"e","parent_id":null,"device_id":"test","title":"test","note":"", "created_at_ms":time,"archive_name":"a.7z","object_hash":"hash","size_bytes":1,"files":[],"changes":{"added":0,"modified":0,"deleted":0}}).as_object().unwrap().clone());
+            serde_json::from_value(value).unwrap()
+        }).collect();
+        assert_eq!(super::retention_candidates(&snapshots, 1), vec!["old"]);
+    }
     use std::{
         collections::HashMap,
         time::{Duration, Instant},
@@ -336,15 +413,15 @@ mod tests {
     };
 
     #[test]
-    fn first_change_creates_an_immediate_snapshot_without_a_trailing_duplicate() {
+    fn first_change_leaves_one_latest_snapshot_pending_for_the_merge_window() {
         let mut windows = HashMap::new();
 
         assert!(record_auto_backup_change(&mut windows, "entry"));
-        assert!(!take_trailing_backup(&mut windows, "entry"));
+        assert!(take_trailing_backup(&mut windows, "entry"));
     }
 
     #[test]
-    fn later_changes_in_the_window_create_one_latest_trailing_snapshot() {
+    fn later_changes_in_the_window_still_leave_only_one_latest_snapshot_pending() {
         let mut windows = HashMap::new();
 
         assert!(record_auto_backup_change(&mut windows, "entry"));

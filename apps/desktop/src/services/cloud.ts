@@ -1,6 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { ArchiveSyncMode } from "../domain";
 import { saveCloudSettings, type CloudSettings, type CloudSource } from "./settings";
+import { runAcrossEnabledSources, runItemsBySource } from "./multiSourceSync";
 
 export type RemoteItem = {
   id: string;
@@ -61,9 +62,17 @@ export const cloudRepository = {
     if (!isTauri()) desktopOnly();
     return invoke("cloud_upload_application_settings", { sourceId });
   },
+  uploadSyncMetadata(sourceId: string, entryIds: string[]): Promise<void> {
+    if (!isTauri()) desktopOnly();
+    return invoke("cloud_upload_sync_metadata", { sourceId, entryIds });
+  },
   uploadEntryCategoryTree(sourceId: string, entryId: string): Promise<void> {
     if (!isTauri()) desktopOnly();
     return invoke("cloud_upload_entry_category_tree", { sourceId, entryId });
+  },
+  uploadEntryCategoryTrees(sourceId: string, entryIds: string[]): Promise<void> {
+    if (!isTauri()) desktopOnly();
+    return invoke("cloud_upload_entry_category_trees", { sourceId, entryIds });
   },
   downloadApplicationSettings(sourceId: string, apply = false): Promise<void> {
     if (!isTauri()) desktopOnly();
@@ -87,6 +96,21 @@ export const cloudRepository = {
 export async function uploadArchiveWithCategoryTree(sourceId: string, entryId: string): Promise<void> {
   await cloudRepository.upload(sourceId, entryId);
   await cloudRepository.uploadEntryCategoryTree(sourceId, entryId);
+}
+
+/** Each source completes its own archive queue and metadata independently of slower sources. */
+export async function syncArchivesAcrossSources<T extends { id: string }>(sources: CloudSource[], archives: T[], onSettled?: () => void) {
+  const perSource = await Promise.all(sources.map(async (source) => {
+    const outcomes = await runItemsBySource([source], archives, (target, archive) => cloudRepository.sync(target.id, archive.id), onSettled);
+    const entryIds = outcomes.filter((outcome) => outcome.status === "fulfilled" && outcome.value.status !== "conflict").map((outcome) => outcome.item.id);
+    const metadataOutcomes = await runAcrossEnabledSources([source], async () => {
+      if (entryIds.length) await cloudRepository.uploadSyncMetadata(source.id, entryIds);
+    }, onSettled);
+    return { outcomes, metadataOutcomes };
+  }));
+  const outcomes = perSource.flatMap((result) => result.outcomes);
+  const metadataOutcomes = perSource.flatMap((result) => result.metadataOutcomes);
+  return { outcomes, metadataOutcomes, hasFailures: [...outcomes, ...metadataOutcomes].some((outcome) => outcome.status === "rejected") };
 }
 
 /** Do not enable sources until every credential write has succeeded. */

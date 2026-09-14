@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runAcrossEnabledSources } from "./multiSourceSync";
+import { runAcrossEnabledSources, runItemsBySource } from "./multiSourceSync";
 import type { CloudSource } from "./settings";
 
 const sources: CloudSource[] = [
@@ -35,5 +35,26 @@ describe("runAcrossEnabledSources", () => {
     let settled = 0;
     await runAcrossEnabledSources(sources, async () => undefined, () => { settled += 1; });
     expect(settled).toBe(2);
+  });
+
+  it("runs sources in parallel while keeping each source's items serial", async () => {
+    const started: string[] = [];
+    const active = new Map<string, number>();
+    const peak = new Map<string, number>();
+
+    const outcomes = await runItemsBySource(sources, ["one", "two"], async (source, item) => {
+      started.push(`${source.id}:${item}`);
+      const current = (active.get(source.id) ?? 0) + 1;
+      active.set(source.id, current);
+      peak.set(source.id, Math.max(peak.get(source.id) ?? 0, current));
+      await Promise.resolve();
+      active.set(source.id, current - 1);
+      return item;
+    });
+
+    expect(started.slice(0, 2)).toEqual(["source-a:one", "source-b:one"]);
+    expect(peak.get("source-a")).toBe(1);
+    expect(peak.get("source-b")).toBe(1);
+    expect(outcomes).toHaveLength(4);
   });
 });

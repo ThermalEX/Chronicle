@@ -27,6 +27,7 @@ pub struct EntryDto {
     sync_mode: &'static str,
     auto_backup_enabled: bool,
     automatic_upload_enabled: bool,
+    exclude_patterns: Vec<String>,
     created_at: u64,
     updated_at: u64,
     total_bytes: u64,
@@ -90,6 +91,9 @@ pub struct SnapshotDto {
     files: Vec<SnapshotFileDto>,
     changes: ChangeSummary,
     safety: bool,
+    locked: bool,
+    metadata_updated_at_ms: u64,
+    exclude_patterns: Vec<String>,
     device_id: String,
     device_name: String,
 }
@@ -126,6 +130,7 @@ fn entry_dto(entry: Entry, latest: Option<&Snapshot>, category_name: Option<Stri
         match entry.sources[0].kind {
             EntryKind::File => "file",
             EntryKind::Directory => "folder",
+            EntryKind::Registry => "registry",
         }
     } else {
         "collection"
@@ -149,6 +154,7 @@ fn entry_dto(entry: Entry, latest: Option<&Snapshot>, category_name: Option<Stri
         },
         auto_backup_enabled: entry.auto_backup_enabled,
         automatic_upload_enabled: entry.automatic_upload_enabled,
+        exclude_patterns: entry.exclude_patterns,
         created_at: entry.created_at_ms,
         updated_at: latest.map_or(entry.created_at_ms, |snapshot| snapshot.created_at_ms),
         total_bytes: latest.map_or(0, |snapshot| {
@@ -174,6 +180,7 @@ fn entry_source_dto(source: EntrySource) -> EntrySourceDto {
         kind: match source.kind {
             EntryKind::File => "file",
             EntryKind::Directory => "folder",
+            EntryKind::Registry => "registry",
         },
     }
 }
@@ -309,8 +316,9 @@ pub fn open_entry_sources(state: State<'_, AppState>, entry_id: String) -> Resul
     drop(repository);
     let source = entry
         .sources
-        .first()
-        .ok_or_else(|| "该存档没有本机来源".to_owned())?;
+        .iter()
+        .find(|source| source.kind != EntryKind::Registry)
+        .ok_or_else(|| "该存档只有注册表来源，请在编辑存档中查看子键路径".to_owned())?;
     let path = PathBuf::from(&source.path);
     if !path.exists() {
         return Err("该存档的本机来源已不存在".into());
@@ -380,6 +388,9 @@ fn snapshot_dto(snapshot: Snapshot) -> SnapshotDto {
         files: snapshot.files.into_iter().map(snapshot_file_dto).collect(),
         changes: snapshot.changes,
         safety: snapshot.safety,
+        locked: snapshot.locked,
+        metadata_updated_at_ms: snapshot.metadata_updated_at_ms,
+        exclude_patterns: snapshot.exclude_patterns,
         device_id: snapshot.device_id,
         device_name: snapshot.device_name,
     }
@@ -439,6 +450,7 @@ pub fn add_entry(
     category_id: Option<String>,
     storage_policy: String,
     sync_mode: String,
+    exclude_patterns: Option<Vec<String>>,
 ) -> Result<EntryDto, String> {
     let storage_policy = match storage_policy.as_str() {
         "local" => StoragePolicy::Local,
@@ -446,9 +458,12 @@ pub fn add_entry(
         _ => return Err("不支持的保存方式".into()),
     };
     let sync_mode = parse_sync_mode(&sync_mode)?;
+    let patterns = exclude_patterns.unwrap_or_default();
+    chronicle_storage::exclusions::ExclusionRules::new(&patterns)?;
     let repository = state.repository.lock().map_err(|_| state_error())?;
     repository
         .add_entry_sources_with_sync(&name, &source_paths, category_id, storage_policy, sync_mode)
+        .and_then(|entry| repository.set_entry_exclusions(&entry.id, patterns))
         .map(|entry| entry_dto(entry, None, None))
         .map_err(|error| error.to_string())
 }
@@ -461,6 +476,7 @@ pub fn update_entry(
     source_paths: Vec<String>,
     storage_policy: String,
     sync_mode: String,
+    exclude_patterns: Option<Vec<String>>,
 ) -> Result<EntryDto, String> {
     let storage_policy = match storage_policy.as_str() {
         "local" => StoragePolicy::Local,
@@ -468,9 +484,16 @@ pub fn update_entry(
         _ => return Err("不支持的保存方式".into()),
     };
     let sync_mode = parse_sync_mode(&sync_mode)?;
+    if let Some(patterns) = &exclude_patterns {
+        chronicle_storage::exclusions::ExclusionRules::new(patterns)?;
+    }
     let repository = state.repository.lock().map_err(|_| state_error())?;
     repository
         .update_entry_with_sync(&entry_id, &name, &source_paths, storage_policy, sync_mode)
+        .and_then(|entry| match exclude_patterns {
+            Some(patterns) => repository.set_entry_exclusions(&entry.id, patterns),
+            None => Ok(entry),
+        })
         .map(|entry| entry_dto(entry, None, None))
         .map_err(|error| error.to_string())
 }
@@ -734,6 +757,22 @@ pub fn delete_snapshot(
 }
 
 #[tauri::command(async)]
+pub fn set_snapshot_locked(
+    state: State<'_, AppState>,
+    entry_id: String,
+    snapshot_id: String,
+    locked: bool,
+) -> Result<SnapshotDto, String> {
+    state
+        .repository
+        .lock()
+        .map_err(|_| state_error())?
+        .set_snapshot_locked(&entry_id, &snapshot_id, locked)
+        .map(snapshot_dto)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
 pub fn verify_snapshot(state: State<'_, AppState>, snapshot_id: String) -> Result<bool, String> {
     let repository = state.repository.lock().map_err(|_| state_error())?;
     repository
@@ -746,12 +785,17 @@ pub fn restore_snapshot(
     state: State<'_, AppState>,
     entry_id: String,
     snapshot_id: String,
+    registry_mode: Option<chronicle_storage::registry::RegistryRestoreMode>,
 ) -> Result<(), String> {
     state.auto_backup.begin_restore_suppression(&entry_id)?;
     let restored = {
         let repository = state.repository.lock().map_err(|_| state_error())?;
         repository
-            .restore_snapshot(&entry_id, &snapshot_id)
+            .restore_snapshot_with_registry_mode(
+                &entry_id,
+                &snapshot_id,
+                registry_mode.unwrap_or_default(),
+            )
             .map_err(|error| error.to_string())
     };
     match restored {

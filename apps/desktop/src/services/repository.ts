@@ -10,12 +10,13 @@ import type {
   RepositoryInfo,
   RecycleItem,
   SourceKind,
+  RegistryRestoreMode,
 } from "../domain";
 import { BrowserArchiveRepository } from "./archiveRepository";
 
 export interface ArchiveRepository {
   listArchives(): Promise<ArchiveRecord[]>;
-  pickSources(kind: SourceKind): Promise<ArchiveSource[]>;
+  pickSources(kind: Exclude<SourceKind, "registry">): Promise<ArchiveSource[]>;
   createArchive(input: CreateArchiveInput): Promise<ArchiveRecord>;
   updateArchive(archiveId: string, input: CreateArchiveInput): Promise<ArchiveRecord>;
   setArchiveAutomation(archiveId: string, autoBackupEnabled: boolean, automaticUploadEnabled: boolean): Promise<void>;
@@ -45,7 +46,8 @@ export interface ArchiveRepository {
   ): Promise<SnapshotRecord>;
   updateSnapshotNote(archiveId: string, snapshotId: string, note: string): Promise<SnapshotRecord>;
   deleteSnapshot(archiveId: string, snapshotId: string): Promise<void>;
-  restoreSnapshot(archive: ArchiveRecord, snapshot: SnapshotRecord): Promise<void>;
+  setSnapshotLocked(archiveId: string, snapshotId: string, locked: boolean): Promise<SnapshotRecord>;
+  restoreSnapshot(archive: ArchiveRecord, snapshot: SnapshotRecord, registryMode?: RegistryRestoreMode): Promise<void>;
 }
 
 class TauriArchiveRepository implements ArchiveRepository {
@@ -53,7 +55,7 @@ class TauriArchiveRepository implements ArchiveRepository {
     return invoke("list_entries");
   }
 
-  async pickSources(kind: SourceKind): Promise<ArchiveSource[]> {
+  async pickSources(kind: Exclude<SourceKind, "registry">): Promise<ArchiveSource[]> {
     const selected = await open({
       directory: kind === "folder",
       multiple: true,
@@ -72,7 +74,8 @@ class TauriArchiveRepository implements ArchiveRepository {
   createArchive(input: CreateArchiveInput): Promise<ArchiveRecord> {
     return invoke("add_entry", {
       name: input.name,
-      sourcePaths: input.sources.map((source) => source.path),
+      sourcePaths: input.sources.map((source) => source.kind === "registry" ? `registry:${source.path}` : source.path),
+      excludePatterns: input.excludePatterns ?? [],
       categoryId: input.categoryId ?? null,
       storagePolicy: input.storagePolicy,
       syncMode: input.syncMode,
@@ -83,7 +86,8 @@ class TauriArchiveRepository implements ArchiveRepository {
     return invoke("update_entry", {
       entryId: archiveId,
       name: input.name,
-      sourcePaths: input.sources.map((source) => source.path),
+      sourcePaths: input.sources.map((source) => source.kind === "registry" ? `registry:${source.path}` : source.path),
+      excludePatterns: input.excludePatterns ?? [],
       storagePolicy: input.storagePolicy,
       syncMode: input.syncMode,
     });
@@ -187,8 +191,12 @@ class TauriArchiveRepository implements ArchiveRepository {
     return invoke("delete_snapshot", { entryId: archiveId, snapshotId });
   }
 
-  restoreSnapshot(archive: ArchiveRecord, snapshot: SnapshotRecord): Promise<void> {
-    return invoke("restore_snapshot", { entryId: archive.id, snapshotId: snapshot.id });
+  setSnapshotLocked(archiveId: string, snapshotId: string, locked: boolean): Promise<SnapshotRecord> {
+    return invoke("set_snapshot_locked", { entryId: archiveId, snapshotId, locked });
+  }
+
+  restoreSnapshot(archive: ArchiveRecord, snapshot: SnapshotRecord, registryMode: RegistryRestoreMode = "merge"): Promise<void> {
+    return invoke("restore_snapshot", { entryId: archive.id, snapshotId: snapshot.id, registryMode });
   }
 }
 

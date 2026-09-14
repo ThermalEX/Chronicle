@@ -127,8 +127,7 @@ impl WebDavClient {
             (false, true) => format!("{endpoint}/{root}"),
             (false, false) => format!("{endpoint}/{root}/{relative}"),
         };
-        reqwest::Url::parse(&url)
-            .map_or(url, |parsed| parsed.to_string())
+        reqwest::Url::parse(&url).map_or(url, |parsed| parsed.to_string())
     }
 
     async fn request(

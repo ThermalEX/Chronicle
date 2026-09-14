@@ -62,6 +62,41 @@ afterEach(async () => {
 });
 
 describe("ArchiveRepository", () => {
+  it("requires unlocking before deleting a protected snapshot", async () => {
+    const repository = new BrowserArchiveRepository();
+    const archive = archiveFor(new MemoryFileHandle("save.dat", "save"));
+    await repository.putArchive(archive);
+    const snapshot = await repository.createSnapshot(archive);
+    const locked = await repository.setSnapshotLocked(archive.id, snapshot.id, true);
+    expect(locked.locked).toBe(true);
+    expect(locked.metadataUpdatedAtMs).toBeGreaterThan(0);
+    await expect(repository.deleteSnapshot(archive.id, snapshot.id)).rejects.toThrow(/解锁/);
+    expect(await repository.listSnapshots(archive.id)).toHaveLength(1);
+    await repository.setSnapshotLocked(archive.id, snapshot.id, false);
+    await repository.deleteSnapshot(archive.id, snapshot.id);
+    expect(await repository.listSnapshots(archive.id)).toHaveLength(0);
+  });
+
+  it("preserves current excluded files when restoring older snapshots", async () => {
+    const repository = new BrowserArchiveRepository();
+    const handle = new MemoryFileHandle("save.tmp", "old");
+    const archive = archiveFor(handle);
+    await repository.putArchive(archive);
+    const snapshot = await repository.createSnapshot(archive);
+    handle.setContent("current");
+    archive.excludePatterns = ["*.tmp"];
+    await repository.restoreSnapshot(archive, snapshot);
+    expect(handle.readContent()).toBe("current");
+    const next = await repository.createSnapshot(archive);
+    expect(next.files).toEqual([]);
+  });
+
+  it("rejects registry capture before requesting file system access", async () => {
+    const repository = new BrowserArchiveRepository();
+    const archive = archiveFor(new MemoryFileHandle("save.dat", "save"));
+    archive.sources = [{ id: "registry", name: "Example", path: "HKCU\\Software\\Example", kind: "registry" }];
+    await expect(repository.createSnapshot(archive)).rejects.toThrow(/桌面版/);
+  });
   it("stores a handle returned by the picker without requesting permission again", async () => {
     const repository = new BrowserArchiveRepository();
     const handle = new MemoryFileHandle("settings.json", "version one");

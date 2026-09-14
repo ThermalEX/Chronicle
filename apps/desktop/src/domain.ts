@@ -1,4 +1,5 @@
-export type SourceKind = "file" | "folder";
+export type SourceKind = "file" | "folder" | "registry";
+export type RegistryRestoreMode = "merge" | "overwrite";
 export type ArchiveKind = SourceKind | "collection";
 export type StoragePolicy = "local" | "local_and_remote";
 export type ArchiveSyncMode = "manual" | "automatic";
@@ -18,6 +19,7 @@ export type ArchiveSource = {
 };
 
 export type CreateArchiveInput = {
+  excludePatterns?: string[];
   name: string;
   sources: ArchiveSource[];
   categoryId?: string;
@@ -29,6 +31,7 @@ export type CreateArchiveInput = {
 };
 
 export type ArchiveRecord = {
+  excludePatterns?: string[];
   id: string;
   name: string;
   sourcePath: string;
@@ -56,6 +59,9 @@ export type SnapshotFile = {
 };
 
 export type SnapshotRecord = {
+  locked?: boolean;
+  metadataUpdatedAtMs?: number;
+  excludePatterns?: string[];
   id: string;
   archiveId: string;
   title: string;

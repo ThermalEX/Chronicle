@@ -3,7 +3,7 @@ import {
   AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, Clock3, CloudCog, File, Info,
   Folder, FolderArchive, FolderOpen, HardDrive, LockKeyhole, MoreHorizontal, Moon, Pencil, Plus, RotateCcw, Save,
   RefreshCw, Search, Settings2, SlidersHorizontal, UploadCloud, X,
-  Sun, Trash2,
+  Star, Sun, Trash2,
 } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { listen } from "@tauri-apps/api/event";
@@ -13,6 +13,8 @@ import AppToast from "./components/AppToast.vue";
 import CloudHealthDialog from "./components/CloudHealthDialog.vue";
 import ArchiveMetadata from "./components/ArchiveMetadata.vue";
 import ConfirmDialog from "./components/ConfirmDialog.vue";
+import RegistryRestoreDialog from "./components/RegistryRestoreDialog.vue";
+import type { RegistryRestoreMode } from "./domain";
 import { notifyTrayBackground } from "./services/trayNotification";
 import CreateCategoryDialog from "./components/CreateCategoryDialog.vue";
 import CreateArchiveDialog from "./components/CreateArchiveDialog.vue";
@@ -21,7 +23,7 @@ import UpdateDialog from "./components/UpdateDialog.vue";
 import ThemedSelect, { type ThemedSelectOption } from "./components/ThemedSelect.vue";
 import type { ArchiveRecord, ArchiveSource, CategoryRecord, CreateArchiveInput, RepositoryInfo, SnapshotRecord, SourceKind } from "./domain";
 import { archiveRepository, isTauriRuntime } from "./services/repository";
-import { cloudRepository, type CloudSyncResult } from "./services/cloud";
+import { cloudRepository, syncArchivesAcrossSources, type CloudSyncResult } from "./services/cloud";
 import { runCloudHealthCheck, type CloudHealthCheckItem } from "./services/cloudHealthCheck";
 import { diagnosticsRepository } from "./services/diagnostics";
 import { diagnosticFromError, type DiagnosticContext } from "./services/diagnosticsCore";
@@ -96,6 +98,8 @@ const syncProgressTarget = ref<"current" | "all">();
 const busyAction = ref<"snapshot" | "restore">();
 const savingTags = ref(false);
 const savingSnapshotNote = ref(false);
+const lockingSnapshotId = ref<string>();
+const registryRestoreRequest = ref<{ archive: ArchiveRecord; snapshot: SnapshotRecord }>();
 const repositoryInfo = ref<RepositoryInfo>({ path: "", totalBytes: 0 });
 const editingArchive = ref<ArchiveRecord>();
 const highlightSources = ref(false);
@@ -404,7 +408,7 @@ function answerConfirmation(confirmed: boolean) {
   confirmResolver = undefined;
 }
 
-async function pickSources(kind: SourceKind) {
+async function pickSources(kind: Exclude<SourceKind, "registry">) {
   if (!isTauriRuntime && (!("showOpenFilePicker" in window) || !("showDirectoryPicker" in window))) {
     showNotice("当前环境不支持本地文件系统访问，请使用 Edge 或桌面版 Chronicle", "error");
     return;
@@ -592,8 +596,7 @@ function syncArchiveToSources(archive: ArchiveRecord, sources: ReturnType<typeof
     sources,
     async (source) => {
       const result = await cloudRepository.sync(source.id, archive.id);
-      await cloudRepository.uploadApplicationSettings(source.id);
-      await cloudRepository.uploadEntryCategoryTree(source.id, archive.id);
+      if (result.status !== "conflict") await cloudRepository.uploadSyncMetadata(source.id, [archive.id]);
       return result;
     },
     () => { if (syncProgress.value) syncProgress.value.current += 1; },
@@ -658,20 +661,21 @@ async function syncAllArchives() {
   }
   syncingAllArchives.value = true;
   syncProgressTarget.value = "all";
-  syncProgress.value = { current: 0, total: remoteArchives.length * sources.length };
+  syncProgress.value = { current: 0, total: (remoteArchives.length + 1) * sources.length };
   try {
-    let completed = 0;
-    let conflicts = false;
-    for (const archive of remoteArchives) {
-      const outcomes = await syncArchiveToSources(archive, sources);
-      reportSourceFailures(outcomes, archive, "同步全部存档");
-      const succeeded = outcomes.filter((outcome): outcome is Extract<SourceSyncOutcome<CloudSyncResult>, { status: "fulfilled" }> => outcome.status === "fulfilled");
-      completed += succeeded.length;
-      conflicts ||= succeeded.some((outcome) => outcome.value.status === "conflict");
+    const { outcomes, metadataOutcomes, hasFailures } = await syncArchivesAcrossSources(sources, remoteArchives, () => {
+      if (syncProgress.value) syncProgress.value.current += 1;
+    });
+    for (const outcome of outcomes) reportSourceFailures([outcome], outcome.item, "同步全部存档");
+    const succeeded = outcomes.filter((outcome): outcome is Extract<(typeof outcomes)[number], { status: "fulfilled" }> => outcome.status === "fulfilled");
+    const completed = succeeded.length;
+    const conflicts = succeeded.some((outcome) => outcome.value.status === "conflict");
+    for (const outcome of metadataOutcomes) {
+      if (outcome.status === "rejected") reportError(outcome.reason, { operation: "同步云端元数据", sourceId: outcome.source.id });
     }
     await refreshArchives(selectedArchiveId.value);
     if (selectedArchive.value) await refreshSnapshots(selectedArchive.value.id);
-    showNotice(`已完成 ${completed} / ${remoteArchives.length * sources.length} 项同步`, conflicts ? "info" : "success");
+    showNotice(`已完成 ${completed} / ${remoteArchives.length * sources.length} 项存档同步${hasFailures ? "，部分操作失败，请查看错误记录" : ""}`, conflicts || hasFailures ? "info" : "success");
   } catch (error) {
     reportError(error, { operation: "同步全部存档" });
   } finally {
@@ -685,11 +689,26 @@ async function restoreSnapshot() {
   const archive = selectedArchive.value;
   const snapshot = selectedSnapshot.value;
   if (!archive || !snapshot || busyAction.value) return;
+  if (archive.sources.some((source) => source.kind === "registry")) {
+    registryRestoreRequest.value = { archive, snapshot };
+    return;
+  }
   const confirmed = window.confirm(`将“${archive.name}”恢复到 ${formatTime(snapshot.createdAt)}。Chronicle 会先保存当前状态，是否继续？`);
   if (!confirmed) return;
+  await executeRestore(archive, snapshot);
+}
+
+async function confirmRegistryRestore(mode: RegistryRestoreMode) {
+  const request = registryRestoreRequest.value;
+  registryRestoreRequest.value = undefined;
+  if (request) await executeRestore(request.archive, request.snapshot, mode);
+}
+
+async function executeRestore(archive: ArchiveRecord, snapshot: SnapshotRecord, mode?: RegistryRestoreMode) {
+  if (busyAction.value) return;
   busyAction.value = "restore";
   try {
-    await archiveRepository.restoreSnapshot(archive, snapshot);
+    await archiveRepository.restoreSnapshot(archive, snapshot, mode);
     await refreshArchives(archive.id);
     await refreshSnapshots(archive.id);
     showNotice("恢复完成，原状态已保存为安全快照");
@@ -718,7 +737,7 @@ async function saveSnapshotNote(): Promise<void> {
 
 async function deleteSnapshot(snapshot: SnapshotRecord): Promise<void> {
   const archive = selectedArchive.value;
-  if (!archive || busyAction.value) return;
+  if (!archive || busyAction.value || snapshot.locked) return;
   const confirmed = await requestConfirmation(
     "永久删除时间节点",
     `将永久删除 ${formatTime(snapshot.createdAt)} 的快照文件及其备注，无法恢复。`,
@@ -735,6 +754,25 @@ async function deleteSnapshot(snapshot: SnapshotRecord): Promise<void> {
   } catch (error) {
     reportError(error, { operation: "删除时间节点", archiveId: archive.id });
   }
+}
+
+async function toggleSnapshotLock(snapshot: SnapshotRecord): Promise<void> {
+  const archive = selectedArchive.value;
+  if (!archive || lockingSnapshotId.value) return;
+  lockingSnapshotId.value = snapshot.id;
+  try {
+    const updated = await archiveRepository.setSnapshotLocked(archive.id, snapshot.id, !snapshot.locked);
+    snapshots.value = snapshots.value.map((item) => item.id === updated.id ? updated : item);
+    showNotice(updated.locked ? "已标记为重要快照，不会自动清理；删除前需先解锁" : "快照已解锁");
+  } catch (error) { reportError(error, { operation: "更新快照锁定状态", archiveId: archive.id }); }
+  finally { lockingSnapshotId.value = undefined; }
+}
+
+function addRegistrySource(path: string): void {
+  if (!isTauriRuntime) { createArchiveError.value = "注册表来源仅支持 Windows 桌面版 Chronicle"; return; }
+  if (pendingSources.value.some((source) => source.kind === "registry" && source.path.toLowerCase() === path.toLowerCase())) return;
+  pendingSources.value.push({ id: crypto.randomUUID(), name: path.split("\\").at(-1) || path, path, kind: "registry" });
+  createArchiveError.value = undefined;
 }
 
 async function toggleColorMode(): Promise<void> {
@@ -1072,7 +1110,7 @@ onBeforeUnmount(() => {
             <div class="section-title"><div><p class="label">版本历史</p><h3>时间节点</h3></div></div>
             <div class="snapshot-create"><input v-model="snapshotDescription" maxlength="160" placeholder="输入新存档描述信息（可留空）" @keydown.enter.prevent="createSnapshotFromDetail" /><button class="accent" :disabled="busyAction !== undefined" @click="createSnapshotFromDetail"><Plus :size="16" />{{ busyAction === 'snapshot' ? '创建中' : '创建新快照' }}</button></div>
             <div class="timeline-toolbar"><label><Search :size="15" /><input v-model="snapshotSearch" type="search" placeholder="搜索快照描述" /></label><ThemedSelect :model-value="snapshotSort" :options="timelineSortOptions" label="时间线排序" @update:model-value="updateTimelineSort" /></div>
-            <div v-if="visibleSnapshots.length" class="timeline-table"><div class="timeline-table-head"><span>备份时间</span><span>描述</span><span>位置 / 大小</span><span>操作</span></div><article v-for="snapshot in visibleSnapshots" :key="snapshot.id" :class="{ selected: selectedSnapshotId === snapshot.id }" tabindex="0" @click="selectedSnapshotId = snapshot.id" @keydown.enter="selectedSnapshotId = snapshot.id"><time>{{ formatTime(snapshot.createdAt) }}</time><span><b>{{ snapshot.title }}</b><small>{{ snapshot.note || snapshotDetail(snapshot) }}</small></span><span>本机 · {{ formatBytes(snapshot.totalBytes) }}</span><div class="timeline-actions"><button class="info" :class="{ active: activityPanelOpen && selectedSnapshotId === snapshot.id }" :aria-label="`查看 ${formatTime(snapshot.createdAt)} 的时间节点详情`" :title="`查看 ${formatTime(snapshot.createdAt)} 的时间节点详情`" :aria-pressed="activityPanelOpen && selectedSnapshotId === snapshot.id" @click.stop="selectedSnapshotId = snapshot.id; activityPanelOpen = true"><Info :size="16" /></button><button :disabled="busyAction !== undefined" :aria-label="`恢复 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="`恢复 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="selectedSnapshotId = snapshot.id; restoreSnapshot()"><RotateCcw :size="16" /><span>恢复</span></button><button :disabled="syncingArchive || syncingAllArchives" :aria-label="`同步 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="`同步 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="selectedSnapshotId = snapshot.id; syncSelectedArchive()"><UploadCloud :size="16" /><span>同步</span></button><button class="danger" :disabled="busyAction !== undefined" :aria-label="`删除 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="`删除 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="deleteSnapshot(snapshot)"><Trash2 :size="16" /></button></div></article></div>
+            <div v-if="visibleSnapshots.length" class="timeline-table"><div class="timeline-table-head"><span>备份时间</span><span>描述</span><span>位置 / 大小</span><span>操作</span></div><article v-for="snapshot in visibleSnapshots" :key="snapshot.id" :class="{ selected: selectedSnapshotId === snapshot.id }" tabindex="0" @click="selectedSnapshotId = snapshot.id" @keydown.enter="selectedSnapshotId = snapshot.id"><time>{{ formatTime(snapshot.createdAt) }}</time><span><b>{{ snapshot.title }}</b><small>{{ snapshot.note || snapshotDetail(snapshot) }}</small></span><span>本机 · {{ formatBytes(snapshot.totalBytes) }}</span><div class="timeline-actions"><button class="snapshot-star" :class="{ locked: snapshot.locked }" :disabled="Boolean(lockingSnapshotId) || busyAction !== undefined" :aria-label="snapshot.locked ? '解锁重要快照' : '标记为重要快照'" :title="snapshot.locked ? '重要快照：不会自动清理，点击解锁' : '标记为重要快照，防止自动清理'" :aria-pressed="Boolean(snapshot.locked)" @click.stop="toggleSnapshotLock(snapshot)"><Star :size="16" :fill="snapshot.locked ? 'currentColor' : 'none'" /></button><button class="info" :class="{ active: activityPanelOpen && selectedSnapshotId === snapshot.id }" :aria-label="`查看 ${formatTime(snapshot.createdAt)} 的时间节点详情`" :title="`查看 ${formatTime(snapshot.createdAt)} 的时间节点详情`" :aria-pressed="activityPanelOpen && selectedSnapshotId === snapshot.id" @click.stop="selectedSnapshotId = snapshot.id; activityPanelOpen = true"><Info :size="16" /></button><button :disabled="busyAction !== undefined" :aria-label="`恢复 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="`恢复 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="selectedSnapshotId = snapshot.id; restoreSnapshot()"><RotateCcw :size="16" /><span>恢复</span></button><button :disabled="syncingArchive || syncingAllArchives" :aria-label="`同步 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="`同步 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="selectedSnapshotId = snapshot.id; syncSelectedArchive()"><UploadCloud :size="16" /><span>同步</span></button><button class="danger" :disabled="busyAction !== undefined || snapshot.locked || Boolean(lockingSnapshotId)" :aria-label="`删除 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="snapshot.locked ? '请先解锁重要快照再删除' : `删除 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="deleteSnapshot(snapshot)"><Trash2 :size="16" /></button></div></article></div>
             <div v-else class="timeline-empty"><Clock3 :size="25" /><b>还没有时间节点</b><p>创建首个备份后，可以从这里查看和恢复历史版本。</p><button :disabled="busyAction !== undefined" @click="createSnapshot('初始版本')">创建首个备份</button></div>
           </section>
 
@@ -1114,15 +1152,18 @@ onBeforeUnmount(() => {
       :submitting="creatingArchive"
       :error="createArchiveError"
       :edit-name="editingArchive?.name"
+      :edit-exclude-patterns="editingArchive?.excludePatterns"
       :edit-storage-policy="editingArchive?.storagePolicy"
       :edit-auto-backup-enabled="editingArchive?.autoBackupEnabled"
       :edit-automatic-upload-enabled="editingArchive?.automaticUploadEnabled"
       :highlight-sources="highlightSources"
       @close="closeArchiveDialog"
       @pick="pickSources"
+      @registry="addRegistrySource"
       @remove="pendingSources = pendingSources.filter((source) => source.id !== $event)"
       @submit="createArchive"
     />
+    <RegistryRestoreDialog v-if="registryRestoreRequest" :paths="registryRestoreRequest.archive.sources.filter((source) => source.kind === 'registry').map((source) => source.path)" @cancel="registryRestoreRequest = undefined" @confirm="confirmRegistryRestore" />
     <ConfirmDialog v-if="confirmRequest" :title="confirmRequest.title" :message="confirmRequest.message" :confirm-label="confirmRequest.confirmLabel" :destructive="confirmRequest.destructive" @cancel="answerConfirmation(false)" @confirm="answerConfirmation(true)" />
     <ConfirmDialog v-if="closeRequestOpen" title="关闭 Chronicle" message="最小化到托盘后，自动备份仍会在后台运行。" confirm-label="最小化到托盘" @cancel="closeRequestOpen = false" @confirm="hideMainWindowToTray"><template #extra-actions><button class="exit-button" @click="invoke('exit_chronicle')">退出 Chronicle</button></template></ConfirmDialog>
   </div>

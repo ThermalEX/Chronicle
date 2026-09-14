@@ -67,6 +67,8 @@ struct CatalogEntry {
     category_id: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
+    #[serde(default)]
+    exclude_patterns: Vec<String>,
     storage_policy: Value,
     #[serde(default)]
     sync_mode: Value,
@@ -851,13 +853,36 @@ fn application_settings(root: &Path) -> Result<Value, String> {
 }
 
 fn category_tree_for_entry(catalog: &Value, entry_id: &str) -> Result<Value, String> {
-    let entry = catalog.get("entries").and_then(Value::as_array).and_then(|entries| entries.iter().find(|entry| entry.get("id").and_then(Value::as_str) == Some(entry_id))).ok_or_else(|| "本地存档不存在".to_owned())?;
-    let all = catalog.get("categories").and_then(Value::as_array).cloned().unwrap_or_default();
+    let entry = catalog
+        .get("entries")
+        .and_then(Value::as_array)
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(entry_id))
+        })
+        .ok_or_else(|| "本地存档不存在".to_owned())?;
+    let all = catalog
+        .get("categories")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let mut categories = Vec::new();
-    let mut parent = entry.get("category_id").and_then(Value::as_str).map(str::to_owned);
+    let mut parent = entry
+        .get("category_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     while let Some(id) = parent {
-        let Some(category) = all.iter().find(|item| item.get("id").and_then(Value::as_str) == Some(id.as_str())) else { break; };
-        parent = category.get("parent_id").and_then(Value::as_str).map(str::to_owned);
+        let Some(category) = all
+            .iter()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(id.as_str()))
+        else {
+            break;
+        };
+        parent = category
+            .get("parent_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         categories.push(category.clone());
     }
     Ok(serde_json::json!({
@@ -867,10 +892,25 @@ fn category_tree_for_entry(catalog: &Value, entry_id: &str) -> Result<Value, Str
     }))
 }
 
+fn merge_entry_category_branches(
+    tree: &mut Value,
+    catalog: &Value,
+    entry_ids: &[String],
+) -> Result<(), String> {
+    for entry_id in entry_ids {
+        let branch = category_tree_for_entry(catalog, entry_id)?;
+        tree["entries"][entry_id] = branch["categories"].clone();
+    }
+    Ok(())
+}
+
 fn apply_cloud_configuration(root: &Path, settings: &Value) -> Result<(), String> {
     let settings_path = root.join("config").join("settings.json");
     let mut local_settings: Value = read_json(&settings_path)?;
-    local_settings["app"] = settings.get("app").cloned().unwrap_or_else(|| serde_json::json!({}));
+    local_settings["app"] = settings
+        .get("app")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
     write_json_atomic(&settings_path, &local_settings)?;
     Ok(())
 }
@@ -879,7 +919,9 @@ fn merge_categories(catalog: &mut Value, categories: &[Value]) {
     if !catalog["categories"].is_array() {
         catalog["categories"] = Value::Array(Vec::new());
     }
-    let local = catalog["categories"].as_array_mut().expect("categories initialized");
+    let local = catalog["categories"]
+        .as_array_mut()
+        .expect("categories initialized");
     for category in categories {
         let id = category.get("id").and_then(Value::as_str);
         local.retain(|existing| existing.get("id").and_then(Value::as_str) != id);
@@ -888,14 +930,28 @@ fn merge_categories(catalog: &mut Value, categories: &[Value]) {
 }
 
 fn merge_entry_category_tree(catalog: &mut Value, tree: &Value, entry_id: &str) -> bool {
-    let Some(categories) = tree.get("entries").and_then(Value::as_object).and_then(|entries| entries.get(entry_id)).and_then(Value::as_array) else { return false; };
+    let Some(categories) = tree
+        .get("entries")
+        .and_then(Value::as_object)
+        .and_then(|entries| entries.get(entry_id))
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
     merge_categories(catalog, categories);
     true
 }
 
-fn merge_entry_categories_from_catalog(catalog: &mut Value, remote_catalog: &Value, entry_id: &str) -> Result<(), String> {
+fn merge_entry_categories_from_catalog(
+    catalog: &mut Value,
+    remote_catalog: &Value,
+    entry_id: &str,
+) -> Result<(), String> {
     let branch = category_tree_for_entry(remote_catalog, entry_id)?;
-    let categories = branch.get("categories").and_then(Value::as_array).ok_or_else(|| "云端分类层级格式无效".to_owned())?;
+    let categories = branch
+        .get("categories")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "云端分类层级格式无效".to_owned())?;
     merge_categories(catalog, categories);
     Ok(())
 }
@@ -1132,7 +1188,11 @@ async fn github_overwrite_download(
             .await
             .is_ok_and(|tree| merge_entry_category_tree(&mut local_catalog, &tree, entry_id));
         if !applied_from_tree {
-            merge_entry_categories_from_catalog(&mut local_catalog, &remote_catalog_value, entry_id)?;
+            merge_entry_categories_from_catalog(
+                &mut local_catalog,
+                &remote_catalog_value,
+                entry_id,
+            )?;
         }
     }
     if let Err(error) = write_json_atomic(&local_catalog_path, &local_catalog) {
@@ -1295,18 +1355,124 @@ async fn github_upload_missing_snapshots(
     )
 }
 
+// Annotations change independently of the immutable 7z payload. Equal timestamps
+// prefer a lock, then a deterministic note, so both directions converge safely.
+fn merge_snapshot_annotations(local: &mut [Value], remote: &mut [Value]) {
+    for left in local {
+        let Some(id) = left.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(right) = remote
+            .iter_mut()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(id))
+        else {
+            continue;
+        };
+        let rank = |item: &Value| {
+            (
+                item["metadata_updated_at_ms"].as_u64().unwrap_or(0),
+                item["locked"].as_bool().unwrap_or(false),
+                item["note"].as_str().unwrap_or("").to_owned(),
+            )
+        };
+        let winner = if rank(left) >= rank(right) {
+            &*left
+        } else {
+            &*right
+        };
+        let annotations = [
+            (
+                "locked",
+                Value::from(winner["locked"].as_bool().unwrap_or(false)),
+            ),
+            (
+                "metadata_updated_at_ms",
+                Value::from(winner["metadata_updated_at_ms"].as_u64().unwrap_or(0)),
+            ),
+            ("note", Value::from(winner["note"].as_str().unwrap_or(""))),
+        ];
+        for (key, value) in annotations {
+            // Do not manufacture default fields in legacy snapshots on a no-op sync.
+            if left.get(key).is_some() || right.get(key).is_some() {
+                left[key] = value.clone();
+                right[key] = value;
+            }
+        }
+    }
+}
+
+fn reconcile_snapshot_annotations(
+    root: &Path,
+    entry_id: &str,
+    remote: &mut Value,
+) -> Result<bool, String> {
+    let path = root.join("catalog.json");
+    let mut local: Value = read_json(&path)?;
+    let find_entry = |catalog: &Value| {
+        catalog["entries"].as_array().and_then(|entries| {
+            entries
+                .iter()
+                .position(|entry| entry["id"].as_str() == Some(entry_id))
+        })
+    };
+    let (Some(li), Some(ri)) = (find_entry(&local), find_entry(remote)) else {
+        return Ok(false);
+    };
+    let metadata = |entry: &Value| -> Result<Value, String> {
+        let mut entry: CatalogEntry =
+            serde_json::from_value(entry.clone()).map_err(|error| error.to_string())?;
+        entry.snapshots.clear();
+        entry.snapshot_count = 0;
+        entry.stored_bytes = 0;
+        entry.last_snapshot_at_ms = None;
+        serde_json::to_value(entry).map_err(|error| error.to_string())
+    };
+    if metadata(&local["entries"][li])? != metadata(&remote["entries"][ri])? {
+        return Ok(false);
+    }
+    let before_local = local.clone();
+    let before_remote = remote.clone();
+    if let (Some(left), Some(right)) = (
+        local["entries"][li]["snapshots"].as_array_mut(),
+        remote["entries"][ri]["snapshots"].as_array_mut(),
+    ) {
+        merge_snapshot_annotations(left, right);
+    }
+    if local != before_local {
+        write_json_atomic(&path, &local)?;
+    }
+    Ok(*remote != before_remote)
+}
+
 async fn github_sync_entry(
     client: &GitHubClient,
     root: &Path,
     source_id: &str,
     entry_id: &str,
 ) -> Result<SyncResultDto, String> {
-    let local: Catalog = read_json(&root.join("catalog.json"))?;
-    let remote_catalog = match client.get_json::<Value>("catalog.json").await {
+    let mut remote_catalog = match client.get_json::<Value>("catalog.json").await {
         Ok(value) => Some(value),
         Err(GitHubError::NotFound(_)) => None,
         Err(error) => return Err(error.to_string()),
     };
+    if let Some(catalog) = remote_catalog.as_mut() {
+        if reconcile_snapshot_annotations(root, entry_id, catalog)? {
+            client
+                .commit_changes(
+                    "Update Chronicle snapshot annotations",
+                    vec![GitHubChange {
+                        path: "catalog.json".into(),
+                        contents: Some(
+                            serde_json::to_vec_pretty(catalog)
+                                .map_err(|error| error.to_string())?,
+                        ),
+                    }],
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    let local: Catalog = read_json(&root.join("catalog.json"))?;
     let remote: Option<Catalog> = remote_catalog
         .clone()
         .map(serde_json::from_value)
@@ -1318,7 +1484,9 @@ async fn github_sync_entry(
         .and_then(|catalog| catalog.entries.iter().find(|entry| entry.id == entry_id));
     match (local_entry, remote_entry) {
         (Some(_), None) => {
-            github_upload_missing_snapshots(client, root, source_id, entry_id, None, &[]).await?;
+            // The archive is new, but the remote catalog can already contain other archives.
+            github_upload_missing_snapshots(client, root, source_id, entry_id, remote_catalog, &[])
+                .await?;
             Ok(SyncResultDto {
                 status: "uploaded".into(),
                 message: "已上传本地存档到 GitHub".into(),
@@ -1787,13 +1955,97 @@ pub async fn cloud_upload_application_settings(
     let (configured_source, root, request_policy) = configured_source(&state, &source_id)?;
     let settings = application_settings(&root)?;
     if configured_source.provider == "legacy_github" {
-        let client = github_client(&configured_source, credential(&configured_source)?, request_policy)?;
-        return client.commit_changes("Sync Chronicle application settings", vec![
-            GitHubChange { path: "app-settings.json".into(), contents: Some(serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?) },
-        ]).await.map_err(|error| error.to_string());
+        let client = github_client(
+            &configured_source,
+            credential(&configured_source)?,
+            request_policy,
+        )?;
+        return client
+            .commit_changes(
+                "Sync Chronicle application settings",
+                vec![GitHubChange {
+                    path: "app-settings.json".into(),
+                    contents: Some(
+                        serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?,
+                    ),
+                }],
+            )
+            .await
+            .map_err(|error| error.to_string());
     }
     let (client, _, _) = configured_client(&state, &source_id)?;
-    client.put_json("app-settings.json", &settings).await.map_err(|error| error.to_string())
+    client
+        .put_json("app-settings.json", &settings)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn github_metadata_change(
+    path: &str,
+    current: &Value,
+    previous: Option<&Value>,
+) -> Result<Option<GitHubChange>, String> {
+    let mut comparable = current.clone();
+    let mut old = previous.cloned().unwrap_or(Value::Null);
+    for value in [&mut comparable, &mut old] {
+        if let Some(object) = value.as_object_mut() {
+            object.remove("updatedAtMs");
+        }
+    }
+    if comparable == old {
+        return Ok(None);
+    }
+    Ok(Some(GitHubChange {
+        path: path.into(),
+        contents: Some(serde_json::to_vec_pretty(current).map_err(|error| error.to_string())?),
+    }))
+}
+
+/// Publish settings and all selected archive branches together, without timestamp-only commits.
+#[tauri::command(async)]
+pub async fn cloud_upload_sync_metadata(
+    state: State<'_, AppState>,
+    source_id: String,
+    entry_ids: Vec<String>,
+) -> Result<(), String> {
+    let (source, root, request_policy) = configured_source(&state, &source_id)?;
+    if source.provider != "legacy_github" {
+        cloud_upload_application_settings(state.clone(), source_id.clone()).await?;
+        return cloud_upload_entry_category_trees(state, source_id, entry_ids).await;
+    }
+    let client = github_client(&source, credential(&source)?, request_policy)?;
+    let settings = application_settings(&root)?;
+    let previous_settings = match client.get_json::<Value>("app-settings.json").await {
+        Ok(value) => Some(value),
+        Err(GitHubError::NotFound(_)) => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut changes: Vec<_> =
+        github_metadata_change("app-settings.json", &settings, previous_settings.as_ref())?
+            .into_iter()
+            .collect();
+    if !entry_ids.is_empty() {
+        let previous_tree = match client.get_json::<Value>("category-tree.json").await {
+            Ok(value) => Some(value),
+            Err(GitHubError::NotFound(_)) => None,
+            Err(error) => return Err(error.to_string()),
+        };
+        let mut tree = previous_tree
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({ "formatVersion": 1, "entries": {} }));
+        let catalog: Value = read_json(&root.join("catalog.json"))?;
+        merge_entry_category_branches(&mut tree, &catalog, &entry_ids)?;
+        tree["updatedAtMs"] = Value::from(unix_millis());
+        changes.extend(github_metadata_change(
+            "category-tree.json",
+            &tree,
+            previous_tree.as_ref(),
+        )?);
+    }
+    client
+        .commit_changes("Sync Chronicle settings and archive categories", changes)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command(async)]
@@ -1802,20 +2054,54 @@ pub async fn cloud_upload_entry_category_tree(
     source_id: String,
     entry_id: String,
 ) -> Result<(), String> {
+    cloud_upload_entry_category_trees(state, source_id, vec![entry_id]).await
+}
+
+#[tauri::command(async)]
+pub async fn cloud_upload_entry_category_trees(
+    state: State<'_, AppState>,
+    source_id: String,
+    entry_ids: Vec<String>,
+) -> Result<(), String> {
+    if entry_ids.is_empty() {
+        return Ok(());
+    }
     let (configured_source, root, request_policy) = configured_source(&state, &source_id)?;
     let catalog: Value = read_json(&root.join("catalog.json"))?;
-    let branch = category_tree_for_entry(&catalog, &entry_id)?;
-    let mut tree = serde_json::json!({ "formatVersion": 1, "updatedAtMs": unix_millis(), "entries": {} });
+    let mut tree =
+        serde_json::json!({ "formatVersion": 1, "updatedAtMs": unix_millis(), "entries": {} });
     if configured_source.provider == "legacy_github" {
-        let client = github_client(&configured_source, credential(&configured_source)?, request_policy)?;
-        if let Ok(existing) = client.get_json::<Value>("category-tree.json").await { tree = existing; }
-        tree["entries"][&entry_id] = branch["categories"].clone();
-        return client.commit_changes("Sync Chronicle archive category tree", vec![GitHubChange { path: "category-tree.json".into(), contents: Some(serde_json::to_vec_pretty(&tree).map_err(|error| error.to_string())?) }]).await.map_err(|error| error.to_string());
+        let client = github_client(
+            &configured_source,
+            credential(&configured_source)?,
+            request_policy,
+        )?;
+        if let Ok(existing) = client.get_json::<Value>("category-tree.json").await {
+            tree = existing;
+        }
+        merge_entry_category_branches(&mut tree, &catalog, &entry_ids)?;
+        return client
+            .commit_changes(
+                "Sync Chronicle archive category tree",
+                vec![GitHubChange {
+                    path: "category-tree.json".into(),
+                    contents: Some(
+                        serde_json::to_vec_pretty(&tree).map_err(|error| error.to_string())?,
+                    ),
+                }],
+            )
+            .await
+            .map_err(|error| error.to_string());
     }
     let (client, _, _) = configured_client(&state, &source_id)?;
-    if let Ok(existing) = client.get_json::<Value>("category-tree.json").await { tree = existing; }
-    tree["entries"][&entry_id] = branch["categories"].clone();
-    client.put_json("category-tree.json", &tree).await.map_err(|error| error.to_string())
+    if let Ok(existing) = client.get_json::<Value>("category-tree.json").await {
+        tree = existing;
+    }
+    merge_entry_category_branches(&mut tree, &catalog, &entry_ids)?;
+    client
+        .put_json("category-tree.json", &tree)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command(async)]
@@ -1826,13 +2112,25 @@ pub async fn cloud_download_application_settings(
 ) -> Result<Value, String> {
     let (configured_source, root, request_policy) = configured_source(&state, &source_id)?;
     let settings: Value = if configured_source.provider == "legacy_github" {
-        let client = github_client(&configured_source, credential(&configured_source)?, request_policy)?;
-        client.get_json("app-settings.json").await.map_err(|error| error.to_string())?
+        let client = github_client(
+            &configured_source,
+            credential(&configured_source)?,
+            request_policy,
+        )?;
+        client
+            .get_json("app-settings.json")
+            .await
+            .map_err(|error| error.to_string())?
     } else {
         let (client, _, _) = configured_client(&state, &source_id)?;
-        client.get_json("app-settings.json").await.map_err(|error| error.to_string())?
+        client
+            .get_json("app-settings.json")
+            .await
+            .map_err(|error| error.to_string())?
     };
-    if apply { apply_cloud_configuration(&root, &settings)?; }
+    if apply {
+        apply_cloud_configuration(&root, &settings)?;
+    }
     Ok(settings)
 }
 
@@ -1851,7 +2149,14 @@ pub async fn cloud_overwrite_download(
             credential(&configured_source)?,
             request_policy,
         )?;
-        return github_overwrite_download(&client, &root, &source_id, &entry_id, use_cloud_category_tree).await;
+        return github_overwrite_download(
+            &client,
+            &root,
+            &source_id,
+            &entry_id,
+            use_cloud_category_tree,
+        )
+        .await;
     }
     let (client, _, root) = configured_client(&state, &source_id)?;
     let remote_catalog_value: Value = client
@@ -1930,7 +2235,11 @@ pub async fn cloud_overwrite_download(
             .await
             .is_ok_and(|tree| merge_entry_category_tree(&mut local_catalog, &tree, &entry_id));
         if !applied_from_tree {
-            merge_entry_categories_from_catalog(&mut local_catalog, &remote_catalog_value, &entry_id)?;
+            merge_entry_categories_from_catalog(
+                &mut local_catalog,
+                &remote_catalog_value,
+                &entry_id,
+            )?;
         }
     }
     if let Err(error) = write_json_atomic(&local_catalog_path, &local_catalog) {
@@ -2051,12 +2360,20 @@ pub async fn cloud_sync_entry(
         return github_sync_entry(&client, &root, &source_id, &entry_id).await;
     }
     let (client, _, root) = configured_client(&state, &source_id)?;
-    let local: Catalog = read_json(&root.join("catalog.json"))?;
-    let remote_catalog = match client.get_json::<Value>("catalog.json").await {
+    let mut remote_catalog = match client.get_json::<Value>("catalog.json").await {
         Ok(value) => Some(value),
         Err(WebDavError::NotFound(_)) => None,
         Err(error) => return Err(error.to_string()),
     };
+    if let Some(catalog) = remote_catalog.as_mut() {
+        if reconcile_snapshot_annotations(&root, &entry_id, catalog)? {
+            client
+                .put_json("catalog.json", catalog)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    let local: Catalog = read_json(&root.join("catalog.json"))?;
     let remote: Option<Catalog> = remote_catalog
         .clone()
         .map(serde_json::from_value)
@@ -2280,10 +2597,17 @@ pub async fn cloud_delete_configurations(
     }
     let (configured_source, _, request_policy) = configured_source(&state, &source_id)?;
     if configured_source.provider == "legacy_github" {
-        let client = github_client(&configured_source, credential(&configured_source)?, request_policy)?;
+        let client = github_client(
+            &configured_source,
+            credential(&configured_source)?,
+            request_policy,
+        )?;
         let changes = paths
             .into_iter()
-            .map(|path| GitHubChange { path: path.into(), contents: None })
+            .map(|path| GitHubChange {
+                path: path.into(),
+                contents: None,
+            })
             .collect();
         return client
             .commit_changes("Delete Chronicle cloud settings", changes)
@@ -2366,14 +2690,99 @@ pub async fn cloud_set_entry_sync_mode(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn snapshot_annotations_merge_without_changing_archive_contents() {
+        let mut local = serde_json::json!([
+            {"id":"same", "locked":false, "metadata_updated_at_ms":1, "note":"old", "object_hash":"local-hash"},
+            {"id":"local-only", "locked":true}
+        ]);
+        let mut remote = serde_json::json!([
+            {"id":"same", "locked":true, "metadata_updated_at_ms":2, "note":"keep", "object_hash":"remote-hash"}
+        ]);
+        super::merge_snapshot_annotations(
+            local.as_array_mut().unwrap(),
+            remote.as_array_mut().unwrap(),
+        );
+        assert_eq!(local[0]["locked"], true);
+        assert_eq!(local[0]["note"], "keep");
+        assert_eq!(local[0]["object_hash"], "local-hash");
+        assert_eq!(remote[0]["object_hash"], "remote-hash");
+        assert_eq!(local.as_array().unwrap().len(), 2);
+        // An explicit later unlock propagates too.
+        local[0]["locked"] = serde_json::json!(false);
+        local[0]["metadata_updated_at_ms"] = serde_json::json!(3);
+        super::merge_snapshot_annotations(
+            local.as_array_mut().unwrap(),
+            remote.as_array_mut().unwrap(),
+        );
+        assert_eq!(remote[0]["locked"], false);
+    }
+
+    #[test]
+    fn equal_annotation_timestamps_keep_the_lock_and_converge() {
+        let mut local = vec![serde_json::json!({"id":"same", "locked":false})];
+        let mut remote = vec![serde_json::json!({"id":"same", "locked":true})];
+        super::merge_snapshot_annotations(&mut local, &mut remote);
+        assert_eq!(local, remote);
+        assert_eq!(local[0]["locked"], true);
+        let previous = local.clone();
+        super::merge_snapshot_annotations(&mut local, &mut remote);
+        assert_eq!(local, previous);
+    }
+
+    #[test]
+    fn legacy_annotations_keep_notes_as_strings() {
+        let mut local = vec![serde_json::json!({"id":"same"})];
+        let mut remote = vec![
+            serde_json::json!({"id":"same", "note":"", "locked":false, "metadata_updated_at_ms":0}),
+        ];
+        super::merge_snapshot_annotations(&mut local, &mut remote);
+        assert_eq!(local, remote);
+        assert_eq!(local[0]["note"], "");
+    }
     use serde_json::json;
 
-    use super::{category_tree_for_entry, configuration_path, merge_catalog_entry, merge_entry_categories_from_catalog, missing_snapshot_archives, preview_from_catalog};
+    use super::{
+        category_tree_for_entry, configuration_path, merge_catalog_entry,
+        merge_entry_categories_from_catalog, merge_entry_category_branches,
+        missing_snapshot_archives, preview_from_catalog,
+    };
+
+    #[test]
+    fn unchanged_sync_metadata_ignores_only_the_root_upload_timestamp() {
+        let previous = json!({"formatVersion":1,"updatedAtMs":1,"app":{"theme":"dark"}});
+        let current = json!({"formatVersion":1,"updatedAtMs":2,"app":{"theme":"dark"}});
+        assert!(
+            super::github_metadata_change("app-settings.json", &current, Some(&previous))
+                .unwrap()
+                .is_none()
+        );
+        let changed = json!({"formatVersion":1,"updatedAtMs":2,"app":{"theme":"light"}});
+        let change = super::github_metadata_change("app-settings.json", &changed, Some(&previous))
+            .unwrap()
+            .unwrap();
+        assert_eq!(change.path, "app-settings.json");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&change.contents.unwrap()).unwrap(),
+            changed
+        );
+        assert!(
+            super::github_metadata_change("app-settings.json", &current, None)
+                .unwrap()
+                .is_some()
+        );
+    }
 
     #[test]
     fn configuration_deletion_only_targets_known_setting_files() {
-        assert_eq!(configuration_path("config:app-settings"), Some("app-settings.json"));
-        assert_eq!(configuration_path("config:category-tree"), Some("category-tree.json"));
+        assert_eq!(
+            configuration_path("config:app-settings"),
+            Some("app-settings.json")
+        );
+        assert_eq!(
+            configuration_path("config:category-tree"),
+            Some("category-tree.json")
+        );
         assert_eq!(configuration_path("archive-1"), None);
     }
 
@@ -2506,7 +2915,11 @@ mod tests {
     #[test]
     fn preview_exposes_application_settings_and_category_tree() {
         let preview = preview_from_catalog("Cloud".into(), &json!({}), None);
-        let names = preview.items.into_iter().map(|item| item.name).collect::<Vec<_>>();
+        let names = preview
+            .items
+            .into_iter()
+            .map(|item| item.name)
+            .collect::<Vec<_>>();
         assert!(names.contains(&"app-settings.json".into()));
         assert!(names.contains(&"category-tree.json".into()));
     }
@@ -2522,8 +2935,42 @@ mod tests {
             ]
         });
         let tree = category_tree_for_entry(&catalog, "entry").unwrap();
-        let ids = tree["categories"].as_array().unwrap().iter().map(|item| item["id"].as_str().unwrap()).collect::<Vec<_>>();
+        let ids = tree["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
         assert_eq!(ids, vec!["child", "root"]);
+    }
+
+    #[test]
+    fn category_tree_upload_merges_multiple_archive_branches() {
+        let catalog = json!({
+            "entries": [
+                { "id": "first", "category_id": "root" },
+                { "id": "second", "category_id": "child" }
+            ],
+            "categories": [
+                { "id": "root", "parent_id": null },
+                { "id": "child", "parent_id": "root" }
+            ]
+        });
+        let mut tree = json!({ "entries": {} });
+
+        merge_entry_category_branches(&mut tree, &catalog, &["first".into(), "second".into()])
+            .unwrap();
+
+        let ids = |entry_id: &str| {
+            tree["entries"][entry_id]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|category| category["id"].as_str().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids("first"), vec!["root"]);
+        assert_eq!(ids("second"), vec!["child", "root"]);
     }
 
     #[test]
@@ -2541,10 +2988,15 @@ mod tests {
         });
         let mut local_catalog = json!({ "entries": [], "categories": [] });
 
-        merge_entry_categories_from_catalog(&mut local_catalog, &remote_catalog, "selected").unwrap();
+        merge_entry_categories_from_catalog(&mut local_catalog, &remote_catalog, "selected")
+            .unwrap();
 
-        let ids = local_catalog["categories"].as_array().unwrap().iter()
-            .map(|category| category["id"].as_str().unwrap()).collect::<Vec<_>>();
+        let ids = local_catalog["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|category| category["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
         assert_eq!(ids, vec!["child", "root"]);
     }
 }

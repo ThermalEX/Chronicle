@@ -2,9 +2,9 @@ mod auto_backup;
 mod cloud;
 mod commands;
 mod storage_root;
-mod update;
 #[cfg(test)]
 mod storage_root_tests;
+mod update;
 
 use std::{
     io,
@@ -124,6 +124,7 @@ pub fn run() {
             commands::set_entry_automation,
             auto_backup::refresh_auto_backup,
             commands::update_snapshot_note,
+            commands::set_snapshot_locked,
             commands::delete_snapshot,
             commands::verify_snapshot,
             commands::restore_snapshot,
@@ -149,7 +150,9 @@ pub fn run() {
             cloud::cloud_overwrite_upload,
             cloud::cloud_overwrite_download,
             cloud::cloud_upload_application_settings,
+            cloud::cloud_upload_sync_metadata,
             cloud::cloud_upload_entry_category_tree,
+            cloud::cloud_upload_entry_category_trees,
             cloud::cloud_download_application_settings,
             cloud::cloud_delete_entries,
             cloud::cloud_delete_configurations,

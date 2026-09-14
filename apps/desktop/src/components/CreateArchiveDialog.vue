@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { File, Folder, HardDrive, Plus, Trash2, UploadCloud, X } from "@lucide/vue";
+import { Database, File, Folder, HardDrive, Plus, Trash2, UploadCloud, X } from "@lucide/vue";
 import { onMounted, ref, watch } from "vue";
 import type { ArchiveSource, CreateArchiveInput, SourceKind, StoragePolicy } from "../domain";
 import { createBackdropDismissal } from "../services/dialogDismissal";
+import { normalizeRegistryPath } from "../services/backupRules";
 import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
 
 const props = defineProps<{
@@ -16,15 +17,28 @@ const props = defineProps<{
   editAutoBackupEnabled?: boolean;
   editAutomaticUploadEnabled?: boolean;
   highlightSources?: boolean;
+  editExcludePatterns?: string[];
 }>();
 const emit = defineEmits<{
   close: [];
-  pick: [kind: SourceKind];
+  pick: [kind: Exclude<SourceKind, "registry">];
+  registry: [path: string];
   remove: [id: string];
   submit: [input: CreateArchiveInput];
 }>();
 
 const name = ref(props.editName ?? "");
+const excludePatterns = ref((props.editExcludePatterns ?? []).join("\n"));
+const registryPath = ref("");
+const registryError = ref("");
+const registryInputOpen = ref(false);
+function addRegistry(): void {
+  try {
+    emit("registry", normalizeRegistryPath(registryPath.value));
+    registryPath.value = "";
+    registryError.value = "";
+  } catch (error) { registryError.value = (error as Error).message; }
+}
 const storagePolicy = ref<StoragePolicy>(props.editStoragePolicy ?? "local");
 const autoBackupEnabled = ref(props.editAutoBackupEnabled ?? false);
 const automaticUploadEnabled = ref(props.editAutomaticUploadEnabled ?? false);
@@ -43,6 +57,7 @@ function submit(): void {
   emit("submit", {
     name: name.value.trim(),
     sources: props.sources,
+    excludePatterns: excludePatterns.value.split(/\r?\n/).map((pattern) => pattern.trim()).filter(Boolean),
     storagePolicy: storagePolicy.value,
     createInitialSnapshot: createInitialSnapshot.value,
     syncMode: "manual",
@@ -71,27 +86,37 @@ onMounted(() => nameInput.value?.focus());
 
         <fieldset :class="{ 'source-location-required': highlightSources }">
           <legend>存档内容</legend>
-          <p>{{ highlightSources ? '请重新选择该存档在本机的文件或文件夹来源。' : '一个存档可以同时包含多个文件和文件夹，每个时间节点会完整保存这些内容。' }}</p>
+          <p>{{ highlightSources ? '请重新选择该存档在本机的来源。' : '一个存档可以包含多个文件、文件夹和注册表子键。' }}</p>
           <div class="source-actions">
             <button type="button" :disabled="Boolean(picking) || submitting" @click="emit('pick', 'file')"><File :size="16" />{{ picking === 'file' ? '选择中' : '添加文件' }}</button>
             <button type="button" :disabled="Boolean(picking) || submitting" @click="emit('pick', 'folder')"><Folder :size="16" />{{ picking === 'folder' ? '选择中' : '添加文件夹' }}</button>
+            <button type="button" :disabled="submitting" :aria-expanded="registryInputOpen" @click="registryInputOpen = !registryInputOpen"><Database :size="16" />添加注册表</button>
+          </div>
+          <div v-if="registryInputOpen" class="registry-input field">
+            <label for="registry-path">注册表子键路径</label>
+            <input id="registry-path" v-model="registryPath" placeholder="HKCU\Software\Example" :aria-invalid="Boolean(registryError)" aria-describedby="registry-help" @keydown.enter.prevent="addRegistry" />
+            <small id="registry-help">路径不包含“计算机”。仅 Windows 桌面版。支持手动备份和云端同步，不监听注册表变化。</small>
+            <small v-if="registryError" class="field-error" role="alert">{{ registryError }}</small>
+            <button type="button" :disabled="submitting || !registryPath.trim()" @click="addRegistry">添加子键</button>
           </div>
           <div v-if="sources.length" class="source-list">
             <div v-for="source in sources" :key="source.id">
-              <span class="source-icon"><Folder v-if="source.kind === 'folder'" :size="17" /><File v-else :size="17" /></span>
+              <span class="source-icon"><Folder v-if="source.kind === 'folder'" :size="17" /><Database v-else-if="source.kind === 'registry'" :size="17" /><File v-else :size="17" /></span>
               <span><b>{{ source.name }}</b><small :title="source.path">{{ source.path }}</small></span>
               <button type="button" :aria-label="`移除 ${source.name}`" :title="`移除 ${source.name}`" :disabled="submitting" @click="emit('remove', source.id)"><Trash2 :size="15" /></button>
             </div>
           </div>
-          <small v-else-if="attempted" class="field-error">请至少添加一个文件或文件夹</small>
+          <small v-else-if="attempted" class="field-error">请至少添加一个来源</small>
         </fieldset>
+
+        <label class="field exclusion-field"><span>排除规则（每行一条）</span><textarea v-model="excludePatterns" rows="3" placeholder="*.tmp&#10;cache/" aria-describedby="exclusion-help"></textarea><small id="exclusion-help">相对于每个文件来源的根目录；*.tmp 排除临时文件，cache/ 排除同名目录及其内容。仅影响后续快照和自动备份触发；恢复时保留排除的现有文件。注册表不应用这些规则。</small></label>
 
         <div class="field"><span>保存方式</span><div class="storage-options">
             <label :class="{ selected: storagePolicy === 'local' }"><input v-model="storagePolicy" type="radio" value="local" /><HardDrive :size="16" /><span><b>仅本地</b><small>保存在本机 Chronicle 仓库</small></span></label>
             <label :class="{ selected: storagePolicy === 'local_and_remote' }"><input v-model="storagePolicy" type="radio" value="local_and_remote" /><UploadCloud :size="16" /><span><b>本地与云端</b><small>云端接入后自动加入同步</small></span></label>
           </div></div>
 
-        <label class="initial-toggle"><span><b>自动备份</b><small>监听该存档的本机来源；文件变化停止后，按设置的静默时间自动创建快照。</small></span><input v-model="autoBackupEnabled" type="checkbox" role="switch" /></label>
+        <label class="initial-toggle"><span><b>自动备份</b><small>仅监听文件和文件夹；合并时间内的变化保存为一份最新快照。注册表变化不会触发备份。</small></span><input v-model="autoBackupEnabled" type="checkbox" role="switch" /></label>
         <label class="initial-toggle"><span><b>自动上传</b><small>该存档生成新快照后自动上传到启用的云端同步源；仅“本地与云端”存档可上传。</small></span><input v-model="automaticUploadEnabled" type="checkbox" role="switch" /></label>
 
         <label v-if="!editName" class="initial-toggle"><span><b>创建后立即备份</b><small>生成第一个可恢复的 7z 时间节点</small></span><input v-model="createInitialSnapshot" type="checkbox" role="switch" /></label>
@@ -130,4 +155,11 @@ input[type="text"] { color: var(--text); background: var(--field); }
 .initial-toggle input { background: var(--border-2); }
 .initial-toggle input::after { background: var(--surface); }
 .submit { color: var(--on-primary); }
+.source-actions { flex-wrap: wrap; }
+.registry-input { margin-top: 12px; }
+.registry-input input, .exclusion-field textarea { width: 100%; padding: 9px 11px; color: var(--text); background: var(--field); border: 1px solid var(--border-2); border-radius: 7px; font: inherit; }
+.registry-input button { align-self: flex-start; padding: 8px 12px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 7px; }
+.exclusion-field { margin-bottom: 20px; }
+.exclusion-field textarea { resize: vertical; min-height: 76px; }
+.exclusion-field small, .registry-input small { color: var(--text-2); font-size: 11px; line-height: 1.5; }
 </style>

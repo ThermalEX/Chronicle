@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { CloudSource } from "./settings";
 
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke, isTauri: () => true }));
+const syncSource: CloudSource = { id: "source", name: "GitHub", provider: "legacy_github", endpoint: "", username: "", remotePath: "/Chronicle", credentialRef: "test" };
 
 describe("cloud repository adapter", () => {
   beforeEach(() => invoke.mockReset());
@@ -77,6 +79,58 @@ describe("cloud repository adapter", () => {
 
     expect(invoke).toHaveBeenNthCalledWith(1, "cloud_overwrite_upload", { sourceId: "source-1", entryId: "entry-1" });
     expect(invoke).toHaveBeenNthCalledWith(2, "cloud_upload_entry_category_tree", { sourceId: "source-1", entryId: "entry-1" });
+  });
+
+  it("uploads multiple category branches through one desktop command", async () => {
+    const { cloudRepository } = await import("./cloud");
+
+    await cloudRepository.uploadEntryCategoryTrees("source-1", ["entry-1", "entry-2"]);
+
+    expect(invoke).toHaveBeenCalledWith("cloud_upload_entry_category_trees", {
+      sourceId: "source-1", entryIds: ["entry-1", "entry-2"],
+    });
+  });
+
+  it("batches settings and archive categories into one sync metadata command", async () => {
+    const { cloudRepository } = await import("./cloud");
+    await cloudRepository.uploadSyncMetadata("source-1", ["entry-1", "entry-2"]);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith("cloud_upload_sync_metadata", {
+      sourceId: "source-1", entryIds: ["entry-1", "entry-2"],
+    });
+  });
+
+  it("finishes a fast source's metadata without waiting for a slow source", async () => {
+    const { syncArchivesAcrossSources } = await import("./cloud");
+    let releaseSlow!: (value: unknown) => void;
+    const slow = new Promise((resolve) => { releaseSlow = resolve; });
+    let fastFinished!: () => void;
+    const fastDone = new Promise<void>((resolve) => { fastFinished = resolve; });
+    invoke.mockImplementation((command, args) => {
+      if (command === "cloud_sync_entry" && args.sourceId === "slow") return slow;
+      if (command === "cloud_upload_sync_metadata" && args.sourceId === "fast") fastFinished();
+      return Promise.resolve({ status: "current", message: "current" });
+    });
+    const run = syncArchivesAcrossSources([{ ...syncSource, id: "slow" }, { ...syncSource, id: "fast" }], [{ id: "entry" }]);
+    await fastDone;
+    expect(invoke).toHaveBeenCalledWith("cloud_upload_sync_metadata", { sourceId: "fast", entryIds: ["entry"] });
+    releaseSlow({ status: "current", message: "current" });
+    const result = await run;
+    expect(result.hasFailures).toBe(false);
+  });
+
+  it("keeps metadata failures in the final sync result and excludes conflicted archives", async () => {
+    const { syncArchivesAcrossSources } = await import("./cloud");
+    let settled = 0;
+    invoke.mockImplementation((command, args) => {
+      if (command === "cloud_upload_sync_metadata") return Promise.reject(new Error("metadata denied"));
+      return Promise.resolve({ status: args?.entryId === "conflicted" ? "conflict" : "current", message: "result" });
+    });
+    const result = await syncArchivesAcrossSources([syncSource], [{ id: "entry" }, { id: "conflicted" }], () => { settled += 1; });
+    expect(invoke).toHaveBeenCalledWith("cloud_upload_sync_metadata", { sourceId: "source", entryIds: ["entry"] });
+    expect(result.hasFailures).toBe(true);
+    expect(result.metadataOutcomes[0].status).toBe("rejected");
+    expect(settled).toBe(3);
   });
 
   it("stores a GitHub token through the provider-specific credential command", async () => {

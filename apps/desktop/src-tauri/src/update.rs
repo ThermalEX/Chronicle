@@ -131,7 +131,8 @@ pub async fn download_and_install_update(
         .path()
         .download_dir()
         .map_err(|error| format!("无法定位下载目录：{error}"))?;
-    fs::create_dir_all(&download_directory).map_err(|error| format!("无法创建下载目录：{error}"))?;
+    fs::create_dir_all(&download_directory)
+        .map_err(|error| format!("无法创建下载目录：{error}"))?;
     let destination = installer_path(&download_directory);
     let temporary = destination.with_extension("download");
     fs::write(&temporary, &installer).map_err(|error| format!("无法保存安装包：{error}"))?;

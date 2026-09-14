@@ -10,6 +10,7 @@ import type {
   RecycleItem,
   SourceKind,
 } from "../domain";
+import { exclusionMatcher } from "./backupRules";
 
 const DATABASE_NAME = "chronicle-local";
 const DATABASE_VERSION = 3;
@@ -63,29 +64,34 @@ async function digest(blob: Blob): Promise<string> {
 async function collectDirectory(
   directory: FileSystemDirectoryHandle,
   prefix = "",
+  excluded = exclusionMatcher(),
 ): Promise<Array<{ path: string; file: File }>> {
   const files: Array<{ path: string; file: File }> = [];
   for await (const [name, handle] of directory.entries()) {
     const path = prefix ? `${prefix}/${name}` : name;
+    if (excluded(path, handle.kind === "directory")) continue;
     if (handle.kind === "file") {
       files.push({ path, file: await (handle as FileSystemFileHandle).getFile() });
     } else {
-      files.push(...await collectDirectory(handle as FileSystemDirectoryHandle, path));
+      files.push(...await collectDirectory(handle as FileSystemDirectoryHandle, path, excluded));
     }
   }
   return files.sort((left, right) => left.path.localeCompare(right.path));
 }
 
 async function readSources(archive: ArchiveRecord): Promise<Array<{ path: string; file: File }>> {
+  if (archive.sources.some((source) => source.kind === "registry")) throw new Error("注册表备份和恢复仅支持 Windows 桌面版 Chronicle");
+  const excluded = exclusionMatcher(archive.excludePatterns);
   const files: Array<{ path: string; file: File }> = [];
   for (const source of archive.sources) {
+    if (source.kind === "file" && excluded(source.name)) continue;
     if (!source.handle) throw new Error(`“${source.name}”缺少本地文件句柄`);
     await ensurePermission(source.handle, "read");
     if (source.kind === "file") {
       const file = await (source.handle as FileSystemFileHandle).getFile();
       files.push({ path: `${source.id}/${file.name}`, file });
     } else {
-      const children = await collectDirectory(source.handle as FileSystemDirectoryHandle);
+      const children = await collectDirectory(source.handle as FileSystemDirectoryHandle, "", excluded);
       files.push(...children.map((item) => ({ ...item, path: `${source.id}/${item.path}` })));
     }
   }
@@ -117,8 +123,16 @@ async function ensureFile(
   return directory.getFileHandle(filename, { create: true });
 }
 
-async function removeContents(directory: FileSystemDirectoryHandle): Promise<void> {
-  for await (const [name] of directory.entries()) await directory.removeEntry(name, { recursive: true });
+async function removeContents(directory: FileSystemDirectoryHandle, excluded = exclusionMatcher(), prefix = ""): Promise<void> {
+  for await (const [name, handle] of directory.entries()) {
+    const path = prefix ? `${prefix}/${name}` : name;
+    if (excluded(path, handle.kind === "directory")) continue;
+    if (handle.kind === "directory") {
+      const child = handle as FileSystemDirectoryHandle;
+      await removeContents(child, excluded, path);
+      if ((await child.entries().next()).done) await directory.removeEntry(name);
+    } else await directory.removeEntry(name);
+  }
 }
 
 export class BrowserArchiveRepository {
@@ -212,7 +226,7 @@ export class BrowserArchiveRepository {
       .sort((left, right) => right.updatedAt - left.updatedAt);
   }
 
-  async pickSources(kind: SourceKind): Promise<ArchiveSource[]> {
+  async pickSources(kind: Exclude<SourceKind, "registry">): Promise<ArchiveSource[]> {
     try {
       const handles = kind === "file"
         ? await window.showOpenFilePicker({ multiple: true })
@@ -231,12 +245,15 @@ export class BrowserArchiveRepository {
   }
 
   async createArchive(input: CreateArchiveInput): Promise<ArchiveRecord> {
+    if (input.sources.some((source) => source.kind === "registry")) throw new Error("注册表来源仅支持 Windows 桌面版 Chronicle");
+    exclusionMatcher(input.excludePatterns);
     const now = Date.now();
     const category = input.categoryId ? (await this.listCategories()).find((item) => item.id === input.categoryId) : undefined;
     if (input.categoryId && !category) throw new Error("分类不存在");
     const archive: ArchiveRecord = {
       id: crypto.randomUUID(),
       name: input.name.trim(),
+      excludePatterns: input.excludePatterns ?? [],
       sourcePath: input.sources.map((source) => source.path).join(" · "),
       sources: input.sources,
       category: category?.name ?? "未分类",
@@ -256,11 +273,14 @@ export class BrowserArchiveRepository {
   }
 
   async updateArchive(archiveId: string, input: CreateArchiveInput): Promise<ArchiveRecord> {
+    if (input.sources.some((source) => source.kind === "registry")) throw new Error("注册表来源仅支持 Windows 桌面版 Chronicle");
+    exclusionMatcher(input.excludePatterns);
     const archive = (await this.listArchives()).find((item) => item.id === archiveId);
     if (!archive) throw new Error("存档不存在");
     const updated: ArchiveRecord = {
       ...archive,
       name: input.name.trim(),
+      excludePatterns: input.excludePatterns ?? [],
       sourcePath: input.sources.map((source) => source.path).join(" · "),
       sources: input.sources,
       kind: input.sources.length === 1 ? input.sources[0].kind : "collection",
@@ -426,6 +446,8 @@ export class BrowserArchiveRepository {
     const snapshot: SnapshotRecord = {
       id: crypto.randomUUID(),
       archiveId: archive.id,
+      excludePatterns: [...(archive.excludePatterns ?? [])],
+      locked: false,
       title,
       note: "",
       createdAt: Date.now(),
@@ -460,7 +482,7 @@ export class BrowserArchiveRepository {
       database.close();
       throw new Error("快照不存在");
     }
-    const updated = { ...snapshot, note: note.trim() };
+    const updated = { ...snapshot, note: note.trim(), metadataUpdatedAtMs: Date.now() };
     transaction.objectStore(SNAPSHOTS).put(updated);
     await transactionDone(transaction);
     database.close();
@@ -476,6 +498,11 @@ export class BrowserArchiveRepository {
       transaction.abort();
       database.close();
       throw new Error("快照不存在");
+    }
+    if (snapshot.locked) {
+      transaction.abort();
+      database.close();
+      throw new Error("请先解锁重要快照，再删除时间节点");
     }
     snapshotStore.delete(snapshotId);
     const remaining = (await requestResult(snapshotStore.index("archiveId").getAll(archiveId) as IDBRequest<SnapshotRecord[]>))
@@ -493,13 +520,32 @@ export class BrowserArchiveRepository {
     database.close();
   }
 
+  async setSnapshotLocked(archiveId: string, snapshotId: string, locked: boolean): Promise<SnapshotRecord> {
+    const database = await openDatabase();
+    const transaction = database.transaction(SNAPSHOTS, "readwrite");
+    const store = transaction.objectStore(SNAPSHOTS);
+    const snapshot = await requestResult(store.get(snapshotId) as IDBRequest<SnapshotRecord | undefined>);
+    if (!snapshot || snapshot.archiveId !== archiveId) {
+      transaction.abort();
+      database.close();
+      throw new Error("快照不存在");
+    }
+    const updated = { ...snapshot, locked, metadataUpdatedAtMs: Date.now() };
+    store.put(updated);
+    await transactionDone(transaction);
+    database.close();
+    return updated;
+  }
+
   async restoreSnapshot(archive: ArchiveRecord, snapshot: SnapshotRecord): Promise<void> {
+    const excluded = exclusionMatcher([...(archive.excludePatterns ?? []), ...(snapshot.excludePatterns ?? [])]);
     await this.createSnapshot(archive, "恢复前安全快照", true);
     for (const source of archive.sources) {
+      if (source.kind === "file" && excluded(source.name)) continue;
       if (!source.handle) throw new Error(`“${source.name}”缺少本地文件句柄`);
       await ensurePermission(source.handle, "readwrite");
       const prefix = `${source.id}/`;
-      const files = snapshot.files.filter((file) => file.path.startsWith(prefix));
+      const files = snapshot.files.filter((file) => file.path.startsWith(prefix) && !excluded(file.path.slice(prefix.length)));
       if (source.kind === "file") {
         const file = files.find((item) => item.path === `${prefix}${source.name}`);
         if (!file?.blob) throw new Error(`快照中缺少“${source.name}”`);
@@ -507,7 +553,7 @@ export class BrowserArchiveRepository {
         continue;
       }
       const root = source.handle as FileSystemDirectoryHandle;
-      await removeContents(root);
+      await removeContents(root, excluded);
       for (const file of files) {
         if (!file.blob) throw new Error(`快照文件缺少内容：${file.path}`);
         await writeFile(await ensureFile(root, file.path.slice(prefix.length)), file.blob);

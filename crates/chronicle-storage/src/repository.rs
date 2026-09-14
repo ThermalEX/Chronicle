@@ -7,13 +7,17 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crate::{
+    exclusions::ExclusionRules,
+    registry::{self, RegistryRestoreMode},
+};
 use chronicle_core::{
     Category, ChangeSummary, Entry, EntryKind, EntrySource, Snapshot, SnapshotFile, StoragePolicy,
     SyncMode,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use sevenz_rust::{compress_to_path, decompress_file};
+use sevenz_rust::{compress_to_path, decompress_file_with_extract_fn};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -64,6 +68,10 @@ pub enum StorageError {
     IntegrityMismatch,
     #[error("snapshot content is incomplete for source: {0}")]
     IncompleteSnapshot(String),
+    #[error("快照已锁定，请先取消星标再删除")]
+    SnapshotLocked,
+    #[error("{0}")]
+    InvalidBackupOption(String),
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;
@@ -92,6 +100,8 @@ struct CatalogEntry {
     auto_backup_enabled: bool,
     #[serde(default)]
     automatic_upload_enabled: bool,
+    #[serde(default)]
+    exclude_patterns: Vec<String>,
     source_count: usize,
     snapshot_count: usize,
     stored_bytes: u64,
@@ -297,6 +307,7 @@ impl LocalRepository {
             sync_mode,
             auto_backup_enabled: false,
             automatic_upload_enabled: false,
+            exclude_patterns: Vec::new(),
             created_at_ms: unix_millis(SystemTime::now()),
         };
         let directory = self.entries_dir().join(&folder);
@@ -313,6 +324,7 @@ impl LocalRepository {
             sync_mode,
             auto_backup_enabled: entry.auto_backup_enabled,
             automatic_upload_enabled: entry.automatic_upload_enabled,
+            exclude_patterns: entry.exclude_patterns.clone(),
             source_count: entry.sources.len(),
             snapshot_count: 0,
             stored_bytes: 0,
@@ -407,7 +419,15 @@ impl LocalRepository {
     }
 
     /// Updates the automatic backup and upload options for one entry.
-    pub fn set_entry_automation(&self, entry_id: &str, auto_backup_enabled: bool, automatic_upload_enabled: bool) -> Result<Entry> {
+    /// Updates per-entry automatic backup and upload settings.
+    /// # Errors
+    /// Fails if the entry is missing or its catalog cannot be written.
+    pub fn set_entry_automation(
+        &self,
+        entry_id: &str,
+        auto_backup_enabled: bool,
+        automatic_upload_enabled: bool,
+    ) -> Result<Entry> {
         let mut entry = self.get_entry(entry_id)?;
         entry.auto_backup_enabled = auto_backup_enabled;
         entry.automatic_upload_enabled = automatic_upload_enabled;
@@ -766,6 +786,7 @@ impl LocalRepository {
             sync_mode: summary.sync_mode,
             auto_backup_enabled: summary.auto_backup_enabled,
             automatic_upload_enabled: summary.automatic_upload_enabled,
+            exclude_patterns: summary.exclude_patterns,
             created_at_ms: summary.created_at_ms,
         };
         let bindings = self.read_bindings()?;
@@ -972,7 +993,9 @@ impl LocalRepository {
         let working = self.temp_dir().join(format!("capture-{snapshot_id}"));
         let content = working.join("content");
         fs::create_dir_all(&content)?;
-        let files = stage_sources(&entry.sources, &content)?;
+        let patterns = entry.exclude_patterns.clone();
+        let rules = ExclusionRules::new(&patterns).map_err(StorageError::InvalidBackupOption)?;
+        let files = stage_sources(&entry.sources, &content, &rules)?;
         let mut timeline = self.list_snapshots(entry_id)?;
         let parent_id = timeline.first().map(|snapshot| snapshot.id.clone());
         let changes = compare_manifests(
@@ -1003,6 +1026,9 @@ impl LocalRepository {
             files,
             changes,
             safety,
+            locked: false,
+            metadata_updated_at_ms: 0,
+            exclude_patterns: patterns,
         };
         timeline.push(snapshot.clone());
         timeline.sort_by_key(|item| item.created_at_ms);
@@ -1026,6 +1052,53 @@ impl LocalRepository {
             .find(|snapshot| snapshot.id == snapshot_id)
             .ok_or_else(|| StorageError::SnapshotNotFound(snapshot_id.into()))?;
         note.into().trim().clone_into(&mut snapshot.note);
+        snapshot.metadata_updated_at_ms =
+            unix_millis(SystemTime::now()).max(snapshot.metadata_updated_at_ms.saturating_add(1));
+        let updated = snapshot.clone();
+        self.refresh_catalog_entry(entry_id, &timeline)?;
+        Ok(updated)
+    }
+
+    /// Updates source-relative exclusion rules for future captures.
+    /// Updates per-entry exclusion patterns.
+    /// # Errors
+    /// Fails for invalid patterns, missing entries or catalog write errors.
+    pub fn set_entry_exclusions(&self, entry_id: &str, patterns: Vec<String>) -> Result<Entry> {
+        let patterns: Vec<_> = patterns
+            .into_iter()
+            .map(|pattern| pattern.trim().to_owned())
+            .filter(|pattern| !pattern.is_empty())
+            .collect();
+        ExclusionRules::new(&patterns).map_err(StorageError::InvalidBackupOption)?;
+        let mut catalog = self.read_catalog()?;
+        let entry = catalog
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == entry_id)
+            .ok_or_else(|| StorageError::EntryNotFound(entry_id.into()))?;
+        entry.exclude_patterns = patterns;
+        self.write_catalog(&mut catalog)?;
+        self.get_entry(entry_id)
+    }
+
+    /// Changes a snapshot's deletion protection without rewriting its archive object.
+    /// Updates a snapshot's retention lock.
+    /// # Errors
+    /// Fails if the snapshot is missing or metadata cannot be written.
+    pub fn set_snapshot_locked(
+        &self,
+        entry_id: &str,
+        snapshot_id: &str,
+        locked: bool,
+    ) -> Result<Snapshot> {
+        let mut timeline = self.list_snapshots(entry_id)?;
+        let snapshot = timeline
+            .iter_mut()
+            .find(|snapshot| snapshot.id == snapshot_id)
+            .ok_or_else(|| StorageError::SnapshotNotFound(snapshot_id.into()))?;
+        snapshot.locked = locked;
+        snapshot.metadata_updated_at_ms =
+            unix_millis(SystemTime::now()).max(snapshot.metadata_updated_at_ms.saturating_add(1));
         let updated = snapshot.clone();
         self.refresh_catalog_entry(entry_id, &timeline)?;
         Ok(updated)
@@ -1041,6 +1114,9 @@ impl LocalRepository {
             .iter()
             .find(|snapshot| snapshot.id == snapshot_id)
             .ok_or_else(|| StorageError::SnapshotNotFound(snapshot_id.into()))?;
+        if snapshot.locked {
+            return Err(StorageError::SnapshotLocked);
+        }
         let archive = self.entry_dir(entry_id)?.join(&snapshot.archive_name);
         let staged = self.temp_dir().join(format!("delete-{snapshot_id}.7z"));
         fs::rename(&archive, &staged)?;
@@ -1073,21 +1149,58 @@ impl LocalRepository {
     /// # Errors
     /// Returns an error when verification, extraction, or replacement fails.
     pub fn restore_snapshot(&self, entry_id: &str, snapshot_id: &str) -> Result<()> {
+        self.restore_snapshot_with_registry_mode(entry_id, snapshot_id, RegistryRestoreMode::Merge)
+    }
+
+    /// Validates all payloads before taking a safety snapshot and modifying sources.
+    /// # Errors
+    /// Fails on invalid payloads, protected path conflicts or source access errors.
+    pub fn restore_snapshot_with_registry_mode(
+        &self,
+        entry_id: &str,
+        snapshot_id: &str,
+        mode: RegistryRestoreMode,
+    ) -> Result<()> {
         let entry = self.get_entry(entry_id)?;
         let snapshot = self.get_snapshot(snapshot_id)?;
         if snapshot.entry_id != entry.id {
             return Err(StorageError::SnapshotNotFound(snapshot_id.into()));
         }
-        self.create_snapshot(entry_id, "恢复前安全快照", "local", true)?;
         if !self.verify_snapshot(snapshot_id)? {
             return Err(StorageError::IntegrityMismatch);
         }
         let restore_root = self.temp_dir().join(format!("restore-{}", Uuid::new_v4()));
-        decompress_file(
+        decompress_file_with_extract_fn(
             self.entry_dir(entry_id)?.join(&snapshot.archive_name),
             &restore_root,
+            |entry, reader, destination| {
+                // compress_to_path includes the content root as an empty directory entry.
+                if entry.name().is_empty() && entry.is_directory() {
+                    return Ok(true);
+                }
+                if !safe_archive_member(entry.name()) {
+                    return Err(sevenz_rust::Error::other(format!(
+                        "快照包含越界或无效路径：{}",
+                        entry.name()
+                    )));
+                }
+                sevenz_rust::default_entry_extract_fn(entry, reader, destination)
+            },
         )?;
+        let patterns: Vec<_> = entry
+            .exclude_patterns
+            .iter()
+            .chain(&snapshot.exclude_patterns)
+            .cloned()
+            .collect();
+        let rules = ExclusionRules::new(&patterns).map_err(StorageError::InvalidBackupOption)?;
+        // Validate every source before changing any filesystem or registry target.
         for source in &entry.sources {
+            if !single_component(&source.id)
+                || (source.kind == EntryKind::File && !single_component(&source.name))
+            {
+                return Err(StorageError::IncompleteSnapshot(source.id.clone()));
+            }
             let extracted_root = restore_root.join(&source.id);
             let target = PathBuf::from(&source.path);
             match source.kind {
@@ -1095,15 +1208,47 @@ impl LocalRepository {
                     if !extracted_root.is_dir() {
                         return Err(StorageError::IncompleteSnapshot(source.id.clone()));
                     }
-                    replace_path(&target, &extracted_root, true)?;
+                    validate_restore_tree(&target, &rules)?;
+                    validate_restore_tree(&extracted_root, &rules)?;
+                    validate_restore_conflicts(&target, &extracted_root, &rules)?;
                 }
                 EntryKind::File => {
+                    if rules.is_excluded(Path::new(&source.name), false) {
+                        continue;
+                    }
                     let extracted = extracted_root.join(&source.name);
                     if !extracted.is_file() {
                         return Err(StorageError::IncompleteSnapshot(source.id.clone()));
                     }
-                    replace_path(&target, &extracted, false)?;
+                    reject_reparse_point(&target)?;
+                    reject_reparse_point(&extracted)?;
                 }
+                EntryKind::Registry => {
+                    let bytes = fs::read(extracted_root.join("registry.json"))?;
+                    registry::validate_snapshot(&source.path, &bytes)
+                        .map_err(StorageError::InvalidBackupOption)?;
+                }
+            }
+        }
+        self.create_snapshot(entry_id, "恢复前安全快照", "local", true)?;
+        for source in &entry.sources {
+            let extracted_root = restore_root.join(&source.id);
+            let target = PathBuf::from(&source.path);
+            match source.kind {
+                EntryKind::Directory => {
+                    restore_filtered_directory(&target, &extracted_root, &rules)?;
+                }
+                EntryKind::File => {
+                    if !rules.is_excluded(Path::new(&source.name), false) {
+                        replace_path(&target, &extracted_root.join(&source.name), false)?;
+                    }
+                }
+                EntryKind::Registry => registry::restore_key(
+                    &source.path,
+                    &fs::read(extracted_root.join("registry.json"))?,
+                    mode,
+                )
+                .map_err(StorageError::InvalidBackupOption)?,
             }
         }
         if restore_root.exists() {
@@ -1317,6 +1462,7 @@ fn shared_entry(entry: &Entry) -> Entry {
     shared
         .sources
         .iter_mut()
+        .filter(|source| source.kind != EntryKind::Registry)
         .for_each(|source| source.path.clear());
     shared
 }
@@ -1327,6 +1473,24 @@ fn resolve_entry_sources(
 ) -> Result<Vec<EntrySource>> {
     let mut sources = Vec::with_capacity(source_paths.len());
     for source_path in source_paths {
+        if let Some(registry_path) = source_path.strip_prefix("registry:") {
+            let path = registry::normalize_path(registry_path)
+                .map_err(StorageError::InvalidBackupOption)?;
+            let name = path.rsplit('\\').next().unwrap_or(&path).to_owned();
+            sources.push(EntrySource {
+                id: existing
+                    .iter()
+                    .find(|source| {
+                        source.kind == EntryKind::Registry
+                            && source.path.eq_ignore_ascii_case(&path)
+                    })
+                    .map_or_else(|| Uuid::new_v4().to_string(), |source| source.id.clone()),
+                path,
+                name,
+                kind: EntryKind::Registry,
+            });
+            continue;
+        }
         let path = Path::new(source_path);
         if !path.exists() {
             return Err(StorageError::MissingSource(path.to_path_buf()));
@@ -1447,17 +1611,24 @@ fn directory_size(path: &Path) -> Result<u64> {
     Ok(total)
 }
 
-fn stage_sources(sources: &[EntrySource], destination: &Path) -> Result<Vec<SnapshotFile>> {
+fn stage_sources(
+    sources: &[EntrySource],
+    destination: &Path,
+    rules: &ExclusionRules,
+) -> Result<Vec<SnapshotFile>> {
     let mut files = Vec::new();
     for source in sources {
         let path = Path::new(&source.path);
-        if !path.exists() {
+        if source.kind != EntryKind::Registry && !path.exists() {
             return Err(StorageError::MissingSource(path.to_path_buf()));
         }
         let source_root = destination.join(&source.id);
         match source.kind {
             EntryKind::File => {
                 fs::create_dir_all(&source_root)?;
+                if rules.is_excluded(Path::new(&source.name), false) {
+                    continue;
+                }
                 fs::copy(path, source_root.join(&source.name))?;
                 files.push(snapshot_file(
                     path,
@@ -1466,7 +1637,15 @@ fn stage_sources(sources: &[EntrySource], destination: &Path) -> Result<Vec<Snap
             }
             EntryKind::Directory => {
                 fs::create_dir_all(&source_root)?;
-                for item in WalkDir::new(path).min_depth(1) {
+                for item in WalkDir::new(path)
+                    .min_depth(1)
+                    .into_iter()
+                    .filter_entry(|item| {
+                        item.path().strip_prefix(path).is_ok_and(|relative| {
+                            !rules.is_excluded(relative, item.file_type().is_dir())
+                        })
+                    })
+                {
                     let item = item?;
                     let relative = item
                         .path()
@@ -1486,6 +1665,19 @@ fn stage_sources(sources: &[EntrySource], destination: &Path) -> Result<Vec<Snap
                         )?);
                     }
                 }
+            }
+            EntryKind::Registry => {
+                fs::create_dir_all(&source_root)?;
+                let staged = source_root.join("registry.json");
+                fs::write(
+                    &staged,
+                    registry::export_key(&source.path)
+                        .map_err(StorageError::InvalidBackupOption)?,
+                )?;
+                files.push(snapshot_file(
+                    &staged,
+                    &Path::new(&source.id).join("registry.json"),
+                )?);
             }
         }
     }
@@ -1554,6 +1746,170 @@ fn safe_folder_name(name: &str) -> String {
     } else {
         sanitized.chars().take(80).collect()
     }
+}
+
+fn single_component(value: &str) -> bool {
+    !value.is_empty() && !value.contains(['/', '\\', ':', '\0']) && value != "." && value != ".."
+}
+
+fn safe_archive_member(name: &str) -> bool {
+    let normalized = name.replace('\\', "/");
+    let path = normalized.strip_suffix('/').unwrap_or(&normalized);
+    !path.is_empty()
+        && path
+            .split('/')
+            .all(|part| single_component(part) && !part.ends_with(['.', ' ']))
+}
+
+fn reject_reparse_point(path: &Path) -> Result<()> {
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        let linked = metadata.file_type().is_symlink();
+        #[cfg(windows)]
+        let linked = {
+            use std::os::windows::fs::MetadataExt;
+            linked || metadata.file_attributes() & 0x400 != 0
+        };
+        if linked {
+            return Err(StorageError::InvalidBackupOption(format!(
+                "恢复路径包含链接或联接点，请先检查：{}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_restore_tree(root: &Path, rules: &ExclusionRules) -> Result<()> {
+    reject_reparse_point(root)?;
+    if !root.exists() {
+        return Ok(());
+    }
+    for item in WalkDir::new(root)
+        .min_depth(1)
+        .into_iter()
+        .filter_entry(|item| {
+            item.path()
+                .strip_prefix(root)
+                .is_ok_and(|relative| !rules.is_excluded(relative, item.file_type().is_dir()))
+        })
+    {
+        reject_reparse_point(item?.path())?;
+    }
+    Ok(())
+}
+
+// Check conflicts across all sources before restoring any of them.
+fn validate_restore_conflicts(
+    target: &Path,
+    replacement: &Path,
+    rules: &ExclusionRules,
+) -> Result<()> {
+    for item in WalkDir::new(replacement)
+        .min_depth(1)
+        .into_iter()
+        .filter_entry(|item| {
+            item.path().strip_prefix(replacement).is_ok_and(|relative| {
+                !rules.is_excluded(
+                    relative,
+                    item.file_type().is_dir() || target.join(relative).is_dir(),
+                )
+            })
+        })
+    {
+        let item = item?;
+        let relative = item
+            .path()
+            .strip_prefix(replacement)
+            .expect("walked source path");
+        let destination = target.join(relative);
+        if !item.file_type().is_file() || !destination.is_dir() {
+            continue;
+        }
+        for current in WalkDir::new(&destination).min_depth(1) {
+            let current = current?;
+            let relative = current
+                .path()
+                .strip_prefix(target)
+                .expect("walked target path");
+            if rules.is_excluded(relative, current.file_type().is_dir()) {
+                return Err(StorageError::InvalidBackupOption(format!(
+                    "无法用快照文件替换包含排除内容的目录：{}",
+                    destination.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+// Keep excluded paths in place; removing the whole source directory would also remove them.
+fn restore_filtered_directory(
+    target: &Path,
+    replacement: &Path,
+    rules: &ExclusionRules,
+) -> Result<()> {
+    fs::create_dir_all(target)?;
+    for item in WalkDir::new(replacement)
+        .min_depth(1)
+        .into_iter()
+        .filter_entry(|item| {
+            item.path().strip_prefix(replacement).is_ok_and(|relative| {
+                !rules.is_excluded(
+                    relative,
+                    item.file_type().is_dir() || target.join(relative).is_dir(),
+                )
+            })
+        })
+    {
+        let item = item?;
+        let relative = item
+            .path()
+            .strip_prefix(replacement)
+            .expect("walked source path");
+        let destination = target.join(relative);
+        if item.file_type().is_dir() {
+            if destination.is_file() {
+                fs::remove_file(&destination)?;
+            }
+            fs::create_dir_all(destination)?;
+        } else if item.file_type().is_file() {
+            // Preflight proved this conflicting subtree contains no protected paths.
+            if destination.is_dir() {
+                fs::remove_dir_all(&destination)?;
+            }
+            replace_path(&destination, item.path(), false)?;
+        }
+    }
+    let mut leftovers = Vec::new();
+    for item in WalkDir::new(target)
+        .min_depth(1)
+        .into_iter()
+        .filter_entry(|item| {
+            item.path()
+                .strip_prefix(target)
+                .is_ok_and(|relative| !rules.is_excluded(relative, item.file_type().is_dir()))
+        })
+    {
+        let item = item?;
+        let relative = item
+            .path()
+            .strip_prefix(target)
+            .expect("walked target path");
+        if !replacement.join(relative).exists() {
+            leftovers.push((item.path().to_owned(), item.file_type().is_dir()));
+        }
+    }
+    for (path, directory) in leftovers.into_iter().rev() {
+        if directory {
+            // An excluded descendant can legitimately keep an otherwise removed folder alive.
+            if fs::read_dir(&path)?.next().is_none() {
+                fs::remove_dir(path)?;
+            }
+        } else {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
 }
 
 fn replace_path(target: &Path, replacement: &Path, directory: bool) -> Result<()> {
@@ -1685,6 +2041,195 @@ fn unix_millis(time: SystemTime) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn archive_members_cannot_escape_the_extraction_directory() {
+        for path in [
+            "../outside",
+            "source/../../outside",
+            "/absolute",
+            "C:\\outside",
+            "source/file:stream",
+            "source\\..\\escape",
+            "source/.. /escape",
+        ] {
+            assert!(!super::safe_archive_member(path), "{path}");
+        }
+        assert!(super::safe_archive_member("source/registry.json"));
+        assert!(super::safe_archive_member("source/directory/"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mixed_registry_and_file_restore_creates_recoverable_safety_snapshots() {
+        use crate::registry::RegistryRestoreMode;
+        use winreg::{
+            RegKey,
+            enums::{HKEY_CURRENT_USER, KEY_ALL_ACCESS, KEY_WOW64_64KEY},
+        };
+        struct TestKey(String);
+        impl Drop for TestKey {
+            fn drop(&mut self) {
+                let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(&self.0);
+            }
+        }
+        let scope = TestKey(format!(
+            "Software\\ChronicleTests\\{}",
+            uuid::Uuid::new_v4()
+        ));
+        let parent = RegKey::predef(HKEY_CURRENT_USER)
+            .create_subkey_with_flags(&scope.0, KEY_ALL_ACCESS | KEY_WOW64_64KEY)
+            .unwrap()
+            .0;
+        let key = parent.create_subkey("Target").unwrap().0;
+        let sibling = parent.create_subkey("Sibling").unwrap().0;
+        sibling.set_value("untouched", &"keep").unwrap();
+        key.set_value("value", &"old").unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("save.dat");
+        fs::write(&file, b"old file").unwrap();
+        let root = temp.path().join("repo");
+        let repository = LocalRepository::open(&root).unwrap();
+        let registry_path = format!("HKEY_CURRENT_USER\\{}\\Target", scope.0);
+        let entry = repository
+            .add_entry_sources(
+                "mixed",
+                &[
+                    file.to_string_lossy().into_owned(),
+                    format!("registry:{registry_path}"),
+                ],
+                None,
+                StoragePolicy::Local,
+            )
+            .unwrap();
+        let snapshot = repository
+            .create_snapshot(&entry.id, "initial", "test", false)
+            .unwrap();
+        assert_eq!(snapshot.files.len(), 2);
+        let catalog: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join("catalog.json")).unwrap()).unwrap();
+        assert_eq!(catalog["entries"][0]["sources"][1]["path"], registry_path);
+        assert!(catalog["entries"][0]["sources"][0].get("path").is_none());
+        key.set_value("value", &"new").unwrap();
+        key.set_value("extra", &"retain on merge").unwrap();
+        fs::write(&file, b"new file").unwrap();
+        repository
+            .restore_snapshot(&entry.id, &snapshot.id)
+            .unwrap();
+        assert_eq!(key.get_value::<String, _>("value").unwrap(), "old");
+        assert_eq!(
+            key.get_value::<String, _>("extra").unwrap(),
+            "retain on merge"
+        );
+        assert_eq!(fs::read(&file).unwrap(), b"old file");
+        let safety = repository
+            .list_snapshots(&entry.id)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.safety)
+            .unwrap();
+        repository
+            .restore_snapshot_with_registry_mode(
+                &entry.id,
+                &safety.id,
+                RegistryRestoreMode::Overwrite,
+            )
+            .unwrap();
+        assert_eq!(key.get_value::<String, _>("value").unwrap(), "new");
+        assert_eq!(fs::read(&file).unwrap(), b"new file");
+        repository
+            .restore_snapshot_with_registry_mode(
+                &entry.id,
+                &snapshot.id,
+                RegistryRestoreMode::Overwrite,
+            )
+            .unwrap();
+        assert!(key.get_value::<String, _>("extra").is_err());
+        assert_eq!(sibling.get_value::<String, _>("untouched").unwrap(), "keep");
+    }
+
+    #[test]
+    fn excluded_files_stay_out_of_capture_and_survive_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(source.join("cache")).unwrap();
+        std::fs::write(source.join("save.dat"), b"old").unwrap();
+        std::fs::write(source.join("cache/keep"), b"cache before").unwrap();
+        std::fs::write(source.join("log.tmp"), b"temp before").unwrap();
+        let repository = super::LocalRepository::open(temp.path().join("repo")).unwrap();
+        let entry = repository.add_entry(&source, Some("test"), None).unwrap();
+        repository
+            .set_entry_exclusions(&entry.id, vec!["cache/".into(), "*.tmp".into()])
+            .unwrap();
+        let snapshot = repository
+            .create_snapshot(&entry.id, "snapshot", "test", false)
+            .unwrap();
+        assert_eq!(snapshot.files.len(), 1);
+        std::fs::write(source.join("save.dat"), b"new").unwrap();
+        std::fs::write(source.join("cache/keep"), b"cache after").unwrap();
+        std::fs::write(source.join("log.tmp"), b"temp after").unwrap();
+        std::fs::write(source.join("later.dat"), b"not backed up").unwrap();
+        repository
+            .set_entry_exclusions(&entry.id, Vec::new())
+            .unwrap();
+        repository
+            .restore_snapshot(&entry.id, &snapshot.id)
+            .unwrap();
+        assert_eq!(std::fs::read(source.join("save.dat")).unwrap(), b"old");
+        assert_eq!(
+            std::fs::read(source.join("cache/keep")).unwrap(),
+            b"cache after"
+        );
+        assert_eq!(
+            std::fs::read(source.join("log.tmp")).unwrap(),
+            b"temp after"
+        );
+        assert!(!source.join("later.dat").exists());
+    }
+
+    #[test]
+    fn current_exclusions_protect_files_present_in_an_older_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("save.tmp");
+        std::fs::write(&source, b"old").unwrap();
+        let repository = super::LocalRepository::open(temp.path().join("repo")).unwrap();
+        let entry = repository.add_entry(&source, None, None).unwrap();
+        let snapshot = repository
+            .create_snapshot(&entry.id, "old", "test", false)
+            .unwrap();
+        repository
+            .set_entry_exclusions(&entry.id, vec!["*.tmp".into()])
+            .unwrap();
+        std::fs::write(&source, b"keep").unwrap();
+        repository
+            .restore_snapshot(&entry.id, &snapshot.id)
+            .unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn snapshot_lock_survives_reopen_and_blocks_deletion_until_unlocked() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("save");
+        std::fs::write(&source, b"save").unwrap();
+        let root = temp.path().join("repo");
+        let repository = super::LocalRepository::open(&root).unwrap();
+        let entry = repository.add_entry(&source, None, None).unwrap();
+        let snapshot = repository
+            .create_snapshot(&entry.id, "important", "test", false)
+            .unwrap();
+        assert!(!snapshot.locked);
+        repository
+            .set_snapshot_locked(&entry.id, &snapshot.id, true)
+            .unwrap();
+        let reopened = super::LocalRepository::open(&root).unwrap();
+        assert!(reopened.get_snapshot(&snapshot.id).unwrap().locked);
+        assert!(reopened.delete_snapshot(&entry.id, &snapshot.id).is_err());
+        assert!(reopened.verify_snapshot(&snapshot.id).unwrap());
+        reopened
+            .set_snapshot_locked(&entry.id, &snapshot.id, false)
+            .unwrap();
+        reopened.delete_snapshot(&entry.id, &snapshot.id).unwrap();
+    }
     use super::LocalRepository;
     use chronicle_core::{StoragePolicy, SyncMode};
     use std::{fs, io::Read, path::Path};
@@ -1954,11 +2499,110 @@ mod tests {
         let repository = LocalRepository::open(workspace.path().join("Chronicle")).unwrap();
         let entry = repository.add_entry(&source, Some("Save"), None).unwrap();
 
-        let updated = repository.set_entry_automation(&entry.id, true, true).unwrap();
+        let updated = repository
+            .set_entry_automation(&entry.id, true, true)
+            .unwrap();
 
         assert!(updated.auto_backup_enabled);
         assert!(updated.automatic_upload_enabled);
         assert!(repository.get_entry(&entry.id).unwrap().auto_backup_enabled);
-        assert!(repository.get_entry(&entry.id).unwrap().automatic_upload_enabled);
+        assert!(
+            repository
+                .get_entry(&entry.id)
+                .unwrap()
+                .automatic_upload_enabled
+        );
+    }
+
+    #[test]
+    fn restore_type_conflict_replaces_unprotected_nonempty_directory_with_file() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("save.dat"), b"old file").unwrap();
+        let repository = LocalRepository::open(workspace.path().join("Chronicle")).unwrap();
+        let entry = repository.add_entry(&source, Some("Save"), None).unwrap();
+        let snapshot = repository
+            .create_snapshot(&entry.id, "before", "test", false)
+            .unwrap();
+        fs::remove_file(source.join("save.dat")).unwrap();
+        fs::create_dir(source.join("save.dat")).unwrap();
+        fs::write(source.join("save.dat/child"), b"new child").unwrap();
+
+        repository
+            .restore_snapshot(&entry.id, &snapshot.id)
+            .unwrap();
+
+        assert_eq!(fs::read(source.join("save.dat")).unwrap(), b"old file");
+    }
+
+    #[test]
+    fn restore_type_conflict_preserves_excluded_empty_directory() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("cache"), b"old file").unwrap();
+        let repository = LocalRepository::open(workspace.path().join("Chronicle")).unwrap();
+        let entry = repository.add_entry(&source, Some("Save"), None).unwrap();
+        let snapshot = repository
+            .create_snapshot(&entry.id, "before", "test", false)
+            .unwrap();
+        fs::remove_file(source.join("cache")).unwrap();
+        fs::create_dir(source.join("cache")).unwrap();
+        repository
+            .set_entry_exclusions(&entry.id, vec!["cache/".into()])
+            .unwrap();
+
+        repository
+            .restore_snapshot(&entry.id, &snapshot.id)
+            .unwrap();
+
+        assert!(source.join("cache").is_dir());
+        assert_eq!(fs::read_dir(source.join("cache")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn restore_type_conflict_rejects_protected_descendants_before_any_source_write() {
+        let workspace = tempdir().unwrap();
+        let first = workspace.path().join("first.dat");
+        let second = workspace.path().join("second");
+        fs::write(&first, b"old first").unwrap();
+        fs::create_dir(&second).unwrap();
+        fs::write(second.join("save.dat"), b"old second").unwrap();
+        let repository = LocalRepository::open(workspace.path().join("Chronicle")).unwrap();
+        let entry = repository
+            .add_entry_sources(
+                "Save",
+                &[
+                    first.to_string_lossy().into_owned(),
+                    second.to_string_lossy().into_owned(),
+                ],
+                None,
+                StoragePolicy::Local,
+            )
+            .unwrap();
+        let snapshot = repository
+            .create_snapshot(&entry.id, "before", "test", false)
+            .unwrap();
+        fs::write(&first, b"new first").unwrap();
+        fs::remove_file(second.join("save.dat")).unwrap();
+        fs::create_dir(second.join("save.dat")).unwrap();
+        fs::write(second.join("save.dat/keep.tmp"), b"protected").unwrap();
+        repository
+            .set_entry_exclusions(&entry.id, vec!["*.tmp".into()])
+            .unwrap();
+
+        assert!(
+            repository
+                .restore_snapshot(&entry.id, &snapshot.id)
+                .is_err()
+        );
+
+        assert_eq!(fs::read(&first).unwrap(), b"new first");
+        assert_eq!(
+            fs::read(second.join("save.dat/keep.tmp")).unwrap(),
+            b"protected"
+        );
+        assert_eq!(repository.list_snapshots(&entry.id).unwrap().len(), 1);
     }
 }
