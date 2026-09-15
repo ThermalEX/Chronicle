@@ -1,0 +1,185 @@
+// Run against an isolated Vite origin; requires Playwright on NODE_PATH.
+const { chromium } = require('playwright');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+(async () => {
+  const browser = await chromium.launch({ channel: process.env.CHRONICLE_BROWSER || 'chrome', headless: true });
+  const context = await browser.newContext({ viewport: { width: Number(process.env.CHRONICLE_WIDTH || 1024), height: 768 }, reducedMotion: 'reduce' });
+  const page = await context.newPage();
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const screenshots = fs.mkdtempSync(path.join(os.tmpdir(), 'chronicle-tutorial-ui-'));
+  const url = process.env.CHRONICLE_TEST_URL || 'http://127.0.0.1:1427';
+  await page.addInitScript(() => {
+    window.pickerCalls = 0;
+    window.showDirectoryPicker = () => navigator.storage.getDirectory();
+    window.showOpenFilePicker = async () => {
+      // First selection is cancelled, second uses a file in this disposable origin.
+      if (++window.pickerCalls === 1) return [];
+      const root = await navigator.storage.getDirectory();
+      const file = await root.getFileHandle('tutorial-test.txt', { create: true });
+      const writer = await file.createWritable();
+      await writer.write('tutorial test data'); await writer.close();
+      return [file];
+    };
+  });
+  if (process.env.CHRONICLE_DARK) await page.addInitScript(() => {
+    if (!localStorage.getItem('chronicle.onboarding.local.v1')) {
+      localStorage.setItem('chronicle.onboarding.local.v1', JSON.stringify({ status: 'pending', seenTips: [] }));
+      localStorage.setItem('chronicle.app-settings.v2', JSON.stringify({ colorMode: 'dark', colorTheme: 'violet' }));
+    }
+  });
+  const title = text => page.locator('#tutorial-title').filter({ hasText: text }).waitFor();
+  const shot = name => page.screenshot({ path: path.join(screenshots, `${name}.png`) });
+  try {
+    await page.goto(url);
+    await title('让每次改变'); await shot('welcome');
+    await page.getByRole('button', { name: '开始使用', exact: true }).click();
+    await title('选一个喜欢的外观');
+    const themeCard = await page.locator('.tutorial-card').boundingBox();
+    assert.ok(themeCard && Math.abs(themeCard.width - Math.min(640, page.viewportSize().width - 48)) < 1, 'theme page uses a narrower card');
+    const previewBox = await page.locator('.theme-preview').boundingBox();
+    assert.ok(previewBox && previewBox.height >= 294, 'theme preview should be taller, not wider');
+    await page.getByRole('button', { name: '选择靛蓝主题', exact: true }).click();
+    await page.getByRole('button', { name: '深色', exact: true }).click();
+    assert.equal(await page.locator('html').getAttribute('data-color-theme'), 'indigo');
+    assert.equal(await page.locator('html').getAttribute('data-color-mode'), 'dark');
+    await shot('theme-dark');
+    await page.getByRole('button', { name: '浅色', exact: true }).click();
+    await shot('theme-light');
+    if (process.env.CHRONICLE_DARK) await page.getByRole('button', { name: '深色', exact: true }).click();
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('chronicle.app-settings.v2')).colorTheme), 'indigo');
+    await page.getByRole('button', { name: /继续，选择使用方式/ }).click();
+    await page.getByRole('button', { name: /暂时仅本地/ }).click();
+    await title('创建第一个存档');
+    assert.equal(await page.locator('.tutorial-shade').count(), 1, 'use a rounded visual cutout, not four square-edged dim panels');
+    await page.locator('[data-tour="create-entry"]').click();
+    await title('选择需要保护');
+    const sourceSpotlight = await page.locator('.tutorial-shade').boundingBox();
+    const sourceArea = await page.locator('[data-tour="sources"]').boundingBox();
+    assert.ok(sourceSpotlight && sourceArea && Math.abs(sourceSpotlight.height - sourceArea.height - 10) < 1, 'source step must dim the other form fields');
+    await shot('sources');
+    await page.getByRole('button', { name: '添加文件', exact: true }).click();
+    await title('选择需要保护');
+    await page.getByRole('button', { name: '添加文件', exact: true }).click();
+    await title('给存档起个名字');
+    await page.locator('[data-tour="name"] input').fill('教程测试');
+    await page.getByRole('button', { name: /名称已填好/ }).click();
+    await title('决定保存到哪里'); await shot('storage');
+    await page.getByRole('button', { name: '继续', exact: true }).click();
+    await title('两个独立的自动化开关');
+    assert.equal(await page.locator('[data-tour="automation"] input:checked').count(), 0);
+    await page.getByRole('button', { name: /我已了解/ }).click();
+    await title('保存你的第一个存档');
+    const spotlight = await page.locator('.tutorial-shade').boundingBox();
+    const submit = await page.locator('[data-tour="create-submit"]').boundingBox();
+    assert.ok(spotlight && submit && Math.abs(spotlight.width - submit.width - 10) < 1, 'creation step must dim the form and spotlight only Submit');
+    await shot('create-submit');
+    await page.locator('[data-tour="create-submit"]').click();
+    await title('每份快照'); await shot('timeline');
+    await page.getByRole('button', { name: /知道了/ }).click();
+    await title('恢复以前');
+    await page.locator('[data-tour="restore"]').first().click();
+    await title('为重要快照');
+    assert.equal(await page.locator('.timeline-table article').count(), 1, 'tutorial restore must not create safety snapshots');
+    await page.locator('[data-tour="lock"]').first().click();
+    await title('把存档同步');
+    await shot('sync-highlight');
+    await page.locator('[data-tour="sync"]').click();
+    await title('你的时间线');
+    await page.getByRole('button', { name: '开始使用 Chronicle' }).click();
+    await page.locator('.tutorial-layer').waitFor({ state: 'detached' });
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('chronicle.onboarding.local.v1')).status), 'completed');
+    await page.reload();
+    await page.locator('[data-tour="create-entry"]').waitFor();
+    assert.equal(await page.locator('.tutorial-layer').count(), 0);
+    await page.locator('.detail-archive-name').click();
+    await page.locator('.exclusion-field textarea').focus();
+    await page.locator('.tutorial-hint').filter({ hasText: '用 *.tmp' }).waitFor();
+    await page.getByRole('button', { name: '关闭使用提示' }).click();
+    await page.getByRole('button', { name: '添加注册表', exact: true }).click();
+    await page.locator('.tutorial-hint').filter({ hasText: '填写 HKCU' }).waitFor();
+    await page.getByRole('button', { name: '关闭新建存档' }).click();
+    await page.getByRole('button', { name: '添加分类', exact: true }).click();
+    await page.locator('.tutorial-hint').filter({ hasText: '分类只整理' }).waitFor();
+    await page.getByRole('button', { name: '取消', exact: true }).click();
+    await page.locator('.detail-archive-name').click();
+    await page.locator('.exclusion-field textarea').focus();
+    assert.equal(await page.locator('.tutorial-hint').count(), 0, 'tips appear only once');
+    await page.getByRole('button', { name: '关闭新建存档' }).click();
+    await page.getByRole('button', { name: '应用设置', exact: true }).click();
+    await page.getByRole('button', { name: '关于', exact: true }).click();
+    assert.equal(await page.locator('.about-card a').filter({ hasText: '查看 GitHub 仓库' }).count(), 1);
+    await shot('about');
+    await page.getByRole('button', { name: /重新开始教程/ }).click();
+    await title('让每次改变');
+    await page.getByRole('button', { name: '开始使用', exact: true }).click();
+    await title('选一个喜欢的外观');
+    await page.getByRole('button', { name: /继续，选择使用方式/ }).click();
+    await page.getByRole('button', { name: /先配置云端/ }).click();
+    await page.locator('[data-tour="cloud-entry"]').click();
+    await title('配置你的同步源'); await shot('cloud');
+    const overlap = await page.evaluate(() => {
+      const a = document.querySelector('.tutorial-card').getBoundingClientRect();
+      const b = document.querySelector('[data-tour="cloud-form"]').getBoundingClientRect();
+      return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+    });
+    assert.equal(overlap, false, 'cloud form must not be covered by the tutorial');
+    await page.getByRole('button', { name: '添加同步源', exact: true }).click();
+    await shot('cloud-fields');
+    await page.getByRole('button', { name: '关闭云端设置', exact: true }).click();
+    await page.getByRole('alertdialog').waitFor();
+    await page.locator('.tutorial-layer').waitFor({ state: 'detached' });
+    await page.getByRole('alertdialog').getByRole('button', { name: '取消', exact: true }).click();
+    await title('配置你的同步源');
+    await page.keyboard.press('Tab');
+    assert.equal(await page.evaluate(() => document.activeElement !== document.body), true);
+    await page.getByRole('button', { name: '暂时仅本地', exact: true }).click();
+    await title('创建第一个存档');
+    await page.getByRole('button', { name: '使用已有存档', exact: true }).click();
+    await title('每份快照');
+    await page.keyboard.press('Escape');
+    await page.locator('.tutorial-layer').waitFor({ state: 'detached' });
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('chronicle.onboarding.local.v1')).status), 'skipped');
+    // Cloud transport is desktop-only: mock only its result, retaining the real form/save flow.
+    await page.evaluate(() => localStorage.setItem('chronicle.onboarding.local.v1', JSON.stringify({ status: 'pending', seenTips: [] })));
+    await page.reload();
+    await title('让每次改变');
+    await page.getByRole('button', { name: '开始使用', exact: true }).click();
+    await title('选一个喜欢的外观');
+    await page.getByRole('button', { name: /继续，选择使用方式/ }).click();
+    await page.getByRole('button', { name: /先配置云端/ }).click();
+    await page.locator('[data-tour="cloud-entry"]').click();
+    await title('配置你的同步源');
+    await page.getByRole('button', { name: '添加同步源', exact: true }).click();
+    await page.getByRole('button', { name: /^展开 WebDAV/ }).click();
+    await page.getByLabel('服务器地址', { exact: true }).fill('https://example.invalid');
+    await page.getByLabel('用户名', { exact: true }).fill('tutorial-fixture');
+    await page.getByRole('button', { name: '测试连接与读写', exact: true }).click();
+    await page.getByText('云同步仅在 Chronicle 桌面端可用', { exact: true }).waitFor();
+    await page.getByRole('button', { name: '保存云端设置', exact: true }).click();
+    await title('先连接一个云端'); // Failed test and Save must not advance.
+    await page.locator('[data-tour="cloud-entry"]').click();
+    await page.getByRole('button', { name: '同步源', exact: true }).click();
+    await page.getByRole('button', { name: /^展开 WebDAV/ }).click();
+    await page.evaluate(async () => {
+      const { cloudRepository } = await import('/src/services/cloud.ts');
+      cloudRepository.test = async () => {};
+    });
+    await page.getByRole('button', { name: '测试连接与读写', exact: true }).click();
+    await page.getByText(/连接与读写测试通过/).waitFor();
+    await page.getByRole('button', { name: '保存云端设置', exact: true }).click();
+    await title('创建第一个存档'); // A tested, paused source is still configured.
+    await page.keyboard.press('Escape');
+    assert.deepEqual(errors, []);
+    console.log('Tutorial browser smoke passed. Screenshots: ' + screenshots);
+  } catch (error) {
+    console.error(error);
+    await shot('failure').catch(() => {});
+    console.error('Screenshots: ' + screenshots, await page.locator('body').innerText().catch(() => 'Browser closed'));
+    throw error;
+  } finally { await browser.close(); }
+})().catch(error => { console.error(error); process.exitCode = 1; });

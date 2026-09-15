@@ -2,9 +2,11 @@
 import { FolderPlus, X } from "@lucide/vue";
 import { onMounted, ref } from "vue";
 import { createBackdropDismissal } from "../services/dialogDismissal";
+import TutorialHint from "./TutorialHint.vue";
+import type { TutorialProgress, TutorialTip } from "../services/onboarding";
 
-const props = defineProps<{ parentName?: string; submitting?: boolean; error?: string }>();
-const emit = defineEmits<{ close: []; submit: [name: string] }>();
+const props = defineProps<{ parentName?: string; submitting?: boolean; error?: string; tutorialProgress?: TutorialProgress }>();
+const emit = defineEmits<{ close: []; submit: [name: string]; "tutorial-tip": [tip: TutorialTip] }>();
 const name = ref("");
 const attempted = ref(false);
 const input = ref<HTMLInputElement>();
@@ -27,6 +29,7 @@ onMounted(() => input.value?.focus());
         <button type="button" aria-label="关闭" title="关闭" @click="emit('close')"><X :size="18" /></button>
       </header>
       <main>
+        <TutorialHint tip="categories" :progress="tutorialProgress" @seen="emit('tutorial-tip', $event)" />
         <p v-if="parentName" class="parent-path">创建位置：{{ parentName }}</p>
         <label for="category-name">分类名称</label>
         <input id="category-name" ref="input" v-model="name" maxlength="60" autocomplete="off" :aria-invalid="attempted && !name.trim()" @input="attempted = false" />

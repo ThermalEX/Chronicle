@@ -1,6 +1,7 @@
 mod auto_backup;
 mod cloud;
 mod commands;
+mod onboarding;
 mod storage_root;
 #[cfg(test)]
 mod storage_root_tests;
@@ -39,6 +40,9 @@ pub fn run() {
                 &executable,
                 &app.path().app_local_data_dir()?,
             )?;
+            if let Err(error) = onboarding::initialize(&repository_root) {
+                eprintln!("Tutorial state initialization failed: {error}");
+            }
             let repository = LocalRepository::open(repository_root)
                 .map_err(|error| io::Error::other(error.to_string()))?;
             let repository = Arc::new(Mutex::new(repository));
@@ -103,6 +107,8 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            onboarding::load_onboarding,
+            onboarding::save_onboarding,
             commands::list_entries,
             commands::repository_info,
             commands::open_repository_folder,

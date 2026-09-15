@@ -16,7 +16,7 @@ import appIcon from "../assets/icon.png";
 import { appMetadata } from "../services/appMetadata";
 
 const props = withDefaults(defineProps<{ updateChecking?: boolean }>(), { updateChecking: false });
-const emit = defineEmits<{ close: []; saved: []; "check-update": [channel: UpdateChannel] }>();
+const emit = defineEmits<{ close: []; saved: []; "restart-tutorial": []; "check-update": [channel: UpdateChannel] }>();
 const activeSection = ref<"software" | "notifications" | "backup" | "recycle" | "hotkeys" | "about">("software");
 const closeButton = ref<HTMLButtonElement>();
 const draft = reactive<AppSettings>({ ...appSettings });
@@ -286,9 +286,9 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
 
           <section v-else aria-labelledby="about-title">
             <div class="section-heading"><h3 id="about-title">关于</h3><p>本地云端通用文件快照管理器。</p></div>
-            <div class="about-card"><img class="about-logo" :src="appIcon" alt="Chronicle 图标" /><div><h4>{{ appMetadata.name }}</h4><p>版本 {{ appMetadata.version }}</p><p>作者 {{ appMetadata.author }}</p></div></div>
+            <div class="about-card"><img class="about-logo" :src="appIcon" alt="Chronicle 图标" /><div><h4>{{ appMetadata.name }}</h4><p>版本 {{ appMetadata.version }}</p><p>作者 {{ appMetadata.author }}</p><a class="about-repository-link" href="https://github.com/ThermalEX/Chronicle" target="_blank" rel="noreferrer">查看 GitHub 仓库</a></div></div>
             <dl class="about-list"><div><dt>存储引擎</dt><dd>Rust · 7z · SHA-256</dd></div><div><dt>桌面框架</dt><dd>Tauri 2 · Vue 3</dd></div><div><dt>许可证</dt><dd>尚未指定</dd></div></dl>
-            <a href="https://github.com/ThermalEX/Chronicle" target="_blank" rel="noreferrer">查看 GitHub 仓库</a>
+            <div class="setting-row about-update-action"><span><b>新手教程</b><small>重新了解创建存档、备份与云端同步。</small></span><button @click="emit('restart-tutorial')"><RotateCcw :size="15" />重新开始教程</button></div>
             <div class="setting-group about-update-group">
               <label class="setting-row select-row"><span><b>更新频道</b><small>正式版只检查稳定发布；测试版同时接收预发布版本。</small></span><ThemedSelect :model-value="draft.updateChannel" :options="updateChannelOptions" label="更新频道" @update:model-value="updateUpdateChannel" /></label>
               <label class="setting-row"><span><b>启动时检查更新</b><small>发现新版本时显示更新说明，不会自动下载。</small></span><input v-model="draft.checkForUpdates" type="checkbox" role="switch" /></label>
@@ -347,6 +347,7 @@ main { min-width: 0; overflow-y: auto; padding: 28px 32px 36px; }
 .about-card { display: flex; align-items: center; gap: 14px; padding: 18px; background: var(--subtle); border: 1px solid var(--border); border-radius: 10px; }
 .about-logo { width: 48px; height: 48px; object-fit: cover; border-radius: 11px; }
 .about-card h4, .about-card p { margin: 0; }.about-card h4 { font-size: 16px; }.about-card p { margin-top: 4px; color: var(--text-3); font-size: 10px; }
+.about-repository-link { display: inline-block; margin-top: 8px; font-size: 11px; }
 .about-list { margin: 18px 0; }.about-list div { display: flex; justify-content: space-between; padding: 11px 2px; border-bottom: 1px solid var(--border); font-size: 11px; }.about-list dt { color: var(--text-3); }.about-list dd { margin: 0; }
 main a { color: var(--primary); font-size: 11px; font-weight: 650; text-decoration: none; }
 footer { border-top: 1px solid var(--border); }

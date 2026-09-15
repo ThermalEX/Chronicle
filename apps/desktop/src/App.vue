@@ -5,7 +5,7 @@ import {
   RefreshCw, Search, Settings2, SlidersHorizontal, UploadCloud, X,
   Star, Sun, Trash2,
 } from "@lucide/vue";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import CloudCenterDialog from "./components/CloudCenterDialog.vue";
@@ -20,6 +20,8 @@ import CreateCategoryDialog from "./components/CreateCategoryDialog.vue";
 import CreateArchiveDialog from "./components/CreateArchiveDialog.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
 import UpdateDialog from "./components/UpdateDialog.vue";
+import TutorialOverlay from "./components/TutorialOverlay.vue";
+import { advanceTutorial, createTutorialState, loadTutorialProgress, saveTutorialProgress, shouldOfferTutorial, tutorialViews, type TutorialEvent, type TutorialProgress, type TutorialState } from "./services/onboarding";
 import ThemedSelect, { type ThemedSelectOption } from "./components/ThemedSelect.vue";
 import type { ArchiveRecord, ArchiveSource, CategoryRecord, CreateArchiveInput, RepositoryInfo, SnapshotRecord, SourceKind } from "./domain";
 import { archiveRepository, isTauriRuntime } from "./services/repository";
@@ -29,7 +31,7 @@ import { diagnosticsRepository } from "./services/diagnostics";
 import { diagnosticFromError, type DiagnosticContext } from "./services/diagnosticsCore";
 import { compareArchiveNames, type ArchiveSortMode } from "./services/archiveSorting";
 import { selectArchivePanelCategory, selectCategoryPanel } from "./services/archiveWorkspace";
-import { applyAppearance, normalizeAppearance } from "./services/appearance";
+import { applyAppearance, normalizeAppearance, type Appearance } from "./services/appearance";
 import { floatingMenuStyle, positionFloatingMenu } from "./services/floatingMenu";
 import { filterTimeline, type TimelineSort } from "./services/snapshotTimeline";
 import { appSettings, cloudLibraryIndicator, cloudSettings, enabledCloudSources, initializeSettings, saveAppSettings, shortcutMatches, type CloudHealth } from "./services/settings";
@@ -114,6 +116,74 @@ const confirmRequest = ref<{ title: string; message: string; confirmLabel: strin
 const closeRequestOpen = ref(false);
 const updateChecking = ref(false);
 const availableUpdate = ref<ReleaseUpdate>();
+const tutorial = ref<TutorialState>({ step: "inactive", route: "local" });
+const tutorialProgress = ref<TutorialProgress>({ status: "legacy", seenTips: [] });
+const tutorialActive = computed(() => tutorial.value.step !== "inactive");
+const tutorialAppearanceSaving = ref(false);
+async function changeTutorialAppearance(appearance: Appearance) {
+  if (tutorialAppearanceSaving.value) return;
+  const previous = normalizeAppearance(appSettings);
+  tutorialAppearanceSaving.value = true;
+  applyAppearance(appearance);
+  try { await saveAppSettings({ ...appSettings, ...appearance }); }
+  catch (error) {
+    Object.assign(appSettings, previous);
+    applyAppearance(previous);
+    showNotice(`主题未能保存：${readableError(error)}`, "error");
+  } finally { tutorialAppearanceSaving.value = false; }
+}
+let tutorialSave = Promise.resolve();
+let startupUpdatePending = false;
+function persistTutorial(status: TutorialProgress["status"]) {
+  tutorialProgress.value = { ...tutorialProgress.value, status };
+  const progress = { ...tutorialProgress.value };
+  tutorialSave = tutorialSave.then(() => saveTutorialProgress(progress)).catch(() => {
+    showNotice("教程状态未能保存，下次启动可能再次显示。", "error");
+  });
+}
+function tutorialEvent(event: TutorialEvent) {
+  const previous = tutorial.value.step;
+  tutorial.value = advanceTutorial(tutorial.value, event);
+  if (event.type === "skip") persistTutorial("skipped");
+  else if (previous === "finish" && tutorial.value.step === "inactive") persistTutorial("completed");
+}
+function nextTutorial() {
+  if (tutorial.value.step === "name") {
+    const input = document.querySelector<HTMLInputElement>('[data-tour="name"] input');
+    if (!input?.value.trim()) { input?.focus(); showNotice("请先填写存档名称。", "info"); return; }
+    tutorialEvent({ type: "name-ready" });
+  } else tutorialEvent({ type: "next" });
+}
+function rememberTutorialTip(tip: TutorialProgress["seenTips"][number]) {
+  if (tutorialProgress.value.seenTips.includes(tip)) return;
+  tutorialProgress.value = { ...tutorialProgress.value, seenTips: [...tutorialProgress.value.seenTips, tip] };
+  persistTutorial(tutorialProgress.value.status);
+}
+function localTutorial() {
+  tutorialEvent({ type: "choose-local" });
+  cloudSettingsOpen.value = false;
+}
+function restartTutorial() {
+  settingsOpen.value = false;
+  archivePanelCollapsed.value = false;
+  snapshotSearch.value = "";
+  snapshotSort.value = "newest";
+  tutorial.value = createTutorialState();
+  persistTutorial("pending");
+}
+function useExistingTutorial() {
+  if (!selectedArchive.value) return;
+  tutorialEvent({ type: "use-existing", archiveId: selectedArchive.value.id, hasSnapshot: snapshots.value.length > 0 });
+}
+watch(cloudSettingsOpen, (open) => tutorialEvent({ type: open ? "cloud-opened" : "dialog-closed" }));
+watch(createDialogOpen, (open) => {
+  if (open && !editingArchive.value) tutorialEvent({ type: "create-opened" });
+  else if (!open && !creatingArchive.value) tutorialEvent({ type: "dialog-closed" });
+});
+watch(() => pendingSources.value.length, (count) => { if (count > 0) tutorialEvent({ type: "sources-ready" }); });
+watch(tutorialActive, (active) => {
+  if (!active && startupUpdatePending) { startupUpdatePending = false; void checkForApplicationUpdate(); }
+});
 let confirmResolver: ((confirmed: boolean) => void) | undefined;
 const notice = ref<{ type: "success" | "error" | "info"; message: string }>();
 let noticeTimer: number | undefined;
@@ -316,7 +386,11 @@ async function handleSettingsChanged() {
   showNotice("设置已保存");
 }
 
-function handleCloudSettingsChanged(): void {
+function handleCloudSettingsChanged(connectionVerified = false): void {
+  if (tutorial.value.step === "cloud-form" && connectionVerified) {
+    tutorialEvent({ type: "cloud-saved" });
+    cloudSettingsOpen.value = false;
+  }
   cloudHealth.value = { status: "unchecked" };
   cloudHealthCheckItems.value = [];
   showNotice("云端设置已保存");
@@ -427,6 +501,10 @@ async function pickSources(kind: Exclude<SourceKind, "registry">) {
 }
 
 async function createArchive(input: CreateArchiveInput) {
+  if (["sources", "name", "storage", "automation"].includes(tutorial.value.step)) {
+    showNotice("请先阅读当前提示，完成保存方式与自动化介绍后再创建。", "info");
+    return;
+  }
   creatingArchive.value = true;
   createArchiveError.value = undefined;
   try {
@@ -451,8 +529,10 @@ async function createArchive(input: CreateArchiveInput) {
     await refreshSnapshots(archive.id);
     await refreshRepositoryInfo();
     if (input.createInitialSnapshot) {
+      tutorialEvent({ type: "archive-created", archiveId: archive.id });
       await createSnapshot("初始版本");
     } else {
+      tutorialEvent({ type: "archive-created", archiveId: archive.id });
       showNotice(`已创建存档“${archive.name}”`);
     }
   } catch (error) {
@@ -543,9 +623,23 @@ function toggleTreeMenu(kind: "archive" | "category", id: string, event: MouseEv
 watch(treeMenu, (value, _, onCleanup) => {
   if (!value) return;
   const close = () => { treeMenu.value = undefined; };
+  const closeOutside = (event: PointerEvent) => {
+    const target = event.target;
+    if (!(target instanceof Element) || target.closest(".tree-menu, .tree-more")) return;
+    // The move selector renders its choices in a separate Teleport under body.
+    const popup = target.closest('[role="listbox"]');
+    const selector = document.querySelector('.tree-menu [aria-haspopup="listbox"]');
+    if (popup && selector && popup.getAttribute("aria-label") === selector.getAttribute("aria-label")) return;
+    close();
+  };
+  const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") close(); };
+  document.addEventListener("pointerdown", closeOutside, true);
+  document.addEventListener("keydown", closeOnEscape, true);
   window.addEventListener("scroll", close, true);
   window.addEventListener("resize", close);
   onCleanup(() => {
+    document.removeEventListener("pointerdown", closeOutside, true);
+    document.removeEventListener("keydown", closeOnEscape, true);
     window.removeEventListener("scroll", close, true);
     window.removeEventListener("resize", close);
   });
@@ -571,11 +665,12 @@ async function createSnapshot(title = "手动备份") {
   if (!selectedArchive.value || busyAction.value) return;
   busyAction.value = "snapshot";
   try {
-    const snapshot = await archiveRepository.createSnapshot(selectedArchive.value, title, false);
+    const snapshot = await archiveRepository.createSnapshot(toRaw(selectedArchive.value), title, false);
     await refreshArchives(selectedArchive.value.id);
     await refreshSnapshots(selectedArchive.value.id);
     await refreshRepositoryInfo();
     selectedSnapshotId.value = snapshot.id;
+    tutorialEvent({ type: "snapshot-created", archiveId: selectedArchive.value.id });
     await uploadNewSnapshot(selectedArchive.value);
     showNotice(`时间节点已创建，保存 ${snapshot.files.length} 个文件`);
   } catch (error) {
@@ -763,6 +858,7 @@ async function toggleSnapshotLock(snapshot: SnapshotRecord): Promise<void> {
   try {
     const updated = await archiveRepository.setSnapshotLocked(archive.id, snapshot.id, !snapshot.locked);
     snapshots.value = snapshots.value.map((item) => item.id === updated.id ? updated : item);
+    tutorialEvent({ type: "locked" });
     showNotice(updated.locked ? "已标记为重要快照，不会自动清理；删除前需先解锁" : "快照已解锁");
   } catch (error) { reportError(error, { operation: "更新快照锁定状态", archiveId: archive.id }); }
   finally { lockingSnapshotId.value = undefined; }
@@ -969,6 +1065,7 @@ async function dropOnCategory(categoryId: string) {
 }
 
 function handleShortcut(event: KeyboardEvent) {
+  if (tutorialActive.value && !confirmRequest.value && !closeRequestOpen.value) return;
   if (event.key === "Escape") {
     if (confirmRequest.value) {
       answerConfirmation(false);
@@ -1012,7 +1109,7 @@ onMounted(async () => {
   try {
     await initializeSettings();
     applyAppearance(appSettings);
-    if (appSettings.checkForUpdates) void checkForApplicationUpdate();
+    startupUpdatePending = appSettings.checkForUpdates;
     if (isTauriRuntime) {
       await archiveRepository.refreshAutoBackup();
       await listen<{ archiveId: string; error?: string }>("auto-backup-created", async ({ payload }) => {
@@ -1029,6 +1126,11 @@ onMounted(async () => {
     await refreshArchives();
     await refreshRepositoryInfo();
     if (appSettings.checkCloudOnLaunch && isTauriRuntime) void checkCloudSources();
+    try {
+      tutorialProgress.value = await loadTutorialProgress(archives.value.length > 0 || categoryRecords.value.length > 0);
+      if (shouldOfferTutorial(tutorialProgress.value)) tutorial.value = createTutorialState();
+    } catch { /* A damaged local tutorial marker must not block the application. */ }
+    if (!tutorialActive.value && startupUpdatePending) { startupUpdatePending = false; void checkForApplicationUpdate(); }
   }
   catch (error) { showNotice(readableError(error), "error"); }
   finally { loading.value = false; }
@@ -1045,11 +1147,11 @@ onBeforeUnmount(() => {
     <header class="titlebar">
       <div class="brand"><time :datetime="currentTime">{{ currentTime }}</time></div>
       <div class="sync-states"><button class="sync-state sync-state-button" title="打开本地资料库" @click="openRepositoryFolder"><i></i>本地资料库可用</button><button class="sync-state sync-state-button" :class="cloudStateClass" :title="cloudHealth.reason || '检测云端资料库'" @click="openCloudHealthDialog"><i :class="{ pulse: cloudHealth.status === 'checking' }"></i>{{ cloudLibrary.label }}</button><button class="sync-state sync-state-button sync-progress-button" :style="{ '--sync-progress': allSyncProgressFraction }" :disabled="syncingArchive || syncingAllArchives" title="同步所有启用云端保存的存档" @click="syncAllArchives"><span><UploadCloud :size="16" />{{ syncingAllArchives ? `正在同步 ${syncProgressText}` : '同步所有存档' }}</span></button></div>
-      <div class="toolbar"><button class="toolbar-action mode-toggle" :class="{ 'is-dark': appSettings.colorMode === 'dark' }" :aria-label="appSettings.colorMode === 'dark' ? '切换到日间模式' : '切换到夜间模式'" :title="appSettings.colorMode === 'dark' ? '切换到日间模式' : '切换到夜间模式'" :aria-pressed="appSettings.colorMode === 'dark'" @click="toggleColorMode"><Sun v-if="appSettings.colorMode === 'dark'" :size="17" /><Moon v-else :size="17" /></button><button class="toolbar-action" aria-label="云端设置" title="云端设置" @click="cloudSettingsOpen = true"><CloudCog :size="17" /></button><button class="toolbar-action" aria-label="应用设置" title="应用设置" @click="settingsOpen = true"><Settings2 :size="17" /></button></div>
+      <div class="toolbar"><button class="toolbar-action mode-toggle" :class="{ 'is-dark': appSettings.colorMode === 'dark' }" :aria-label="appSettings.colorMode === 'dark' ? '切换到日间模式' : '切换到夜间模式'" :title="appSettings.colorMode === 'dark' ? '切换到日间模式' : '切换到夜间模式'" :aria-pressed="appSettings.colorMode === 'dark'" @click="toggleColorMode"><Sun v-if="appSettings.colorMode === 'dark'" :size="17" /><Moon v-else :size="17" /></button><button class="toolbar-action" data-tour="cloud-entry" aria-label="云端设置" title="云端设置" @click="cloudSettingsOpen = true"><CloudCog :size="17" /></button><button class="toolbar-action" aria-label="应用设置" title="应用设置" @click="settingsOpen = true"><Settings2 :size="17" /></button></div>
     </header>
 
     <aside class="sidebar">
-      <div class="add-control"><button class="add-button" @click="openCreateArchive"><Plus :size="18" />添加存档</button></div>
+      <div class="add-control"><button data-tour="create-entry" class="add-button" @click="openCreateArchive"><Plus :size="18" />添加存档</button></div>
       <nav aria-label="存档分类">
         <div class="nav-heading"><p class="label">资料库</p><span><button :disabled="refreshingLibrary" aria-label="刷新资料库" title="刷新资料库" @click="refreshLibrary"><RefreshCw :size="15" /></button><button aria-label="添加分类" title="添加分类" @click="openCategoryDialog"><Plus :size="15" /></button></span></div>
         <template v-for="node in categoryTreeNodes" :key="`${node.nodeType}:${node.id}`">
@@ -1100,7 +1202,7 @@ onBeforeUnmount(() => {
       <section v-if="selectedArchive" class="detail-panel" aria-labelledby="detail-title">
         <header class="detail-header">
           <div class="identity"><span class="detail-icon"><Folder v-if="selectedArchive.kind === 'folder'" /><File v-else-if="selectedArchive.kind === 'file'" /><FolderArchive v-else /></span><div class="title-line"><h2 id="detail-title"><button class="detail-archive-name" :title="`编辑存档 ${selectedArchive.name}`" @click="openEditArchive">{{ selectedArchive.name }}</button></h2><span class="automation-badges"><button class="automation-badge" :class="{ active: selectedArchive.autoBackupEnabled }" :title="`编辑 ${selectedArchive.name} 的自动备份设置`" @click="openEditArchive">自动备份</button><button class="automation-badge" :class="{ active: selectedArchive.automaticUploadEnabled }" :title="`编辑 ${selectedArchive.name} 的自动上传设置`" @click="openEditArchive">自动上传</button></span></div></div>
-          <div class="actions"><button class="secondary sync-progress-button" :style="{ '--sync-progress': currentSyncProgressFraction }" :disabled="syncingArchive || syncingAllArchives" @click="syncSelectedArchive"><span><UploadCloud :size="17" />{{ syncingArchive ? `同步中 ${syncProgressText}` : '同步' }}</span></button><div class="more-control"><button class="icon-button" aria-label="更多操作" title="更多操作" :aria-expanded="archiveMenuOpen" @click="archiveMenuOpen = !archiveMenuOpen"><MoreHorizontal :size="19" /></button><div v-if="archiveMenuOpen" class="archive-actions-menu"><button @click="openSelectedArchiveSources"><FolderOpen :size="15" />打开来源</button><button @click="openSelectedArchiveStorage"><HardDrive :size="15" />打开资料库</button><button @click="openEditArchive"><Pencil :size="15" />编辑存档</button><button class="danger" @click="selectedArchive && deleteArchive(selectedArchive)"><Trash2 :size="15" />删除存档</button></div></div></div>
+          <div class="actions"><button data-tour="sync" class="secondary sync-progress-button" :style="{ '--sync-progress': currentSyncProgressFraction }" :disabled="syncingArchive || syncingAllArchives" @click="syncSelectedArchive"><span><UploadCloud :size="17" />{{ syncingArchive ? `同步中 ${syncProgressText}` : '同步' }}</span></button><div class="more-control"><button class="icon-button" aria-label="更多操作" title="更多操作" :aria-expanded="archiveMenuOpen" @click="archiveMenuOpen = !archiveMenuOpen"><MoreHorizontal :size="19" /></button><div v-if="archiveMenuOpen" class="archive-actions-menu"><button @click="openSelectedArchiveSources"><FolderOpen :size="15" />打开来源</button><button @click="openSelectedArchiveStorage"><HardDrive :size="15" />打开资料库</button><button @click="openEditArchive"><Pencil :size="15" />编辑存档</button><button class="danger" @click="selectedArchive && deleteArchive(selectedArchive)"><Trash2 :size="15" />删除存档</button></div></div></div>
         </header>
 
         <ArchiveMetadata :archive="selectedArchive" :saving-tags="savingTags" @add-tag="addArchiveTag" @remove-tag="removeArchiveTag" />
@@ -1108,9 +1210,9 @@ onBeforeUnmount(() => {
         <div class="detail-content">
           <section class="timeline-area">
             <div class="section-title"><div><p class="label">版本历史</p><h3>时间节点</h3></div></div>
-            <div class="snapshot-create"><input v-model="snapshotDescription" maxlength="160" placeholder="输入新存档描述信息（可留空）" @keydown.enter.prevent="createSnapshotFromDetail" /><button class="accent" :disabled="busyAction !== undefined" @click="createSnapshotFromDetail"><Plus :size="16" />{{ busyAction === 'snapshot' ? '创建中' : '创建新快照' }}</button></div>
+            <div class="snapshot-create"><input v-model="snapshotDescription" maxlength="160" placeholder="输入新存档描述信息（可留空）" @keydown.enter.prevent="createSnapshotFromDetail" /><button data-tour="snapshot" class="accent" :disabled="busyAction !== undefined" @click="createSnapshotFromDetail"><Plus :size="16" />{{ busyAction === 'snapshot' ? '创建中' : '创建新快照' }}</button></div>
             <div class="timeline-toolbar"><label><Search :size="15" /><input v-model="snapshotSearch" type="search" placeholder="搜索快照描述" /></label><ThemedSelect :model-value="snapshotSort" :options="timelineSortOptions" label="时间线排序" @update:model-value="updateTimelineSort" /></div>
-            <div v-if="visibleSnapshots.length" class="timeline-table"><div class="timeline-table-head"><span>备份时间</span><span>描述</span><span>位置 / 大小</span><span>操作</span></div><article v-for="snapshot in visibleSnapshots" :key="snapshot.id" :class="{ selected: selectedSnapshotId === snapshot.id }" tabindex="0" @click="selectedSnapshotId = snapshot.id" @keydown.enter="selectedSnapshotId = snapshot.id"><time>{{ formatTime(snapshot.createdAt) }}</time><span><b>{{ snapshot.title }}</b><small>{{ snapshot.note || snapshotDetail(snapshot) }}</small></span><span>本机 · {{ formatBytes(snapshot.totalBytes) }}</span><div class="timeline-actions"><button class="snapshot-star" :class="{ locked: snapshot.locked }" :disabled="Boolean(lockingSnapshotId) || busyAction !== undefined" :aria-label="snapshot.locked ? '解锁重要快照' : '标记为重要快照'" :title="snapshot.locked ? '重要快照：不会自动清理，点击解锁' : '标记为重要快照，防止自动清理'" :aria-pressed="Boolean(snapshot.locked)" @click.stop="toggleSnapshotLock(snapshot)"><Star :size="16" :fill="snapshot.locked ? 'currentColor' : 'none'" /></button><button class="info" :class="{ active: activityPanelOpen && selectedSnapshotId === snapshot.id }" :aria-label="`查看 ${formatTime(snapshot.createdAt)} 的时间节点详情`" :title="`查看 ${formatTime(snapshot.createdAt)} 的时间节点详情`" :aria-pressed="activityPanelOpen && selectedSnapshotId === snapshot.id" @click.stop="selectedSnapshotId = snapshot.id; activityPanelOpen = true"><Info :size="16" /></button><button :disabled="busyAction !== undefined" :aria-label="`恢复 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="`恢复 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="selectedSnapshotId = snapshot.id; restoreSnapshot()"><RotateCcw :size="16" /><span>恢复</span></button><button :disabled="syncingArchive || syncingAllArchives" :aria-label="`同步 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="`同步 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="selectedSnapshotId = snapshot.id; syncSelectedArchive()"><UploadCloud :size="16" /><span>同步</span></button><button class="danger" :disabled="busyAction !== undefined || snapshot.locked || Boolean(lockingSnapshotId)" :aria-label="`删除 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="snapshot.locked ? '请先解锁重要快照再删除' : `删除 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="deleteSnapshot(snapshot)"><Trash2 :size="16" /></button></div></article></div>
+            <div v-if="visibleSnapshots.length" data-tour="timeline" class="timeline-table"><div class="timeline-table-head"><span>备份时间</span><span>描述</span><span>位置 / 大小</span><span>操作</span></div><article v-for="snapshot in visibleSnapshots" :key="snapshot.id" :class="{ selected: selectedSnapshotId === snapshot.id }" tabindex="0" @click="selectedSnapshotId = snapshot.id" @keydown.enter="selectedSnapshotId = snapshot.id"><time>{{ formatTime(snapshot.createdAt) }}</time><span><b>{{ snapshot.title }}</b><small>{{ snapshot.note || snapshotDetail(snapshot) }}</small></span><span>本机 · {{ formatBytes(snapshot.totalBytes) }}</span><div class="timeline-actions"><button data-tour="lock" class="snapshot-star" :class="{ locked: snapshot.locked }" :disabled="Boolean(lockingSnapshotId) || busyAction !== undefined" :aria-label="snapshot.locked ? '解锁重要快照' : '标记为重要快照'" :title="snapshot.locked ? '重要快照：不会自动清理，点击解锁' : '标记为重要快照，防止自动清理'" :aria-pressed="Boolean(snapshot.locked)" @click.stop="toggleSnapshotLock(snapshot)"><Star :size="16" :fill="snapshot.locked ? 'currentColor' : 'none'" /></button><button class="info" :class="{ active: activityPanelOpen && selectedSnapshotId === snapshot.id }" :aria-label="`查看 ${formatTime(snapshot.createdAt)} 的时间节点详情`" :title="`查看 ${formatTime(snapshot.createdAt)} 的时间节点详情`" :aria-pressed="activityPanelOpen && selectedSnapshotId === snapshot.id" @click.stop="selectedSnapshotId = snapshot.id; activityPanelOpen = true"><Info :size="16" /></button><button data-tour="restore" :disabled="busyAction !== undefined" :aria-label="`恢复 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="`恢复 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="selectedSnapshotId = snapshot.id; restoreSnapshot()"><RotateCcw :size="16" /><span>恢复</span></button><button :disabled="syncingArchive || syncingAllArchives" :aria-label="`同步 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="`同步 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="selectedSnapshotId = snapshot.id; syncSelectedArchive()"><UploadCloud :size="16" /><span>同步</span></button><button class="danger" :disabled="busyAction !== undefined || snapshot.locked || Boolean(lockingSnapshotId)" :aria-label="`删除 ${formatTime(snapshot.createdAt)} 的时间节点`" :title="snapshot.locked ? '请先解锁重要快照再删除' : `删除 ${formatTime(snapshot.createdAt)} 的时间节点`" @click.stop="deleteSnapshot(snapshot)"><Trash2 :size="16" /></button></div></article></div>
             <div v-else class="timeline-empty"><Clock3 :size="25" /><b>还没有时间节点</b><p>创建首个备份后，可以从这里查看和恢复历史版本。</p><button :disabled="busyAction !== undefined" @click="createSnapshot('初始版本')">创建首个备份</button></div>
           </section>
 
@@ -1132,11 +1234,11 @@ onBeforeUnmount(() => {
     </main>
 
     <AppToast v-if="notice" :message="notice.message" :type="notice.type" @close="notice = undefined" />
-    <SettingsDialog v-if="settingsOpen" :update-checking="updateChecking" @close="settingsOpen = false" @saved="handleSettingsChanged" @check-update="checkForApplicationUpdate(true, $event)" />
-    <UpdateDialog v-if="availableUpdate" :update="availableUpdate" @close="availableUpdate = undefined" />
+    <SettingsDialog v-if="settingsOpen" @restart-tutorial="restartTutorial" :update-checking="updateChecking" @close="settingsOpen = false" @saved="handleSettingsChanged" @check-update="checkForApplicationUpdate(true, $event)" />
+    <UpdateDialog v-if="availableUpdate && !tutorialActive" :update="availableUpdate" @close="availableUpdate = undefined" />
     <CloudCenterDialog v-if="cloudSettingsOpen" @close="cloudSettingsOpen = false" @saved="handleCloudSettingsChanged" @downloaded="handleCloudDownload" @settings-downloaded="handleCloudSettingsDownload" />
     <CloudHealthDialog v-if="cloudHealthDialogOpen" :items="cloudHealthCheckItems" :running="cloudHealthCheckRunning" @close="cloudHealthDialogOpen = false" />
-    <CreateCategoryDialog
+    <CreateCategoryDialog :tutorial-progress="tutorialProgress" @tutorial-tip="rememberTutorialTip"
       v-if="categoryDialogOpen"
       :parent-name="categoryRecords.find((category) => category.id === selectedCategoryId)?.name"
       :submitting="creatingCategory"
@@ -1144,7 +1246,8 @@ onBeforeUnmount(() => {
       @close="categoryDialogOpen = false"
       @submit="createCategory"
     />
-    <CreateArchiveDialog
+    <TutorialOverlay v-if="tutorialActive && !confirmRequest && !closeRequestOpen"  :appearance-page="tutorial.step === 'appearance'" :appearance="normalizeAppearance(appSettings)" :appearance-saving="tutorialAppearanceSaving" @appearance-change="changeTutorialAppearance" :welcome="tutorial.step === 'welcome'" :route="tutorial.step === 'route'" :finish="tutorial.step === 'finish'" :step="tutorialViews[tutorial.step]" :has-archive="Boolean(selectedArchive)" @start="tutorialEvent({ type: 'start' })" @skip="tutorialEvent({ type: 'skip' })" @local="localTutorial" @cloud="tutorialEvent({ type: 'choose-cloud' })" @next="nextTutorial" @use-existing="useExistingTutorial" />
+    <CreateArchiveDialog :tutorial-progress="tutorialProgress" @tutorial-tip="rememberTutorialTip"
       v-if="createDialogOpen"
       :sources="pendingSources"
       :default-initial-snapshot="appSettings.createInitialSnapshot"

@@ -14,12 +14,16 @@ import { initialExpandedSourceIds, toggleExpandedSource } from "../services/sour
 import { newCloudSource, toggleSourceSync } from "../services/cloudSourceControls";
 import AppToast from "./AppToast.vue";
 
-const emit = defineEmits<{ close: []; saved: []; downloaded: []; settingsDownloaded: [] }>();
+const emit = defineEmits<{ close: []; saved: [connectionVerified: boolean]; downloaded: []; settingsDownloaded: [] }>();
 const tab = ref<"repository" | "sources">("repository");
 const draft = reactive<CloudSettings>({ ...cloudSettings, sources: cloudSettings.sources.map((source) => ({ ...source, ...(source.config ? { config: { ...source.config } } : {}), ...(source.secretKeys ? { secretKeys: [...source.secretKeys] } : {}) })) });
 const passwords = reactive<Record<string, string>>({});
 const secrets = reactive<Record<string, Record<string, string>>>(Object.fromEntries(draft.sources.map((source) => [source.id, {}])));
 const tested = reactive<Record<string, string | null>>({});
+const tutorialTests = new Map<string, string>();
+function tutorialTestKey(source: CloudSource): string {
+  return JSON.stringify([currentTestKey(source), passwords[source.id] ?? ""]);
+}
 const savedCredentials = reactive<Record<string, boolean>>({});
 const original = new Map(draft.sources.map((source) => [source.id, sourceTestKey(source, {})]));
 function currentTestKey(source: CloudSource): string { return sourceTestKey(source, secretPatch(secrets[source.id] ?? {})); }
@@ -106,15 +110,17 @@ async function persist(): Promise<void> {
     ? Boolean(tested[source.id]) || currentTestKey(source) !== original.get(source.id) : Boolean(passwords[source.id]))
     .map((source) => ({ source, password: passwords[source.id], secrets: secretPatch(secrets[source.id] ?? {}) }));
   await saveCloudConfiguration({ ...draft, sources: draft.sources.map((source) => ({ ...source })) }, credentials);
+  const verifiedSources = new Set(draft.sources.filter((source) => tutorialTests.get(source.id) === tutorialTestKey(source)).map((source) => source.id));
   for (const source of draft.sources) {
     secrets[source.id] = {};
     passwords[source.id] = "";
     original.set(source.id, sourceTestKey(source, {}));
     delete tested[source.id];
+    if (verifiedSources.has(source.id)) tutorialTests.set(source.id, tutorialTestKey(source));
   }
   await loadSourceStatuses();
   savedFingerprint = JSON.stringify(draft);
-  emit("saved");
+  emit("saved", verifiedSources.size > 0);
 }
 
 async function loadSourceStatuses(): Promise<void> {
@@ -137,14 +143,17 @@ async function loadPreview(): Promise<void> {
 async function testSource(source: CloudSource): Promise<void> {
   busy.value = `test:${source.id}`;
   tested[source.id] = null;
+  tutorialTests.delete(source.id);
   try {
     if (source.provider === "opendal") {
       const problem = validateOpenDal(source);
       if (problem) throw new Error(problem);
     }
     const key = currentTestKey(source);
+    const tutorialKey = tutorialTestKey(source);
     await cloudRepository.test(source, source.provider === "opendal" ? JSON.stringify(secretPatch(secrets[source.id] ?? {})) : passwords[source.id] ?? "");
     tested[source.id] = key;
+    tutorialTests.set(source.id, tutorialKey);
     showToast("success", source.provider === "opendal" ? `“${source.name}”读写、列举和临时清理测试通过` : `“${source.name}”连接与读写测试通过`);
   }
   catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
@@ -308,7 +317,7 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer));
 
 <template>
   <div class="dialog-backdrop" @pointerdown="backdrop.pointerDown" @pointerup="backdrop.pointerUp" @pointercancel="backdrop.pointerCancel">
-    <section class="cloud-center" role="dialog" aria-modal="true" aria-labelledby="cloud-title">
+    <section data-tour="cloud-form" class="cloud-center" role="dialog" aria-modal="true" aria-labelledby="cloud-title">
       <header><div class="heading-icon"><CloudCog :size="21" /></div><div><p>同步服务</p><h2 id="cloud-title">云端设置</h2></div><button ref="closeButton" aria-label="关闭云端设置" title="关闭云端设置" @click="requestClose"><X :size="18" /></button></header>
       <nav aria-label="云端设置页面"><button :class="{ active: tab === 'repository' }" @click="tab = 'repository'; repositorySource && loadPreview()">云端仓库</button><button :class="{ active: tab === 'sources' }" @click="tab = 'sources'">同步源</button></nav>
       <main>
