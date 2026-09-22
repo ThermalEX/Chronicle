@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../services/i18n";
 import { CheckCircle2, CircleAlert, CloudCog, LoaderCircle, X } from "@lucide/vue";
 import { computed, onMounted, ref } from "vue";
 import type { CloudHealthCheckItem } from "../services/cloudHealthCheck";
@@ -15,10 +16,10 @@ onMounted(() => closeButton.value?.focus());
 <template>
   <div class="health-backdrop" @click.self="emit('close')">
     <section class="health-dialog" role="dialog" aria-modal="true" aria-labelledby="health-title">
-      <header><span class="health-icon"><CloudCog :size="20" /></span><div><p>云端资料库</p><h2 id="health-title">连接检测</h2></div><button ref="closeButton" aria-label="关闭云端检测" title="关闭云端检测" @click="emit('close')"><X :size="18" /></button></header>
-      <div class="health-progress"><div><span>{{ running ? '正在并发检测' : '检测完成' }}</span><b>{{ completed }} / {{ total }}</b></div><progress :value="completed" :max="total || 1">{{ percent }}%</progress></div>
-      <div v-if="items.length" class="health-list"><article v-for="item in items" :key="item.id" :class="item.status"><span class="health-state"><LoaderCircle v-if="item.status === 'checking'" class="health-spinner" :size="17" /><CheckCircle2 v-else-if="item.status === 'passed'" :size="17" /><CircleAlert v-else :size="17" /></span><span class="health-copy"><b>{{ item.name }}</b><small v-if="item.status === 'checking'">正在检测读写、列举与清理能力…</small><small v-else-if="item.status === 'passed'">连接与访问正常</small><small v-else>{{ item.reason || '无法连接或权限不足' }}</small></span></article></div><p v-else class="health-empty">尚未配置可检测的云端同步源。</p>
-      <footer><button @click="emit('close')">{{ running ? '后台继续检测' : '关闭' }}</button></footer>
+      <header><span class="health-icon"><CloudCog :size="20" /></span><div><p>{{ t('云端资料库') }}</p><h2 id="health-title">{{ t('连接检测') }}</h2></div><button ref="closeButton" :aria-label="t('关闭云端检测')" :title="t('关闭云端检测')" @click="emit('close')"><X :size="18" /></button></header>
+      <div class="health-progress"><div><span>{{ running ? t('正在并发检测') : t('检测完成') }}</span><b>{{ completed }} / {{ total }}</b></div><progress :value="completed" :max="total || 1">{{ percent }}%</progress></div>
+      <div v-if="items.length" class="health-list"><article v-for="item in items" :key="item.id" :class="item.status"><span class="health-state"><LoaderCircle v-if="item.status === 'checking'" class="health-spinner" :size="17" /><CheckCircle2 v-else-if="item.status === 'passed'" :size="17" /><CircleAlert v-else :size="17" /></span><span class="health-copy"><b>{{ item.name }}</b><small v-if="item.status === 'checking'">{{ t('正在检测读写、列举与清理能力…') }}</small><small v-else-if="item.status === 'passed'">{{ t('连接与访问正常') }}</small><small v-else>{{ item.reason || t('无法连接或权限不足') }}</small></span></article></div><p v-else class="health-empty">{{ t('尚未配置可检测的云端同步源。') }}</p>
+      <footer><button @click="emit('close')">{{ running ? t('后台继续检测') : t('关闭') }}</button></footer>
     </section>
   </div>
 </template>

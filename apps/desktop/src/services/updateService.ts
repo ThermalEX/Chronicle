@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { UpdateChannel } from "./settings";
 
@@ -189,7 +190,7 @@ export function selectUpdate(
   return {
     version: newest.tag_name.replace(/^v/, ""),
     title: newest.name || `Chronicle ${newest.tag_name}`,
-    notes: newest.body || "此版本未提供更新说明。",
+    notes: newest.body || t("此版本未提供更新说明。"),
     releaseUrl: newest.html_url,
     downloadUrl: installer?.browser_download_url ?? newest.html_url,
     publishedAt: newest.published_at,
@@ -207,7 +208,7 @@ export async function checkForUpdate(
     ? await invoke<string>("fetch_release_feed")
     : await (async () => {
       const response = await request(RELEASE_FEED_URL, { headers: { Accept: "application/atom+xml" } });
-      if (!response.ok) throw new Error(`更新检查失败（HTTP ${response.status}）`);
+      if (!response.ok) throw new Error(t("更新检查失败（HTTP {status}）", { status: response.status }));
       return response.text();
     })();
   return selectUpdate(releasesFromAtom(feed), currentVersion, channel);

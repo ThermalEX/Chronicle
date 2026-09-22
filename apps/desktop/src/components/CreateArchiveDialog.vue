@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../services/i18n";
 import { Database, File, Folder, HardDrive, Plus, Trash2, UploadCloud, X } from "@lucide/vue";
 import { onMounted, ref, watch } from "vue";
 import type { ArchiveSource, CreateArchiveInput, SourceKind, StoragePolicy } from "../domain";
@@ -78,59 +79,59 @@ onMounted(() => nameInput.value?.focus());
   <div class="dialog-backdrop" @pointerdown="backdrop.pointerDown" @pointerup="backdrop.pointerUp" @pointercancel="backdrop.pointerCancel">
     <form class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-title" @submit.prevent="submit">
       <header>
-        <div><p>{{ editName ? '编辑存档' : '新建存档' }}</p><h2 id="create-title">{{ editName ? '修改存档设置' : '添加到 Chronicle' }}</h2></div>
-        <button type="button" aria-label="关闭新建存档" title="关闭新建存档" @click="emit('close')"><X :size="18" /></button>
+        <div><p>{{ editName ? t('编辑存档') : t('新建存档') }}</p><h2 id="create-title">{{ editName ? t('修改存档设置') : t('添加到 Chronicle') }}</h2></div>
+        <button type="button" :aria-label="t('关闭新建存档')" :title="t('关闭新建存档')" @click="emit('close')"><X :size="18" /></button>
       </header>
 
       <main>
         <label class="field" data-tour="name">
-          <span>存档名称</span>
-          <input ref="nameInput" v-model="name" type="text" maxlength="100" placeholder="用于同步、查询和显示" :aria-invalid="attempted && !name.trim()" />
-          <small v-if="attempted && !name.trim()" class="field-error">请输入存档名称</small>
+          <span>{{ t('存档名称') }}</span>
+          <input ref="nameInput" v-model="name" type="text" maxlength="100" :placeholder="t('用于同步、查询和显示')" :aria-invalid="attempted && !name.trim()" />
+          <small v-if="attempted && !name.trim()" class="field-error">{{ t('请输入存档名称') }}</small>
         </label>
 
         <fieldset data-tour="sources" :class="{ 'source-location-required': highlightSources }">
-          <legend>存档内容</legend>
-          <p>{{ highlightSources ? '请重新选择该存档在本机的来源。' : '一个存档可以包含多个文件、文件夹和注册表子键。' }}</p>
+          <legend>{{ t('存档内容') }}</legend>
+          <p>{{ highlightSources ? t('请重新选择该存档在本机的来源。') : t('一个存档可以包含多个文件、文件夹和注册表子键。') }}</p>
           <div class="source-actions">
-            <button type="button" :disabled="Boolean(picking) || submitting" @click="emit('pick', 'file')"><File :size="16" />{{ picking === 'file' ? '选择中' : '添加文件' }}</button>
-            <button type="button" :disabled="Boolean(picking) || submitting" @click="emit('pick', 'folder')"><Folder :size="16" />{{ picking === 'folder' ? '选择中' : '添加文件夹' }}</button>
-            <button type="button" :disabled="submitting" :aria-expanded="registryInputOpen" @click="registryInputOpen = !registryInputOpen"><Database :size="16" />添加注册表</button>
+            <button type="button" :disabled="Boolean(picking) || submitting" @click="emit('pick', 'file')"><File :size="16" />{{ picking === 'file' ? t('选择中') : t('添加文件') }}</button>
+            <button type="button" :disabled="Boolean(picking) || submitting" @click="emit('pick', 'folder')"><Folder :size="16" />{{ picking === 'folder' ? t('选择中') : t('添加文件夹') }}</button>
+            <button type="button" :disabled="submitting" :aria-expanded="registryInputOpen" @click="registryInputOpen = !registryInputOpen"><Database :size="16" />{{ t('添加注册表') }}</button>
           </div>
           <div v-if="registryInputOpen" class="registry-input field">
             <TutorialHint tip="registry" :progress="tutorialProgress" @seen="emit('tutorial-tip', $event)" />
-            <label for="registry-path">注册表子键路径</label>
+            <label for="registry-path">{{ t('注册表子键路径') }}</label>
             <input id="registry-path" v-model="registryPath" placeholder="HKCU\Software\Example" :aria-invalid="Boolean(registryError)" aria-describedby="registry-help" @keydown.enter.prevent="addRegistry" />
-            <small id="registry-help">路径不包含“计算机”。仅 Windows 桌面版。支持手动备份和云端同步，不监听注册表变化。</small>
+            <small id="registry-help">{{ t('路径不包含“计算机”。仅 Windows 桌面版。支持手动备份和云端同步，不监听注册表变化。') }}</small>
             <small v-if="registryError" class="field-error" role="alert">{{ registryError }}</small>
-            <button type="button" :disabled="submitting || !registryPath.trim()" @click="addRegistry">添加子键</button>
+            <button type="button" :disabled="submitting || !registryPath.trim()" @click="addRegistry">{{ t('添加子键') }}</button>
           </div>
           <div v-if="sources.length" class="source-list">
             <div v-for="source in sources" :key="source.id">
               <span class="source-icon"><Folder v-if="source.kind === 'folder'" :size="17" /><Database v-else-if="source.kind === 'registry'" :size="17" /><File v-else :size="17" /></span>
               <span><b>{{ source.name }}</b><small :title="source.path">{{ source.path }}</small></span>
-              <button type="button" :aria-label="`移除 ${source.name}`" :title="`移除 ${source.name}`" :disabled="submitting" @click="emit('remove', source.id)"><Trash2 :size="15" /></button>
+              <button type="button" :aria-label="t('移除 {name}', { name: source.name })" :title="t('移除 {name}', { name: source.name })" :disabled="submitting" @click="emit('remove', source.id)"><Trash2 :size="15" /></button>
             </div>
           </div>
-          <small v-else-if="attempted" class="field-error">请至少添加一个来源</small>
+          <small v-else-if="attempted" class="field-error">{{ t('请至少添加一个来源') }}</small>
         </fieldset>
 
         <TutorialHint v-if="exclusionTipOpen" tip="exclusions" :progress="tutorialProgress" @seen="emit('tutorial-tip', $event)" />
-        <label class="field exclusion-field" @focusin="exclusionTipOpen = true"><span>排除规则（每行一条）</span><textarea v-model="excludePatterns" rows="3" placeholder="*.tmp&#10;cache/" aria-describedby="exclusion-help"></textarea><small id="exclusion-help">相对于每个文件来源的根目录；*.tmp 排除临时文件，cache/ 排除同名目录及其内容。仅影响后续快照和自动备份触发；恢复时保留排除的现有文件。注册表不应用这些规则。</small></label>
+        <label class="field exclusion-field" @focusin="exclusionTipOpen = true"><span>{{ t('排除规则（每行一条）') }}</span><textarea v-model="excludePatterns" rows="3" placeholder="*.tmp&#10;cache/" aria-describedby="exclusion-help"></textarea><small id="exclusion-help">{{ t('相对于每个文件来源的根目录；*.tmp 排除临时文件，cache/ 排除同名目录及其内容。仅影响后续快照和自动备份触发；恢复时保留排除的现有文件。注册表不应用这些规则。') }}</small></label>
 
-        <div class="field" data-tour="storage"><span>保存方式</span><div class="storage-options">
-            <label :class="{ selected: storagePolicy === 'local' }"><input v-model="storagePolicy" type="radio" value="local" /><HardDrive :size="16" /><span><b>仅本地</b><small>保存在本机 Chronicle 仓库</small></span></label>
-            <label :class="{ selected: storagePolicy === 'local_and_remote' }"><input v-model="storagePolicy" type="radio" value="local_and_remote" /><UploadCloud :size="16" /><span><b>本地与云端</b><small>云端接入后自动加入同步</small></span></label>
+        <div class="field" data-tour="storage"><span>{{ t('保存方式') }}</span><div class="storage-options">
+            <label :class="{ selected: storagePolicy === 'local' }"><input v-model="storagePolicy" type="radio" value="local" /><HardDrive :size="16" /><span><b>{{ t('仅本地') }}</b><small>{{ t('保存在本机 Chronicle 仓库') }}</small></span></label>
+            <label :class="{ selected: storagePolicy === 'local_and_remote' }"><input v-model="storagePolicy" type="radio" value="local_and_remote" /><UploadCloud :size="16" /><span><b>{{ t('本地与云端') }}</b><small>{{ t('云端接入后自动加入同步') }}</small></span></label>
           </div></div>
 
-        <div data-tour="automation"><label class="initial-toggle"><span><b>自动备份</b><small>仅监听文件和文件夹；合并时间内的变化保存为一份最新快照。注册表变化不会触发备份。</small></span><input v-model="autoBackupEnabled" type="checkbox" role="switch" /></label>
-        <label class="initial-toggle"><span><b>自动上传</b><small>该存档生成新快照后自动上传到启用的云端同步源；仅“本地与云端”存档可上传。</small></span><input v-model="automaticUploadEnabled" type="checkbox" role="switch" /></label></div>
+        <div data-tour="automation"><label class="initial-toggle"><span><b>{{ t('自动备份') }}</b><small>{{ t('仅监听文件和文件夹；合并时间内的变化保存为一份最新快照。注册表变化不会触发备份。') }}</small></span><input v-model="autoBackupEnabled" type="checkbox" role="switch" /></label>
+        <label class="initial-toggle"><span><b>{{ t('自动上传') }}</b><small>{{ t('该存档生成新快照后自动上传到启用的云端同步源；仅“本地与云端”存档可上传。') }}</small></span><input v-model="automaticUploadEnabled" type="checkbox" role="switch" /></label></div>
 
-        <label v-if="!editName" class="initial-toggle"><span><b>创建后立即备份</b><small>生成第一个可恢复的 7z 时间节点</small></span><input v-model="createInitialSnapshot" type="checkbox" role="switch" /></label>
+        <label v-if="!editName" class="initial-toggle"><span><b>{{ t('创建后立即备份') }}</b><small>{{ t('生成第一个可恢复的 7z 时间节点') }}</small></span><input v-model="createInitialSnapshot" type="checkbox" role="switch" /></label>
         <p v-if="error" class="submit-error" role="alert">{{ error }}</p>
       </main>
 
-      <footer><span>{{ sources.length }} 个来源</span><div><button type="button" class="cancel" :disabled="submitting" @click="emit('close')">取消</button><button data-tour="create-submit" class="submit" type="submit" :disabled="submitting"><Plus :size="16" />{{ submitting ? (editName ? '正在保存' : '正在创建') : (editName ? '保存修改' : '创建存档') }}</button></div></footer>
+      <footer><span>{{ t('{count} 个来源', { count: sources.length }) }}</span><div><button type="button" class="cancel" :disabled="submitting" @click="emit('close')">{{ t('取消') }}</button><button data-tour="create-submit" class="submit" type="submit" :disabled="submitting"><Plus :size="16" />{{ submitting ? (editName ? t('正在保存') : t('正在创建')) : (editName ? t('保存修改') : t('创建存档')) }}</button></div></footer>
     </form>
   </div>
 </template>

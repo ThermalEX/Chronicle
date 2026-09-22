@@ -1,35 +1,37 @@
 <script setup lang="ts">
+import { computed } from "vue";
+import { t } from "../services/i18n";
 import { Check, Folder, Moon, Plus, Sun } from "@lucide/vue";
 import type { Appearance, ColorTheme } from "../services/appearance";
 const props = defineProps<{ appearance: Appearance; saving?: boolean }>();
 const emit = defineEmits<{ change: [appearance: Appearance] }>();
-const themes: { value: ColorTheme; label: string; color: string }[] = [
-  { value: "teal", label: "青绿", color: "#397f78" },
-  { value: "indigo", label: "靛蓝", color: "#6270a8" },
-  { value: "violet", label: "紫罗兰", color: "#866da4" },
-  { value: "amber", label: "琥珀", color: "#966634" },
-  { value: "rose", label: "玫红", color: "#ad5d6e" },
-  { value: "gray", label: "灰色", color: "#64748b" },
-];
+const themes = computed<{ value: ColorTheme; label: string; color: string }[]>(() => [
+  { value: "teal", label: t("青绿"), color: "#397f78" },
+  { value: "indigo", label: t("靛蓝"), color: "#6270a8" },
+  { value: "violet", label: t("紫罗兰"), color: "#866da4" },
+  { value: "amber", label: t("琥珀"), color: "#966634" },
+  { value: "rose", label: t("玫红"), color: "#ad5d6e" },
+  { value: "gray", label: t("灰色"), color: "#64748b" },
+]);
 </script>
 
 <template>
   <div class="theme-picker">
-    <div class="mode-options" role="group" aria-label="外观模式">
-      <button :disabled="saving" :aria-pressed="appearance.colorMode === 'light'" @click="emit('change', { ...props.appearance, colorMode: 'light' })"><Sun :size="16" />浅色</button>
-      <button :disabled="saving" :aria-pressed="appearance.colorMode === 'dark'" @click="emit('change', { ...props.appearance, colorMode: 'dark' })"><Moon :size="16" />深色</button>
+    <div class="mode-options" role="group" :aria-label="t('外观模式')">
+      <button :disabled="saving" :aria-pressed="appearance.colorMode === 'light'" @click="emit('change', { ...props.appearance, colorMode: 'light' })"><Sun :size="16" />{{ t('浅色') }}</button>
+      <button :disabled="saving" :aria-pressed="appearance.colorMode === 'dark'" @click="emit('change', { ...props.appearance, colorMode: 'dark' })"><Moon :size="16" />{{ t('深色') }}</button>
     </div>
-    <div class="theme-preview" role="img" :aria-label="`${themes.find(theme => theme.value === appearance.colorTheme)?.label}主题，${appearance.colorMode === 'dark' ? '深色' : '浅色'}界面预览`">
-      <div class="preview-titlebar"><span class="preview-dots"><i /><i /><i /></span><b>Chronicle</b><span>界面预览</span></div>
+    <div class="theme-preview" role="img" :aria-label="t('{theme}主题，{mode}界面预览', { theme: themes.find(theme => theme.value === appearance.colorTheme)?.label || '', mode: appearance.colorMode === 'dark' ? t('深色') : t('浅色') })">
+      <div class="preview-titlebar"><span class="preview-dots"><i /><i /><i /></span><b>Chronicle</b><span>{{ t('界面预览') }}</span></div>
       <div class="preview-workspace">
-        <div class="preview-sidebar"><span class="preview-add"><Plus :size="14" />添加存档</span><span><Folder :size="15" />全部存档</span><span class="preview-selected"><Folder :size="15" />工作配置</span></div>
-        <div class="preview-content"><div class="preview-heading"><b>工作配置</b><span>创建快照</span></div><p>保存每一个值得留下的状态</p><div class="preview-snapshot"><span class="preview-check"><Check :size="16" /></span><span><b>当前版本</b><small>刚刚 · 已保存在本机</small></span><span class="preview-badge">已备份</span></div><div class="preview-lines"><i /><i /></div></div>
+        <div class="preview-sidebar"><span class="preview-add"><Plus :size="14" />{{ t('添加存档') }}</span><span><Folder :size="15" />{{ t('全部存档') }}</span><span class="preview-selected"><Folder :size="15" />{{ t('工作配置') }}</span></div>
+        <div class="preview-content"><div class="preview-heading"><b>{{ t('工作配置') }}</b><span>{{ t('创建快照') }}</span></div><p>{{ t('保存每一个值得留下的状态') }}</p><div class="preview-snapshot"><span class="preview-check"><Check :size="16" /></span><span><b>{{ t('当前版本') }}</b><small>{{ t('刚刚 · 已保存在本机') }}</small></span><span class="preview-badge">{{ t('已备份') }}</span></div><div class="preview-lines"><i /><i /></div></div>
       </div>
     </div>
-    <div class="theme-options" role="group" aria-label="配色主题">
-      <button v-for="theme in themes" :key="theme.value" :aria-label="`选择${theme.label}主题`" :aria-pressed="appearance.colorTheme === theme.value" :disabled="saving" @click="emit('change', { ...props.appearance, colorTheme: theme.value })"><span class="theme-swatch" :style="{ background: theme.color }"><Check v-if="appearance.colorTheme === theme.value" :size="17" /></span><span>{{ theme.label }}</span></button>
+    <div class="theme-options" role="group" :aria-label="t('配色主题')">
+      <button v-for="theme in themes" :key="theme.value" :aria-label="t('选择{theme}主题', { theme: theme.label })" :aria-pressed="appearance.colorTheme === theme.value" :disabled="saving" @click="emit('change', { ...props.appearance, colorTheme: theme.value })"><span class="theme-swatch" :style="{ background: theme.color }"><Check v-if="appearance.colorTheme === theme.value" :size="17" /></span><span>{{ theme.label }}</span></button>
     </div>
-    <p class="preview-hint">实时预览并保存，之后可在设置中随时更换。</p>
+    <p class="preview-hint">{{ t('实时预览并保存，之后可在设置中随时更换。') }}</p>
   </div>
 </template>
 

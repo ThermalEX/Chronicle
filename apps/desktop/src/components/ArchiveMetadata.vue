@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../services/i18n";
 import { File, Folder, Plus, Tag, X } from "@lucide/vue";
 import { ref, watch } from "vue";
 import type { ArchiveRecord } from "../domain";
@@ -32,24 +33,24 @@ function addTag(): void {
 <template>
   <div class="archive-metadata">
     <section aria-labelledby="sources-heading">
-      <header><b id="sources-heading">来源</b><span>{{ archive.sources.length }} 项</span></header>
+      <header><b id="sources-heading">{{ t('来源') }}</b><span>{{ t('{count} 项', { count: archive.sources.length }) }}</span></header>
       <div class="source-list">
         <div v-for="source in archive.sources" :key="source.id" class="source-row" :title="displayPath(source.path)">
           <span class="source-icon"><Folder v-if="source.kind === 'folder'" :size="15" /><File v-else :size="15" /></span>
-          <span><b>{{ source.name }}</b><small>{{ source.kind === 'folder' ? '文件夹' : '文件' }} · {{ displayPath(source.path) }}</small></span>
+          <span><b>{{ source.name }}</b><small>{{ source.kind === 'folder' ? t('文件夹') : t('文件') }} · {{ displayPath(source.path) }}</small></span>
         </div>
       </div>
     </section>
 
     <section aria-labelledby="tags-heading">
-      <header><b id="tags-heading">标签</b><span>{{ archive.tags.length }} 个</span></header>
+      <header><b id="tags-heading">{{ t('标签') }}</b><span>{{ t('{count} 个', { count: archive.tags.length }) }}</span></header>
       <div class="tag-editor">
-        <span v-for="tag in archive.tags" :key="tag" class="tag-chip"><Tag :size="12" /><span>{{ tag }}</span><button type="button" :aria-label="`删除标签 ${tag}`" :title="`删除标签 ${tag}`" :disabled="savingTags" @click="emit('removeTag', tag)"><X :size="12" /></button></span>
-        <span v-if="!archive.tags.length" class="tag-empty">暂无标签</span>
+        <span v-for="tag in archive.tags" :key="tag" class="tag-chip"><Tag :size="12" /><span>{{ tag }}</span><button type="button" :aria-label="t('删除标签 {tag}', { tag })" :title="t('删除标签 {tag}', { tag })" :disabled="savingTags" @click="emit('removeTag', tag)"><X :size="12" /></button></span>
+        <span v-if="!archive.tags.length" class="tag-empty">{{ t('暂无标签') }}</span>
         <form class="tag-input" @submit.prevent="addTag">
           <Tag :size="13" />
-          <input v-model="tagInput" type="text" maxlength="30" placeholder="添加标签" aria-label="新标签名称" :disabled="savingTags" />
-          <button type="submit" aria-label="添加标签" title="添加标签" :disabled="savingTags || !tagInput.trim()"><Plus :size="14" /></button>
+          <input v-model="tagInput" type="text" maxlength="30" :placeholder="t('添加标签')" :aria-label="t('新标签名称')" :disabled="savingTags" />
+          <button type="submit" :aria-label="t('添加标签')" :title="t('添加标签')" :disabled="savingTags || !tagInput.trim()"><Plus :size="14" /></button>
         </form>
       </div>
     </section>

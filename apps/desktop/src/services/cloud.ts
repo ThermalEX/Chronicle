@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { ArchiveSyncMode } from "../domain";
 import { saveCloudSettings, type CloudSettings, type CloudSource } from "./settings";
@@ -19,7 +20,7 @@ export type CloudSyncResult = { status: "uploaded" | "downloaded" | "current" | 
 export type CreatedGitHubRepository = { repository: string; branch: string };
 export type CloudSourceStatus = { sourceId: string; credentialSaved: boolean };
 
-function desktopOnly(): never { throw new Error("云同步仅在 Chronicle 桌面端可用"); }
+function desktopOnly(): never { throw new Error(t("云同步仅在 Chronicle 桌面端可用")); }
 
 export const cloudRepository = {
   sourceStatuses(): Promise<CloudSourceStatus[]> {

@@ -11,4 +11,8 @@ describe("current time display", () => {
     expect(millisecondsUntilNextMinute(new Date(2026, 8, 9, 7, 5, 0, 0))).toBe(60_000);
     expect(millisecondsUntilNextMinute(new Date(2026, 8, 9, 7, 5, 42, 250))).toBe(17_750);
   });
+
+  it("formats the title-bar date in English when requested", () => {
+    expect(formatCurrentTime(new Date(2026, 8, 9, 7, 5), "en")).toBe("Sep 9, 2026, 07:05");
+  });
 });

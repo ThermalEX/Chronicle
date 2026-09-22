@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../services/i18n";
 import { CheckCircle2, CircleAlert, Info, X } from "@lucide/vue";
 defineProps<{ message: string; type: "success" | "error" | "info" }>();
 defineEmits<{ close: [] }>();
@@ -9,7 +10,7 @@ defineEmits<{ close: [] }>();
     <div class="toast" :class="type" :role="type === 'error' ? 'alert' : 'status'">
       <component :is="type === 'success' ? CheckCircle2 : type === 'error' ? CircleAlert : Info" :size="16" />
       <span>{{ message }}</span>
-      <button aria-label="关闭通知" title="关闭通知" @click="$emit('close')"><X :size="15" /></button>
+      <button :aria-label="t('关闭通知')" :title="t('关闭通知')" @click="$emit('close')"><X :size="15" /></button>
     </div>
   </Teleport>
 </template>

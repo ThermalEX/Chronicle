@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t, locale } from "../services/i18n";
 import { ChevronDown, CloudCog, Download, ExternalLink, Pause, Play, Plus, RefreshCw, Search, Server, Trash2, Upload, X } from "@lucide/vue";
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { cloudRepository, saveCloudConfiguration, uploadArchiveWithCategoryTree, type CloudPreview, type RemoteItem } from "../services/cloud";
@@ -67,13 +68,13 @@ function showToast(type: "success" | "error", message: string): void {
   toastTimer = window.setTimeout(() => { toast.value = undefined; }, type === "success" ? 3600 : 7000);
 }
 const sourceOptions = computed<ThemedSelectOption[]>(() => [
-  { value: null, label: "未选择" },
+  { value: null, label: t('未选择') },
   ...draft.sources.map((source) => ({ value: source.id, label: source.name })),
 ]);
-const syncOptions: ThemedSelectOption[] = [
-  { value: "manual", label: "手动同步" },
-  { value: "automatic", label: "自动上传" },
-];
+const syncOptions = computed<ThemedSelectOption[]>(() => [
+  { value: "manual", label: t('手动同步') },
+  { value: "automatic", label: t('自动上传') },
+]);
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -83,8 +84,8 @@ function formatBytes(bytes: number): string {
 }
 
 function formatUpdatedAt(value?: number): string {
-  if (!value) return "未记录";
-  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+  if (!value) return t('未记录');
+  return new Intl.DateTimeFormat(locale.value, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 }
 
 function addSource(provider: CloudProvider): void {
@@ -102,7 +103,7 @@ async function persist(): Promise<void> {
     if (source.provider === "opendal") {
       const problem = validateOpenDal(source);
       if (problem) throw new Error(`${source.name}：${problem}`);
-      if (requiresTest(source)) throw new Error(`“${source.name}”配置已更改，请先测试读写、列举和清理`);
+      if (requiresTest(source)) throw new Error(t('“{value1}”配置已更改，请先测试读写、列举和清理', { value1: source.name }));
     }
   }
   // Credential persistence must succeed before settings can enable a new source.
@@ -154,7 +155,7 @@ async function testSource(source: CloudSource): Promise<void> {
     await cloudRepository.test(source, source.provider === "opendal" ? JSON.stringify(secretPatch(secrets[source.id] ?? {})) : passwords[source.id] ?? "");
     tested[source.id] = key;
     tutorialTests.set(source.id, tutorialKey);
-    showToast("success", source.provider === "opendal" ? `“${source.name}”读写、列举和临时清理测试通过` : `“${source.name}”连接与读写测试通过`);
+    showToast("success", source.provider === "opendal" ? t('“{value1}”读写、列举和临时清理测试通过', { value1: source.name }) : t('“{value1}”连接与读写测试通过', { value1: source.name }));
   }
   catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
   finally { busy.value = ""; }
@@ -168,7 +169,7 @@ async function createGitHubRepository(source: CloudSource): Promise<void> {
     source.repository = created.repository;
     source.branch = created.branch;
     await persist();
-    showToast("success", `已创建私有仓库“${created.repository}”，默认分支为 ${created.branch}`);
+    showToast("success", t('已创建私有仓库“{value1}”，默认分支为 {value2}', { value1: created.repository, value2: created.branch }));
   } catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
   finally { busy.value = ""; }
 }
@@ -182,7 +183,7 @@ async function openGitHubPatPage(): Promise<void> {
 }
 
 function removeSource(source: CloudSource): void {
-  confirmAction.value = { title: "删除同步源", message: `删除“${source.name}”的本机配置，远端文件不会被删除。`, run: async () => {
+  confirmAction.value = { title: t('删除同步源'), message: t('删除“{value1}”的本机配置，远端文件不会被删除。', { value1: source.name }), run: async () => {
     draft.sources = draft.sources.filter((item) => item.id !== source.id);
     if (repositorySourceId.value === source.id) repositorySourceId.value = draft.sources[0]?.id ?? null;
     preview.value = undefined;
@@ -194,8 +195,8 @@ async function runItemAction(item: RemoteItem, action: "sync" | "upload" | "down
   busy.value = `${action}:${item.id}`;
   try {
     if (action === "sync") showToast("success", (await cloudRepository.sync(repositorySource.value.id, item.id)).message);
-    if (action === "upload") { await uploadArchiveWithCategoryTree(repositorySource.value.id, item.id); showToast("success", "已用本地存档覆盖远端"); }
-    if (action === "download") { await cloudRepository.download(repositorySource.value.id, item.id, useCloudCategoryTree.value); emit("downloaded"); showToast("success", "已下载远端存档"); }
+    if (action === "upload") { await uploadArchiveWithCategoryTree(repositorySource.value.id, item.id); showToast("success", t('已用本地存档覆盖远端')); }
+    if (action === "download") { await cloudRepository.download(repositorySource.value.id, item.id, useCloudCategoryTree.value); emit("downloaded"); showToast("success", t('已下载远端存档')); }
     await loadPreview();
   } catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
   finally { busy.value = ""; }
@@ -205,8 +206,8 @@ function confirmOverwrite(item: RemoteItem, direction: "upload" | "download"): v
   confirmingDownload.value = direction === "download";
   if (confirmingDownload.value) useCloudCategoryTree.value = true;
   confirmAction.value = {
-    title: direction === "upload" ? "覆盖上传" : "覆盖下载",
-    message: direction === "upload" ? `远端“${item.name}”将被本地仓库完整替换。` : `本地仓库中的“${item.name}”将被远端版本完整替换，原始来源文件不会改动。`,
+    title: direction === "upload" ? t('覆盖上传') : t('覆盖下载'),
+    message: direction === "upload" ? t('远端“{value1}”将被本地仓库完整替换。', { value1: item.name }) : t('本地仓库中的“{value1}”将被远端版本完整替换，原始来源文件不会改动。', { value1: item.name }),
     run: () => runItemAction(item, direction),
   };
 }
@@ -214,7 +215,7 @@ function confirmOverwrite(item: RemoteItem, direction: "upload" | "download"): v
 async function uploadApplicationSettings(): Promise<void> {
   if (!repositorySource.value) return;
   busy.value = "app-settings-upload";
-  try { await cloudRepository.uploadApplicationSettings(repositorySource.value.id); showToast("success", "本机应用设置已上传"); await loadPreview(); }
+  try { await cloudRepository.uploadApplicationSettings(repositorySource.value.id); showToast("success", t('本机应用设置已上传')); await loadPreview(); }
   catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
   finally { busy.value = ""; }
 }
@@ -227,11 +228,11 @@ async function confirmDownloadApplicationSettings(): Promise<void> {
   catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); return; }
   finally { busy.value = ""; }
   confirmAction.value = {
-    title: "应用云端设置",
-    message: "云端应用设置已下载。确定后立即应用，当前云端连接配置不会被覆盖。",
+    title: t('应用云端设置'),
+    message: t('云端应用设置已下载。确定后立即应用，当前云端连接配置不会被覆盖。'),
     run: async () => {
       busy.value = "app-settings-download";
-      try { await cloudRepository.downloadApplicationSettings(repositorySource.value!.id, true); emit("settingsDownloaded"); showToast("success", "已下载并应用云端设置"); }
+      try { await cloudRepository.downloadApplicationSettings(repositorySource.value!.id, true); emit("settingsDownloaded"); showToast("success", t('已下载并应用云端设置')); }
       finally { busy.value = ""; }
     },
   };
@@ -243,9 +244,9 @@ function confirmDelete(ids: string[]): void {
   if ((!archives.length && !configurations.length) || !repositorySource.value) return;
   confirmingDownload.value = false;
   const configurationNames = remoteConfigs.value.filter((item) => configurations.includes(item.id)).map((item) => item.name);
-  const archiveMessage = archives.length ? `${archives.length} 个云端存档及其全部时间节点将永久删除。` : "";
-  const configurationMessage = configurations.length ? `云端设置 ${configurationNames.join("、")} 将被删除。` : "";
-  confirmAction.value = { title: configurations.length ? "删除云端设置" : "删除云端存档", message: [configurationMessage, archiveMessage].filter(Boolean).join(" "), run: async () => {
+  const archiveMessage = archives.length ? t('{value1} 个云端存档及其全部时间节点将永久删除。', { value1: archives.length }) : "";
+  const configurationMessage = configurations.length ? t('云端设置 {value1} 将被删除。', { value1: configurationNames.join("、") }) : "";
+  confirmAction.value = { title: configurations.length ? t('删除云端设置') : t('删除云端存档'), message: [configurationMessage, archiveMessage].filter(Boolean).join(" "), run: async () => {
     if (archives.length) await cloudRepository.delete(repositorySource.value!.id, archives);
     if (configurations.length) await cloudRepository.deleteConfigurations(repositorySource.value!.id, configurations);
     selected.value = [];
@@ -256,7 +257,7 @@ function confirmDelete(ids: string[]): void {
 async function changeSyncMode(item: RemoteItem, mode: string | null): Promise<void> {
   if (!repositorySource.value || (mode !== "manual" && mode !== "automatic")) return;
   busy.value = `mode:${item.id}`;
-  try { await cloudRepository.setSyncMode(repositorySource.value.id, item.id, mode); item.syncMode = mode; showToast("success", "同步方案已保存"); }
+  try { await cloudRepository.setSyncMode(repositorySource.value.id, item.id, mode); item.syncMode = mode; showToast("success", t('同步方案已保存')); }
   catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
   finally { busy.value = ""; }
 }
@@ -318,58 +319,58 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer));
 <template>
   <div class="dialog-backdrop" @pointerdown="backdrop.pointerDown" @pointerup="backdrop.pointerUp" @pointercancel="backdrop.pointerCancel">
     <section data-tour="cloud-form" class="cloud-center" role="dialog" aria-modal="true" aria-labelledby="cloud-title">
-      <header><div class="heading-icon"><CloudCog :size="21" /></div><div><p>同步服务</p><h2 id="cloud-title">云端设置</h2></div><button ref="closeButton" aria-label="关闭云端设置" title="关闭云端设置" @click="requestClose"><X :size="18" /></button></header>
-      <nav aria-label="云端设置页面"><button :class="{ active: tab === 'repository' }" @click="tab = 'repository'; repositorySource && loadPreview()">云端仓库</button><button :class="{ active: tab === 'sources' }" @click="tab = 'sources'">同步源</button></nav>
+      <header><div class="heading-icon"><CloudCog :size="21" /></div><div><p>{{ t('同步服务') }}</p><h2 id="cloud-title">{{ t('云端设置') }}</h2></div><button ref="closeButton" :aria-label="t('关闭云端设置')" :title="t('关闭云端设置')" @click="requestClose"><X :size="18" /></button></header>
+      <nav :aria-label="t('云端设置页面')"><button :class="{ active: tab === 'repository' }" @click="tab = 'repository'; repositorySource && loadPreview()">{{ t('云端仓库') }}</button><button :class="{ active: tab === 'sources' }" @click="tab = 'sources'">{{ t('同步源') }}</button></nav>
       <main>
         <section v-if="tab === 'repository'" class="repository-page">
-          <div v-if="!repositorySource" class="empty"><CloudCog :size="30" /><h3>尚未配置云同步源</h3><p>添加 WebDAV 后即可查看和管理远端 Chronicle 仓库。</p><button @click="addSource('legacy_webdav')"><Plus :size="16" />添加同步源</button></div>
+          <div v-if="!repositorySource" class="empty"><CloudCog :size="30" /><h3>{{ t('尚未配置云同步源') }}</h3><p>{{ t('添加 WebDAV 后即可查看和管理远端 Chronicle 仓库。') }}</p><button @click="addSource('legacy_webdav')"><Plus :size="16" />{{ t('添加同步源') }}</button></div>
           <template v-else>
             <div class="repository-heading">
-              <div><p class="repository-eyebrow">云端预览</p><ThemedSelect class="repository-source-select" :model-value="repositorySourceId" :options="sourceOptions" label="查看云端仓库来源" @update:model-value="selectRepositorySource" /><p class="repository-description">按存档标题汇总远端时间节点；仓库配置由 Chronicle 自动维护。</p></div>
-              <button :disabled="Boolean(busy)" @click="loadPreview"><RefreshCw :size="15" />刷新</button>
+              <div><p class="repository-eyebrow">{{ t('云端预览') }}</p><ThemedSelect class="repository-source-select" :model-value="repositorySourceId" :options="sourceOptions" :label="t('查看云端仓库来源')" @update:model-value="selectRepositorySource" /><p class="repository-description">{{ t('按存档标题汇总远端时间节点；仓库配置由 Chronicle 自动维护。') }}</p></div>
+              <button :disabled="Boolean(busy)" @click="loadPreview"><RefreshCw :size="15" />{{ t('刷新') }}</button>
             </div>
-            <div class="repository-summary" aria-live="polite"><span>远端 {{ remoteArchives.length }} 个存档</span><span>共 {{ remoteSnapshotTotal }} 个时间节点</span><span>{{ preview?.libraryId ? '仓库已初始化' : '等待首次上传' }}</span></div>
+            <div class="repository-summary" aria-live="polite"><span>{{ t('远端 {count} 个存档', { count: remoteArchives.length }) }}</span><span>{{ t('共 {count} 个时间节点', { count: remoteSnapshotTotal }) }}</span><span>{{ preview?.libraryId ? t('仓库已初始化') : t('等待首次上传') }}</span></div>
             <div class="repository-controls">
-              <label class="archive-search"><Search :size="16" /><input v-model="cloudSearch" type="search" placeholder="搜索存档标题" aria-label="搜索云端存档标题" /></label>
-              <button class="danger" :disabled="Boolean(busy) || !selected.length" @click="confirmDelete(selected)"><Trash2 :size="14" />删除所选</button>
+              <label class="archive-search"><Search :size="16" /><input v-model="cloudSearch" type="search" :placeholder="t('搜索存档标题')" :aria-label="t('搜索云端存档标题')" /></label>
+              <button class="danger" :disabled="Boolean(busy) || !selected.length" @click="confirmDelete(selected)"><Trash2 :size="14" />{{ t('删除所选') }}</button>
             </div>
-            <div v-if="busy === 'preview' && !preview" class="loading">正在读取远端清单…</div>
+            <div v-if="busy === 'preview' && !preview" class="loading">{{ t('正在读取远端清单…') }}</div>
             <div v-else-if="preview" class="remote-table-wrap">
               <table class="remote-table">
-                <thead><tr><th scope="col" class="selection-column"><span class="sr-only">选择</span></th><th scope="col">存档</th><th scope="col">同步方案</th><th scope="col">云端时间线</th><th scope="col">最后更新</th><th scope="col" class="actions-column">操作</th></tr></thead>
+                <thead><tr><th scope="col" class="selection-column"><span class="sr-only">{{ t('选择') }}</span></th><th scope="col">{{ t('存档') }}</th><th scope="col">{{ t('同步方案') }}</th><th scope="col">{{ t('云端时间线') }}</th><th scope="col">{{ t('最后更新') }}</th><th scope="col" class="actions-column">{{ t('操作') }}</th></tr></thead>
                 <tbody>
                   <tr v-for="item in [...remoteConfigs, ...visibleRemoteArchives]" :key="item.id" :class="{ 'configuration-row': item.kind === 'config' }">
-                    <td class="selection-column"><input v-model="selected" type="checkbox" :value="item.id" :aria-label="`选择 ${item.name}`" /></td>
-                    <td class="archive-name"><b :title="item.name">{{ item.name }}</b><small v-if="item.kind === 'config'">云端设置文件</small></td>
-                    <td><ThemedSelect v-if="item.kind === 'archive'" :model-value="item.syncMode" :options="syncOptions" :disabled="Boolean(busy)" :label="`${item.name} 同步方案`" @update:model-value="changeSyncMode(item, $event)" /><span v-else class="configuration-label">系统配置</span></td>
-                    <td><template v-if="item.kind === 'archive'"><span class="timeline-count">{{ item.snapshotCount }} 个节点</span><small>{{ formatBytes(item.sizeBytes) }}</small></template><span v-else class="configuration-label">—</span></td>
-                    <td class="updated-at">{{ item.kind === 'archive' ? formatUpdatedAt(item.updatedAt) : '设置文件' }}</td>
-                    <td><div v-if="item.kind === 'archive'" class="item-actions"><button :disabled="Boolean(busy)" :aria-label="`同步 ${item.name}`" :title="`同步 ${item.name}`" @click="runItemAction(item, 'sync')"><RefreshCw :size="14" />同步</button><button :disabled="Boolean(busy)" :aria-label="`覆盖下载 ${item.name}`" :title="`覆盖下载 ${item.name}`" @click="confirmOverwrite(item, 'download')"><Download :size="14" /></button><button :disabled="Boolean(busy)" :aria-label="`覆盖上传 ${item.name}`" :title="`覆盖上传 ${item.name}`" @click="confirmOverwrite(item, 'upload')"><Upload :size="14" /></button></div><div v-else class="item-actions"><button :disabled="Boolean(busy)" title="使用云端设置" @click="confirmDownloadApplicationSettings"><Download :size="14" />使用设置</button><button :disabled="Boolean(busy)" title="上传本机设置" @click="uploadApplicationSettings"><Upload :size="14" />上传设置</button></div></td>
+                    <td class="selection-column"><input v-model="selected" type="checkbox" :value="item.id" :aria-label="t('选择 {value1}', { value1: item.name })" /></td>
+                    <td class="archive-name"><b :title="item.name">{{ item.name }}</b><small v-if="item.kind === 'config'">{{ t('云端设置文件') }}</small></td>
+                    <td><ThemedSelect v-if="item.kind === 'archive'" :model-value="item.syncMode" :options="syncOptions" :disabled="Boolean(busy)" :label="t('{value1} 同步方案', { value1: item.name })" @update:model-value="changeSyncMode(item, $event)" /><span v-else class="configuration-label">{{ t('系统配置') }}</span></td>
+                    <td><template v-if="item.kind === 'archive'"><span class="timeline-count">{{ t('{count} 个节点', { count: item.snapshotCount }) }}</span><small>{{ formatBytes(item.sizeBytes) }}</small></template><span v-else class="configuration-label">—</span></td>
+                    <td class="updated-at">{{ item.kind === 'archive' ? formatUpdatedAt(item.updatedAt) : t('设置文件') }}</td>
+                    <td><div v-if="item.kind === 'archive'" class="item-actions"><button :disabled="Boolean(busy)" :aria-label="t('同步 {value1}', { value1: item.name })" :title="t('同步 {value1}', { value1: item.name })" @click="runItemAction(item, 'sync')"><RefreshCw :size="14" />{{ t('同步') }}</button><button :disabled="Boolean(busy)" :aria-label="t('覆盖下载 {value1}', { value1: item.name })" :title="t('覆盖下载 {value1}', { value1: item.name })" @click="confirmOverwrite(item, 'download')"><Download :size="14" /></button><button :disabled="Boolean(busy)" :aria-label="t('覆盖上传 {value1}', { value1: item.name })" :title="t('覆盖上传 {value1}', { value1: item.name })" @click="confirmOverwrite(item, 'upload')"><Upload :size="14" /></button></div><div v-else class="item-actions"><button :disabled="Boolean(busy)" :title="t('使用云端设置')" @click="confirmDownloadApplicationSettings"><Download :size="14" />{{ t('使用设置') }}</button><button :disabled="Boolean(busy)" :title="t('上传本机设置')" @click="uploadApplicationSettings"><Upload :size="14" />{{ t('上传设置') }}</button></div></td>
                   </tr>
                 </tbody>
               </table>
-              <div v-if="!visibleRemoteArchives.length" class="list-empty">没有匹配的云端存档。</div>
+              <div v-if="!visibleRemoteArchives.length" class="list-empty">{{ t('没有匹配的云端存档。') }}</div>
             </div>
-            <div v-else class="list-empty remote-empty">远端暂无存档，可以从本地存档执行覆盖上传。</div>
+            <div v-else class="list-empty remote-empty">{{ t('远端暂无存档，可以从本地存档执行覆盖上传。') }}</div>
           </template>
         </section>
 
         <section v-else class="sources-page">
-          <div class="source-toolbar"><button @click="addSource('legacy_webdav')"><Plus :size="15" />添加 WebDAV 兼容源</button><button @click="addSource('legacy_github')"><Plus :size="15" />添加 GitHub 兼容源</button><button @click="addSource('opendal')"><Plus :size="15" />添加 OpenDAL</button></div>
-          <div v-if="!draft.sources.length" class="empty compact"><Server :size="28" /><h3>没有同步源</h3><p>Chronicle 支持保存多个云端配置，可同时启用多个来源。</p></div>
+          <div class="source-toolbar"><button @click="addSource('legacy_webdav')"><Plus :size="15" />{{ t('添加 WebDAV 兼容源') }}</button><button @click="addSource('legacy_github')"><Plus :size="15" />{{ t('添加 GitHub 兼容源') }}</button><button @click="addSource('opendal')"><Plus :size="15" />{{ t('添加 OpenDAL') }}</button></div>
+          <div v-if="!draft.sources.length" class="empty compact"><Server :size="28" /><h3>{{ t('没有同步源') }}</h3><p>{{ t('Chronicle 支持保存多个云端配置，可同时启用多个来源。') }}</p></div>
           <article v-for="source in draft.sources" v-else :key="source.id" class="source-card" :class="{ active: source.syncEnabled, collapsed: !isSourceExpanded(source.id) }">
-            <div class="source-title"><button class="source-toggle" type="button" :aria-label="`${isSourceExpanded(source.id) ? '折叠' : '展开'} ${source.name}`" :title="`${isSourceExpanded(source.id) ? '折叠' : '展开'} ${source.name}`" :aria-expanded="isSourceExpanded(source.id)" @click="toggleSourceExpanded(source.id)"><Server :size="17" /><b>{{ source.name }}</b><small>{{ source.provider === 'legacy_github' ? 'GitHub 兼容源' : source.provider === 'opendal' ? 'OpenDAL · ' + source.scheme : 'WebDAV 兼容源' }}</small><small class="source-active-badge" :class="{ paused: !source.syncEnabled }">{{ source.syncEnabled ? '同步中' : '已暂停' }}</small><ChevronDown :size="16" :class="{ closed: !isSourceExpanded(source.id) }" /></button><button class="icon-sync" :class="{ paused: !source.syncEnabled }" :aria-label="`${source.syncEnabled ? '暂停同步' : '开始同步'} ${source.name}`" :title="source.syncEnabled ? '暂停同步' : '开始同步'" @click="toggleSource(source)"><Pause v-if="source.syncEnabled" :size="15" /><Play v-else :size="15" /></button><button class="icon-danger" :aria-label="`删除 ${source.name}`" :title="`删除 ${source.name}`" @click="removeSource(source)"><Trash2 :size="15" /></button></div>
-            <div v-show="isSourceExpanded(source.id)" class="source-body"><div v-if="source.provider === 'legacy_github'" class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>仓库</span><input v-model.trim="source.repository" type="text" placeholder="owner/repository" /></label><label><span>分支</span><input v-model.trim="source.branch" type="text" placeholder="main" /></label><label class="wide github-token-field"><span>访问令牌</span><div><input v-model="passwords[source.id]" type="password" autocomplete="current-password" :placeholder="savedCredentials[source.id] ? '已保存，留空保留' : '粘贴 GitHub 生成的访问令牌'" /><button type="button" @click="openGitHubPatPage"><ExternalLink :size="14" />在 GitHub 生成令牌</button></div><small>登录后直接生成带 repo 权限的令牌；GitHub 只显示一次，请复制后粘贴到这里。</small></label><label><span>新仓库名称</span><input v-model.trim="newRepositoryNames[source.id]" type="text" :placeholder="githubRepositoryName(source.id)" /></label><button class="create-repository-button" :disabled="Boolean(busy)" @click="createGitHubRepository(source)"><Plus :size="15" />创建私有仓库</button><label class="wide"><span>Chronicle 目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div><OpenDalSourceFields v-else-if="source.provider === 'opendal'" :source="source" :secrets="secrets[source.id] ?? (secrets[source.id] = {})" :credential-saved="savedCredentials[source.id]" :disabled="Boolean(busy)" /><div v-else class="fields"><label><span>名称</span><input v-model.trim="source.name" type="text" /></label><label><span>服务器地址</span><input v-model.trim="source.endpoint" type="url" placeholder="https://dav.example.com/remote.php/dav/files/user" /></label><label><span>用户名</span><input v-model.trim="source.username" type="text" autocomplete="username" /></label><label><span>密码</span><input v-model="passwords[source.id]" type="password" autocomplete="current-password" :placeholder="savedCredentials[source.id] ? '已保存，留空保留' : '请输入密码'" /></label><label class="wide"><span>远端目录</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div><button class="test-button" :disabled="Boolean(busy) || (source.provider === 'legacy_github' ? !source.repository || !source.branch : source.provider === 'opendal' ? false : !source.endpoint || !source.username)" @click="testSource(source)">{{ busy === `test:${source.id}` ? '测试中…' : source.provider === 'legacy_github' ? '测试仓库访问' : source.provider === 'opendal' ? '测试读写、列举与清理' : '测试连接与读写' }}</button><small v-if="requiresTest(source)" class="source-test-hint">配置尚未测试或已更改，保存前请重新测试。</small></div>
+            <div class="source-title"><button class="source-toggle" type="button" :aria-label="t('{value1} {value2}', { value1: isSourceExpanded(source.id) ? t('折叠') : t('展开'), value2: source.name })" :title="t('{value1} {value2}', { value1: isSourceExpanded(source.id) ? t('折叠') : t('展开'), value2: source.name })" :aria-expanded="isSourceExpanded(source.id)" @click="toggleSourceExpanded(source.id)"><Server :size="17" /><b>{{ source.name }}</b><small>{{ source.provider === 'legacy_github' ? t('GitHub 兼容源') : source.provider === 'opendal' ? 'OpenDAL · ' + source.scheme : t('WebDAV 兼容源') }}</small><small class="source-active-badge" :class="{ paused: !source.syncEnabled }">{{ source.syncEnabled ? t('同步中') : t('已暂停') }}</small><ChevronDown :size="16" :class="{ closed: !isSourceExpanded(source.id) }" /></button><button class="icon-sync" :class="{ paused: !source.syncEnabled }" :aria-label="t('{value1} {value2}', { value1: source.syncEnabled ? t('暂停同步') : t('开始同步'), value2: source.name })" :title="source.syncEnabled ? t('暂停同步') : t('开始同步')" @click="toggleSource(source)"><Pause v-if="source.syncEnabled" :size="15" /><Play v-else :size="15" /></button><button class="icon-danger" :aria-label="t('删除 {value1}', { value1: source.name })" :title="t('删除 {value1}', { value1: source.name })" @click="removeSource(source)"><Trash2 :size="15" /></button></div>
+            <div v-show="isSourceExpanded(source.id)" class="source-body"><div v-if="source.provider === 'legacy_github'" class="fields"><label><span>{{ t('名称') }}</span><input v-model.trim="source.name" type="text" /></label><label><span>{{ t('仓库') }}</span><input v-model.trim="source.repository" type="text" placeholder="owner/repository" /></label><label><span>{{ t('分支') }}</span><input v-model.trim="source.branch" type="text" placeholder="main" /></label><label class="wide github-token-field"><span>{{ t('访问令牌') }}</span><div><input v-model="passwords[source.id]" type="password" autocomplete="current-password" :placeholder="savedCredentials[source.id] ? t('已保存，留空保留') : t('粘贴 GitHub 生成的访问令牌')" /><button type="button" @click="openGitHubPatPage"><ExternalLink :size="14" />{{ t('在 GitHub 生成令牌') }}</button></div><small>{{ t('登录后直接生成带 repo 权限的令牌；GitHub 只显示一次，请复制后粘贴到这里。') }}</small></label><label><span>{{ t('新仓库名称') }}</span><input v-model.trim="newRepositoryNames[source.id]" type="text" :placeholder="githubRepositoryName(source.id)" /></label><button class="create-repository-button" :disabled="Boolean(busy)" @click="createGitHubRepository(source)"><Plus :size="15" />{{ t('创建私有仓库') }}</button><label class="wide"><span>{{ t('Chronicle 目录') }}</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div><OpenDalSourceFields v-else-if="source.provider === 'opendal'" :source="source" :secrets="secrets[source.id] ?? (secrets[source.id] = {})" :credential-saved="savedCredentials[source.id]" :disabled="Boolean(busy)" /><div v-else class="fields"><label><span>{{ t('名称') }}</span><input v-model.trim="source.name" type="text" /></label><label><span>{{ t('服务器地址') }}</span><input v-model.trim="source.endpoint" type="url" placeholder="https://dav.example.com/remote.php/dav/files/user" /></label><label><span>{{ t('用户名') }}</span><input v-model.trim="source.username" type="text" autocomplete="username" /></label><label><span>{{ t('密码') }}</span><input v-model="passwords[source.id]" type="password" autocomplete="current-password" :placeholder="savedCredentials[source.id] ? t('已保存，留空保留') : t('请输入密码')" /></label><label class="wide"><span>{{ t('远端目录') }}</span><input v-model.trim="source.remotePath" type="text" placeholder="/Chronicle" /></label></div><button class="test-button" :disabled="Boolean(busy) || (source.provider === 'legacy_github' ? !source.repository || !source.branch : source.provider === 'opendal' ? false : !source.endpoint || !source.username)" @click="testSource(source)">{{ busy === `test:${source.id}` ? t('测试中…') : source.provider === 'legacy_github' ? t('测试仓库访问') : source.provider === 'opendal' ? t('测试读写、列举与清理') : t('测试连接与读写') }}</button><small v-if="requiresTest(source)" class="source-test-hint">{{ t('配置尚未测试或已更改，保存前请重新测试。') }}</small></div>
           </article>
-          <fieldset><legend>请求控制</legend><label><span>元数据并发</span><input v-model.number="draft.maxConcurrentMetadataReads" type="number" min="1" max="4" /></label><label><span>传输并发</span><input v-model.number="draft.maxConcurrentTransfers" type="number" min="1" max="4" /></label><label><span>请求间隔（毫秒）</span><input v-model.number="draft.requestDelayMs" type="number" min="0" max="5000" step="50" /></label><label><span>重试次数</span><input v-model.number="draft.retryLimit" type="number" min="1" max="10" /></label></fieldset>
+          <fieldset><legend>{{ t('请求控制') }}</legend><label><span>{{ t('元数据并发') }}</span><input v-model.number="draft.maxConcurrentMetadataReads" type="number" min="1" max="4" /></label><label><span>{{ t('传输并发') }}</span><input v-model.number="draft.maxConcurrentTransfers" type="number" min="1" max="4" /></label><label><span>{{ t('请求间隔（毫秒）') }}</span><input v-model.number="draft.requestDelayMs" type="number" min="0" max="5000" step="50" /></label><label><span>{{ t('重试次数') }}</span><input v-model.number="draft.retryLimit" type="number" min="1" max="10" /></label></fieldset>
         </section>
       </main>
-      <footer><button class="cancel" :disabled="Boolean(busy)" @click="requestClose">取消</button><button class="save" :disabled="Boolean(busy)" @click="saveAndClose">{{ busy === 'save' ? '保存中…' : '保存云端设置' }}</button></footer>
+      <footer><button class="cancel" :disabled="Boolean(busy)" @click="requestClose">{{ t('取消') }}</button><button class="save" :disabled="Boolean(busy)" @click="saveAndClose">{{ busy === 'save' ? t('保存中…') : t('保存云端设置') }}</button></footer>
     </section>
     <AppToast v-if="toast" :message="toast.message" :type="toast.type" @close="toast = undefined" />
-    <ConfirmDialog v-if="confirmAction" :title="confirmAction.title" :message="confirmAction.message" confirm-label="确定" :destructive="!confirmingDownload" @cancel="confirmAction = undefined; confirmingDownload = false" @confirm="runConfirmed"><template #body-extra><label v-if="confirmingDownload" class="download-tree-option"><input v-model="useCloudCategoryTree" type="checkbox" />使用云端资料库分类层级</label></template></ConfirmDialog>
-    <ConfirmDialog v-if="closeConfirmationOpen" title="保存云端配置？" message="云端配置或同步开关已更改。保存后才会生效。" confirm-label="保存" :busy="Boolean(busy)" @cancel="closeConfirmationOpen = false" @confirm="saveAndClose">
-      <template #extra-actions><button class="discard" :disabled="Boolean(busy)" @click="discardAndClose">不保存</button></template>
+    <ConfirmDialog v-if="confirmAction" :title="confirmAction.title" :message="confirmAction.message" :confirm-label="t('确定')" :destructive="!confirmingDownload" @cancel="confirmAction = undefined; confirmingDownload = false" @confirm="runConfirmed"><template #body-extra><label v-if="confirmingDownload" class="download-tree-option"><input v-model="useCloudCategoryTree" type="checkbox" />{{ t('使用云端资料库分类层级') }}</label></template></ConfirmDialog>
+    <ConfirmDialog v-if="closeConfirmationOpen" :title="t('保存云端配置？')" :message="t('云端配置或同步开关已更改。保存后才会生效。')" :confirm-label="t('保存')" :busy="Boolean(busy)" @cancel="closeConfirmationOpen = false" @confirm="saveAndClose">
+      <template #extra-actions><button class="discard" :disabled="Boolean(busy)" @click="discardAndClose">{{ t('不保存') }}</button></template>
     </ConfirmDialog>
   </div>
 </template>

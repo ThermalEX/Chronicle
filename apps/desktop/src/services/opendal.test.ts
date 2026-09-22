@@ -23,6 +23,20 @@ describe("OpenDAL configuration", () => {
     value.config!.endpoint = "https://example.com/storage";
     expect(validateOpenDal(value)).toBe("");
   });
+  it("uses the current language for validation and preserves config field identifiers", async () => {
+    const { setLocale } = await import("./i18n");
+    const value = source();
+    configureOpenDal(value, "s3");
+    try {
+      setLocale("en");
+      expect(validateOpenDal(value)).toBe("Please enter bucket");
+      expect(validateAdvancedKey("root")).toBe("Overriding the root or branch, or reading local credential files, is not allowed");
+      setLocale("zh-CN");
+      expect(validateOpenDal(value)).toBe("请填写 bucket");
+    } finally {
+      setLocale("zh-CN");
+    }
+  });
   it("offers exactly the compiled services and keeps tokens out of config", () => {
     expect(openDalTemplates.map((item) => item.scheme).sort()).toEqual(["azblob", "b2", "cos", "gcs", "github", "obs", "oss", "s3", "swift", "tos", "webdav"]);
     const value = source();

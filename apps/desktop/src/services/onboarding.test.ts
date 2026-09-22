@@ -1,10 +1,30 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { advanceTutorial, createTutorialState, loadTutorialProgress, normalizeTutorialProgress, saveTutorialProgress, shouldOfferTutorial } from "./onboarding";
+import { advanceTutorial, createTutorialState, loadTutorialProgress, normalizeTutorialProgress, saveTutorialProgress, shouldOfferTutorial, tutorialViews } from "./onboarding";
 
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => false }));
 afterEach(() => vi.unstubAllGlobals());
 
 describe("tutorial transitions", () => {
+  it("introduces Steam before finishing on either route without requiring a scan", () => {
+    for (const route of ["local", "cloud"] as const) {
+      const steam = advanceTutorial({ ...createTutorialState(), route, step: "sync" }, { type: "next" });
+      expect(steam.step).toBe("steam-entry");
+      expect(advanceTutorial(steam, { type: "skip" }).step).toBe("inactive");
+      const finished = advanceTutorial(steam, { type: "next" });
+      expect(finished.step).toBe("finish");
+      expect(advanceTutorial(finished, { type: "next" }).step).toBe("inactive");
+    }
+  });
+  it("opens the Steam dialog as an action and finishes only after closing it", () => {
+    const entry = advanceTutorial({ ...createTutorialState(), step: "sync" }, { type: "next" });
+    expect(tutorialViews[entry.step]?.mode).toBe("action");
+    expect(tutorialViews[entry.step]?.stage).toBe(7);
+    const opened = advanceTutorial(entry, { type: "steam-opened" });
+    expect(opened.step).toBe("steam-form");
+    expect(advanceTutorial(opened, { type: "next" }).step).toBe("steam-form");
+    expect(advanceTutorial(opened, { type: "steam-closed" }).step).toBe("finish");
+    expect(advanceTutorial({ ...createTutorialState(), step: "sync" }, { type: "steam-closed" }).step).toBe("sync");
+  });
   it("local route does not require a cloud configuration", () => {
     let state = advanceTutorial(createTutorialState(), { type: "start" });
     expect(state.step).toBe("appearance");

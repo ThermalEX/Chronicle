@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../services/i18n";
 import { Keyboard } from "@lucide/vue";
 import { ref } from "vue";
 import { shortcutFromKeyboardEvent } from "../services/settings";
@@ -40,14 +41,14 @@ function capture(event: KeyboardEvent): void {
     type="button"
     class="shortcut-recorder"
     :class="{ recording }"
-    :aria-label="`${label}：${recording ? '正在录制' : modelValue || '未设置'}`"
-    :title="recording ? '按组合键保存；Esc 取消；Delete 清除' : '点击后按组合键设置热键'"
+    :aria-label="t('{label}：{value}', { label, value: recording ? t('正在录制') : modelValue || t('未设置') })"
+    :title="recording ? t('按组合键保存；Esc 取消；Delete 清除') : t('点击后按组合键设置热键')"
     @click="startRecording"
     @keydown="capture"
     @blur="stopRecording"
   >
     <Keyboard :size="15" aria-hidden="true" />
-    <span>{{ recording ? '按下组合键…' : modelValue || '未设置' }}</span>
+    <span>{{ recording ? t('按下组合键…') : modelValue || t('未设置') }}</span>
   </button>
 </template>
 

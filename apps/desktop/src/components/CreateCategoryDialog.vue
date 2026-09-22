@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../services/i18n";
 import { FolderPlus, X } from "@lucide/vue";
 import { onMounted, ref } from "vue";
 import { createBackdropDismissal } from "../services/dialogDismissal";
@@ -25,18 +26,18 @@ onMounted(() => input.value?.focus());
     <form class="category-dialog" role="dialog" aria-modal="true" aria-labelledby="category-dialog-title" @submit.prevent="submit">
       <header>
         <span class="dialog-icon"><FolderPlus :size="20" /></span>
-        <div><p>资料库分类</p><h2 id="category-dialog-title">{{ parentName ? '新建子分类' : '新建分类' }}</h2></div>
-        <button type="button" aria-label="关闭" title="关闭" @click="emit('close')"><X :size="18" /></button>
+        <div><p>{{ t('资料库分类') }}</p><h2 id="category-dialog-title">{{ parentName ? t('新建子分类') : t('新建分类') }}</h2></div>
+        <button type="button" :aria-label="t('关闭')" :title="t('关闭')" @click="emit('close')"><X :size="18" /></button>
       </header>
       <main>
         <TutorialHint tip="categories" :progress="tutorialProgress" @seen="emit('tutorial-tip', $event)" />
-        <p v-if="parentName" class="parent-path">创建位置：{{ parentName }}</p>
-        <label for="category-name">分类名称</label>
+        <p v-if="parentName" class="parent-path">{{ t('创建位置：{name}', { name: parentName }) }}</p>
+        <label for="category-name">{{ t('分类名称') }}</label>
         <input id="category-name" ref="input" v-model="name" maxlength="60" autocomplete="off" :aria-invalid="attempted && !name.trim()" @input="attempted = false" />
-        <small v-if="attempted && !name.trim()" class="field-error">请输入分类名称</small>
+        <small v-if="attempted && !name.trim()" class="field-error">{{ t('请输入分类名称') }}</small>
         <p v-if="error" class="submit-error" role="alert">{{ error }}</p>
       </main>
-      <footer><button type="button" class="cancel" :disabled="submitting" @click="emit('close')">取消</button><button class="submit" type="submit" :disabled="submitting">{{ submitting ? '正在创建' : '创建分类' }}</button></footer>
+      <footer><button type="button" class="cancel" :disabled="submitting" @click="emit('close')">{{ t('取消') }}</button><button class="submit" type="submit" :disabled="submitting">{{ submitting ? t('正在创建') : t('创建分类') }}</button></footer>
     </form>
   </div>
 </template>

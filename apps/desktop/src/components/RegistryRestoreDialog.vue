@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../services/i18n";
 import { onBeforeUnmount, onMounted, ref } from "vue";
 import type { RegistryRestoreMode } from "../domain";
 import ConfirmDialog from "./ConfirmDialog.vue";
@@ -32,20 +33,20 @@ onBeforeUnmount(() => previousFocus?.focus());
 
 <template>
   <div ref="panel" @keydown="keydown">
-    <ConfirmDialog v-if="!secondConfirmation" title="恢复注册表" message="请选择恢复方式。写入前会备份当前状态；同一存档中的文件来源也将恢复。" :confirm-label="mode === 'merge' ? '合并恢复' : '继续覆盖恢复'" :destructive="mode === 'overwrite'" @cancel="emit('cancel')" @confirm="confirm">
+    <ConfirmDialog v-if="!secondConfirmation" :title="t('恢复注册表')" :message="t('请选择恢复方式。写入前会备份当前状态；同一存档中的文件来源也将恢复。')" :confirm-label="mode === 'merge' ? t('合并恢复') : t('继续覆盖恢复')" :destructive="mode === 'overwrite'" @cancel="emit('cancel')" @confirm="confirm">
       <template #body-extra>
         <div class="registry-options">
-          <p>将恢复以下子键及其下级内容：</p>
+          <p>{{ t('将恢复以下子键及其下级内容：') }}</p>
           <ul><li v-for="path in paths" :key="path"><code>{{ path }}</code></li></ul>
-          <fieldset><legend>恢复方式</legend>
-            <label><input v-model="mode" type="radio" value="merge" /><span><b>合并（默认）</b><small>恢复备份中的值，保留当前新增的值和子键。</small></span></label>
-            <label><input v-model="mode" type="radio" value="overwrite" /><span><b>覆盖</b><small>使上述子键与备份一致，删除其中后来新增的值和子键。</small></span></label>
+          <fieldset><legend>{{ t('恢复方式') }}</legend>
+            <label><input v-model="mode" type="radio" value="merge" /><span><b>{{ t('合并（默认）') }}</b><small>{{ t('恢复备份中的值，保留当前新增的值和子键。') }}</small></span></label>
+            <label><input v-model="mode" type="radio" value="overwrite" /><span><b>{{ t('覆盖') }}</b><small>{{ t('使上述子键与备份一致，删除其中后来新增的值和子键。') }}</small></span></label>
           </fieldset>
-          <p v-if="mode === 'overwrite'" class="risk" role="alert">覆盖会删除所列子树内备份以外的数据；不会修改其他子树。请核对路径。</p>
+          <p v-if="mode === 'overwrite'" class="risk" role="alert">{{ t('覆盖会删除所列子树内备份以外的数据；不会修改其他子树。请核对路径。') }}</p>
         </div>
       </template>
     </ConfirmDialog>
-    <ConfirmDialog v-else title="确认覆盖注册表子树" :message="`以下子键内新增的值和子键将被删除：\n${paths.join('\n')}\n\n恢复前会先创建安全快照。`" confirm-label="确认覆盖" destructive @cancel="secondConfirmation = false" @confirm="emit('confirm', 'overwrite')" />
+    <ConfirmDialog v-else :title="t('确认覆盖注册表子树')" :message="t('以下子键内新增的值和子键将被删除：\n{paths}\n\n恢复前会先创建安全快照。', { paths: paths.join('\n') })" :confirm-label="t('确认覆盖')" destructive @cancel="secondConfirmation = false" @confirm="emit('confirm', 'overwrite')" />
   </div>
 </template>
 

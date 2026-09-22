@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../services/i18n";
 import { computed, ref, watch } from "vue";
 import { Plus, Trash2 } from "@lucide/vue";
 import type { CloudSource } from "../services/settings";
@@ -9,7 +10,7 @@ const props = defineProps<{ source: CloudSource; secrets: Record<string, string>
 const fieldName = ref("");
 const fieldSecret = ref(true);
 const fieldError = ref("");
-const options = openDalTemplates.map((item) => ({ value: item.scheme, label: item.label }));
+const options = computed(() => openDalTemplates.map((item) => ({ value: item.scheme, label: t(item.label) })));
 const publicFields = computed(() => Object.keys(props.source.config ?? {}));
 const canBePublic = computed(() => publicConfigKeys.includes(fieldName.value));
 watch(canBePublic, (allowed) => { if (!allowed) fieldSecret.value = true; });
@@ -23,7 +24,7 @@ function addField(): void {
   const key = fieldName.value.trim();
   fieldError.value = validateAdvancedKey(key);
   if (fieldError.value) return;
-  if (publicFields.value.includes(key) || props.source.secretKeys?.includes(key)) { fieldError.value = "字段已存在"; return; }
+  if (publicFields.value.includes(key) || props.source.secretKeys?.includes(key)) { fieldError.value = t('字段已存在'); return; }
   if (fieldSecret.value || !canBePublic.value) (props.source.secretKeys ??= []).push(key);
   else (props.source.config ??= {})[key] = "";
   fieldName.value = ""; fieldSecret.value = true;
@@ -37,14 +38,14 @@ function removeField(key: string): void {
 
 <template>
   <div class="opendal-fields">
-    <label><span>名称</span><input v-model.trim="source.name" :disabled="disabled" type="text" /></label>
-    <label><span>存储服务模板</span><ThemedSelect :model-value="source.scheme ?? 's3'" :options="options" :disabled="disabled" label="OpenDAL 存储服务" @update:model-value="setScheme" /></label>
-    <label class="wide"><span>远端根目录</span><input v-model.trim="source.remotePath" :disabled="disabled" type="text" placeholder="/Chronicle" /><small>所有云端操作均限定在此目录内；更改配置后需重新测试。</small></label>
-    <p v-if="source.scheme === 'github'" class="wide hint">此模板只使用仓库默认分支。需要自定义分支、建仓或批量提交时，请选择 GitHub 兼容源。</p>
-    <p v-if="source.scheme === 'webdav'" class="wide hint">坚果云请优先使用 WebDAV 兼容源，以保留覆盖上传回退行为。</p>
-    <label v-for="key in publicFields" :key="key"><span>{{ key }} <small>公开配置</small></span><div class="field-row"><input v-model.trim="source.config![key]" :disabled="disabled" type="text" :aria-label="`${key} 公开配置`" /><button :disabled="disabled" type="button" :title="`移除 ${key}`" :aria-label="`移除 ${key}`" @click="removeField(key)"><Trash2 :size="14" /></button></div></label>
-    <label v-for="key in source.secretKeys ?? []" :key="key"><span>{{ key }} <small>机密 · Windows 凭据管理器</small></span><div class="field-row"><textarea v-if="key === 'credential' && source.scheme === 'gcs'" v-model="secrets[key]" :disabled="disabled" autocomplete="new-password" :aria-label="`${key} 机密配置`" :placeholder="credentialSaved ? '已保存，留空保留' : '粘贴服务账号 JSON'" /><input v-else v-model="secrets[key]" :disabled="disabled" type="password" autocomplete="new-password" :aria-label="`${key} 机密配置`" :placeholder="credentialSaved ? '已保存，留空保留' : '请输入机密值'" /><button :disabled="disabled" type="button" :title="`移除 ${key}`" :aria-label="`移除 ${key}`" @click="removeField(key)"><Trash2 :size="14" /></button></div><small v-if="key === 'credential' && source.scheme === 'gcs'">粘贴服务账号 JSON 内容；不会读取本机凭据文件。</small></label>
-    <details class="wide"><summary>高级键值配置</summary><p class="hint">仅支持当前已编译服务的配置键。新增字段默认作为机密保存；未知字段不能设为公开。</p><div class="advanced-row"><label><span>字段名</span><input v-model.trim="fieldName" :disabled="disabled" :aria-invalid="Boolean(fieldError)" type="text" placeholder="例如 session_token" /></label><label class="secret-toggle"><input v-model="fieldSecret" :disabled="disabled || !canBePublic" type="checkbox" />机密值</label><button :disabled="disabled" type="button" @click="addField"><Plus :size="14" />添加字段</button></div><p v-if="fieldError" class="field-error" role="alert">{{ fieldError }}</p></details>
+    <label><span>{{ t('名称') }}</span><input v-model.trim="source.name" :disabled="disabled" type="text" /></label>
+    <label><span>{{ t('存储服务模板') }}</span><ThemedSelect :model-value="source.scheme ?? 's3'" :options="options" :disabled="disabled" :label="t('OpenDAL 存储服务')" @update:model-value="setScheme" /></label>
+    <label class="wide"><span>{{ t('远端根目录') }}</span><input v-model.trim="source.remotePath" :disabled="disabled" type="text" placeholder="/Chronicle" /><small>{{ t('所有云端操作均限定在此目录内；更改配置后需重新测试。') }}</small></label>
+    <p v-if="source.scheme === 'github'" class="wide hint">{{ t('此模板只使用仓库默认分支。需要自定义分支、建仓或批量提交时，请选择 GitHub 兼容源。') }}</p>
+    <p v-if="source.scheme === 'webdav'" class="wide hint">{{ t('坚果云请优先使用 WebDAV 兼容源，以保留覆盖上传回退行为。') }}</p>
+    <label v-for="key in publicFields" :key="key"><span>{{ key }} <small>{{ t('公开配置') }}</small></span><div class="field-row"><input v-model.trim="source.config![key]" :disabled="disabled" type="text" :aria-label="t('{value1} 公开配置', { value1: key })" /><button :disabled="disabled" type="button" :title="t('移除 {value1}', { value1: key })" :aria-label="t('移除 {value1}', { value1: key })" @click="removeField(key)"><Trash2 :size="14" /></button></div></label>
+    <label v-for="key in source.secretKeys ?? []" :key="key"><span>{{ key }} <small>{{ t('机密 · Windows 凭据管理器') }}</small></span><div class="field-row"><textarea v-if="key === 'credential' && source.scheme === 'gcs'" v-model="secrets[key]" :disabled="disabled" autocomplete="new-password" :aria-label="t('{value1} 机密配置', { value1: key })" :placeholder="credentialSaved ? t('已保存，留空保留') : t('粘贴服务账号 JSON')" /><input v-else v-model="secrets[key]" :disabled="disabled" type="password" autocomplete="new-password" :aria-label="t('{value1} 机密配置', { value1: key })" :placeholder="credentialSaved ? t('已保存，留空保留') : t('请输入机密值')" /><button :disabled="disabled" type="button" :title="t('移除 {value1}', { value1: key })" :aria-label="t('移除 {value1}', { value1: key })" @click="removeField(key)"><Trash2 :size="14" /></button></div><small v-if="key === 'credential' && source.scheme === 'gcs'">{{ t('粘贴服务账号 JSON 内容；不会读取本机凭据文件。') }}</small></label>
+    <details class="wide"><summary>{{ t('高级键值配置') }}</summary><p class="hint">{{ t('仅支持当前已编译服务的配置键。新增字段默认作为机密保存；未知字段不能设为公开。') }}</p><div class="advanced-row"><label><span>{{ t('字段名') }}</span><input v-model.trim="fieldName" :disabled="disabled" :aria-invalid="Boolean(fieldError)" type="text" :placeholder="t('例如 session_token')" /></label><label class="secret-toggle"><input v-model="fieldSecret" :disabled="disabled || !canBePublic" type="checkbox" />{{ t('机密值') }}</label><button :disabled="disabled" type="button" @click="addField"><Plus :size="14" />{{ t('添加字段') }}</button></div><p v-if="fieldError" class="field-error" role="alert">{{ fieldError }}</p></details>
   </div>
 </template>
 

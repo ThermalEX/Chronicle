@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 import { isTauri } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -14,5 +15,5 @@ export async function openExternalUrl(url: string): Promise<void> {
   }
 
   const opened = window.open(parsed.href, "_blank", "noopener,noreferrer");
-  if (!opened) throw new Error("浏览器阻止了打开外部链接。");
+  if (!opened) throw new Error(t("浏览器阻止了打开外部链接。"));
 }

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t, locale } from "../services/i18n";
 import { BellRing, ClipboardCopy, FolderOpen, HardDrive, Info, Keyboard, RefreshCw, RotateCcw, Settings2, Trash2, Undo2, X } from "@lucide/vue";
 import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -21,6 +22,11 @@ const activeSection = ref<"software" | "notifications" | "backup" | "recycle" | 
 const closeButton = ref<HTMLButtonElement>();
 const draft = reactive<AppSettings>({ ...appSettings });
 const saving = ref(false);
+const languageError = ref("");
+const languageOptions: ThemedSelectOption[] = [
+  { value: "zh-CN", label: "简体中文" },
+  { value: "en", label: "English" },
+];
 const backdrop = createBackdropDismissal(() => emit("close"), () => !saving.value);
 const recycleItems = ref<RecycleItem[]>([]);
 const recycleBusy = ref(false);
@@ -36,36 +42,36 @@ const confirmAction = ref<{ title: string; message: string; run: () => Promise<v
 const recycleLocation = computed(() => draft.recycleBinPath || (repositoryPath.value ? `${repositoryPath.value}\\recycle` : "Chronicle\\recycle"));
 const allAutoBackupEnabled = computed(() => automationArchives.value.length > 0 && automationArchives.value.every((archive) => archive.autoBackupEnabled));
 const allAutomaticUploadEnabled = computed(() => automationArchives.value.length > 0 && automationArchives.value.every((archive) => archive.automaticUploadEnabled));
-const closeBehaviorOptions: ThemedSelectOption[] = [
-  { value: "ask", label: "每次询问" },
-  { value: "tray", label: "最小化到托盘" },
-  { value: "exit", label: "退出 Chronicle" },
-];
-const updateChannelOptions: ThemedSelectOption[] = [
-  { value: "stable", label: "正式版" },
-  { value: "beta", label: "测试版（含正式版）" },
-];
-const colorThemeOptions: ThemedSelectOption[] = [
-  { value: "teal", label: "青绿" },
-  { value: "indigo", label: "靛蓝" },
-  { value: "violet", label: "紫罗兰" },
-  { value: "amber", label: "琥珀" },
-  { value: "rose", label: "玫红" },
-  { value: "gray", label: "灰色" },
-];
-const colorModeOptions: ThemedSelectOption[] = [
-  { value: "light", label: "日间模式" },
-  { value: "dark", label: "夜间模式" },
-];
+const closeBehaviorOptions = computed<ThemedSelectOption[]>(() => [
+  { value: "ask", label: t('每次询问') },
+  { value: "tray", label: t('最小化到托盘') },
+  { value: "exit", label: t('退出 Chronicle') },
+]);
+const updateChannelOptions = computed<ThemedSelectOption[]>(() => [
+  { value: "stable", label: t('正式版') },
+  { value: "beta", label: t('测试版（含正式版）') },
+]);
+const colorThemeOptions = computed<ThemedSelectOption[]>(() => [
+  { value: "teal", label: t('青绿') },
+  { value: "indigo", label: t('靛蓝') },
+  { value: "violet", label: t('紫罗兰') },
+  { value: "amber", label: t('琥珀') },
+  { value: "rose", label: t('玫红') },
+  { value: "gray", label: t('灰色') },
+]);
+const colorModeOptions = computed<ThemedSelectOption[]>(() => [
+  { value: "light", label: t('日间模式') },
+  { value: "dark", label: t('夜间模式') },
+]);
 
-const sections = [
-  { id: "software" as const, label: "软件", icon: Settings2 },
-  { id: "notifications" as const, label: "通知与错误", icon: BellRing },
-  { id: "backup" as const, label: "存储与备份", icon: HardDrive },
-  { id: "recycle" as const, label: "回收站", icon: Trash2 },
-  { id: "hotkeys" as const, label: "热键", icon: Keyboard },
-  { id: "about" as const, label: "关于", icon: Info },
-];
+const sections = computed(() => [
+  { id: "software" as const, label: t('软件'), icon: Settings2 },
+  { id: "notifications" as const, label: t('通知与错误'), icon: BellRing },
+  { id: "backup" as const, label: t('存储与备份'), icon: HardDrive },
+  { id: "recycle" as const, label: t('回收站'), icon: Trash2 },
+  { id: "hotkeys" as const, label: t('热键'), icon: Keyboard },
+  { id: "about" as const, label: t('关于'), icon: Info },
+]);
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -87,11 +93,11 @@ async function copyDiagnostics(entry?: DiagnosticEntry): Promise<void> {
     ? `${entry.occurredAt}\n${entry.operation}\n${entry.message}\n${entry.details}`
     : diagnostics.value.map((item) => `${item.occurredAt}\n${item.operation}\n${item.message}\n${item.details}`).join("\n\n");
   try { await navigator.clipboard.writeText(text); }
-  catch (error) { diagnosticsError.value = error instanceof Error ? error.message : "无法复制错误记录"; }
+  catch (error) { diagnosticsError.value = error instanceof Error ? error.message : t('无法复制错误记录'); }
 }
 
 async function clearDiagnostics(): Promise<void> {
-  if (!diagnostics.value.length || !window.confirm("清空全部错误记录？此操作不会影响存档和同步设置。")) return;
+  if (!diagnostics.value.length || !window.confirm(t('清空全部错误记录？此操作不会影响存档和同步设置。'))) return;
   diagnosticsBusy.value = true;
   try { await diagnosticsRepository.clear(); diagnostics.value = []; }
   catch (error) { diagnosticsError.value = error instanceof Error ? error.message : String(error); }
@@ -117,15 +123,15 @@ async function runRecycleAction(): Promise<void> {
 }
 
 function restoreItem(item: RecycleItem): void {
-  confirmAction.value = { title: "恢复项目", message: `将“${item.displayName}”恢复到资料库。`, run: () => archiveRepository.restoreRecycleItem(item.id) };
+  confirmAction.value = { title: t('恢复项目'), message: t('将“{value1}”恢复到资料库。', { value1: item.displayName }), run: () => archiveRepository.restoreRecycleItem(item.id) };
 }
 
 function deleteItem(item: RecycleItem): void {
-  confirmAction.value = { title: "永久删除", message: `“${item.displayName}”及其全部备份将永久删除，无法恢复。`, run: () => archiveRepository.permanentlyDeleteRecycleItem(item.id) };
+  confirmAction.value = { title: t('永久删除'), message: t('“{value1}”及其全部备份将永久删除，无法恢复。', { value1: item.displayName }), run: () => archiveRepository.permanentlyDeleteRecycleItem(item.id) };
 }
 
 function emptyRecycleBin(): void {
-  confirmAction.value = { title: "清空回收站", message: "回收站中的全部存档和分类将永久删除，无法恢复。", run: () => archiveRepository.emptyRecycleBin() };
+  confirmAction.value = { title: t('清空回收站'), message: t('回收站中的全部存档和分类将永久删除，无法恢复。'), run: () => archiveRepository.emptyRecycleBin() };
 }
 
 async function save(): Promise<void> {
@@ -164,6 +170,22 @@ function updateColorMode(value: string | null): void {
   if (value) draft.colorMode = value as ColorMode;
 }
 
+async function updateLanguage(value: string | null): Promise<void> {
+  if ((value !== "zh-CN" && value !== "en") || saving.value) return;
+  languageError.value = "";
+  saving.value = true;
+  try {
+    await saveAppSettings({ ...appSettings, language: value });
+    draft.language = appSettings.language;
+    emit("saved");
+  } catch (error) {
+    draft.language = appSettings.language;
+    languageError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    saving.value = false;
+  }
+}
+
 function reset(): void {
   resetAppSettings();
   Object.assign(draft, appSettings);
@@ -171,7 +193,7 @@ function reset(): void {
 
 async function chooseRecycleBinPath(): Promise<void> {
   if (!isTauri()) return;
-  const selected = await open({ directory: true, multiple: false, title: "选择回收站文件夹" });
+  const selected = await open({ directory: true, multiple: false, title: t('选择回收站文件夹') });
   if (typeof selected === "string") draft.recycleBinPath = selected;
 }
 
@@ -217,12 +239,12 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
   <div class="dialog-backdrop" @pointerdown="backdrop.pointerDown" @pointerup="backdrop.pointerUp" @pointercancel="backdrop.pointerCancel">
     <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <header>
-        <div><p>CHRONICLE</p><h2 id="settings-title">设置</h2></div>
-        <button ref="closeButton" class="close-button" aria-label="关闭设置" title="关闭设置" @click="emit('close')"><X :size="18" /></button>
+        <div><p>CHRONICLE</p><h2 id="settings-title">{{ t('设置') }}</h2></div>
+        <button ref="closeButton" class="close-button" :aria-label="t('关闭设置')" :title="t('关闭设置')" @click="emit('close')"><X :size="18" /></button>
       </header>
 
       <div class="settings-layout">
-        <nav aria-label="设置分类">
+        <nav :aria-label="t('设置分类')">
           <button v-for="section in sections" :key="section.id" :class="{ active: activeSection === section.id }" @click="activeSection = section.id">
             <component :is="section.icon" :size="17" /><span>{{ section.label }}</span>
           </button>
@@ -230,77 +252,79 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
 
         <main>
           <section v-if="activeSection === 'software'" aria-labelledby="software-title">
-            <div class="section-heading"><h3 id="software-title">软件</h3><p>控制 Chronicle 的启动、关闭和通知行为。</p></div>
+            <div class="section-heading"><h3 id="software-title">{{ t('软件') }}</h3><p>{{ t('控制 Chronicle 的启动、关闭和通知行为。') }}</p></div>
             <div class="setting-group">
-              <label class="setting-row select-row"><span><b>配色主题</b><small>为 Chronicle 选择一组强调色。</small></span><ThemedSelect :model-value="draft.colorTheme" :options="colorThemeOptions" label="配色主题" @update:model-value="updateColorTheme" /></label>
-              <label class="setting-row select-row"><span><b>显示模式</b><small>右上角太阳/月亮按钮可随时切换。</small></span><ThemedSelect :model-value="draft.colorMode" :options="colorModeOptions" label="显示模式" @update:model-value="updateColorMode" /></label>
-              <label class="setting-row"><span><b>随系统启动</b><small>登录 Windows 后自动启动 Chronicle</small></span><input v-model="draft.launchAtStartup" type="checkbox" role="switch" /></label>
-              <label class="setting-row"><span><b>启动时检测云端</b><small>后台验证全部同步源的读写、列举与清理能力</small></span><input v-model="draft.checkCloudOnLaunch" type="checkbox" role="switch" /></label>
-              <label class="setting-row"><span><b>桌面通知</b><small>备份、同步和恢复完成后显示通知</small></span><input v-model="draft.notifications" type="checkbox" role="switch" /></label>
-              <label class="setting-row select-row"><span><b>关闭主窗口时</b><small>决定关闭按钮的默认行为</small></span><ThemedSelect :model-value="draft.closeBehavior" :options="closeBehaviorOptions" label="关闭主窗口时" @update:model-value="updateCloseBehavior" /></label>
+              <label class="setting-row select-row"><span><b>{{ t('界面语言') }}</b><small>{{ t('选择后立即应用并保存。') }}</small></span><ThemedSelect :model-value="appSettings.language" :options="languageOptions" :disabled="saving" :label="t('界面语言')" @update:model-value="updateLanguage" /></label>
+              <p v-if="languageError" class="recycle-error" role="alert">{{ languageError }}</p>
+              <label class="setting-row select-row"><span><b>{{ t('配色主题') }}</b><small>{{ t('为 Chronicle 选择一组强调色。') }}</small></span><ThemedSelect :model-value="draft.colorTheme" :options="colorThemeOptions" :label="t('配色主题')" @update:model-value="updateColorTheme" /></label>
+              <label class="setting-row select-row"><span><b>{{ t('显示模式') }}</b><small>{{ t('右上角太阳/月亮按钮可随时切换。') }}</small></span><ThemedSelect :model-value="draft.colorMode" :options="colorModeOptions" :label="t('显示模式')" @update:model-value="updateColorMode" /></label>
+              <label class="setting-row"><span><b>{{ t('随系统启动') }}</b><small>{{ t('登录 Windows 后自动启动 Chronicle') }}</small></span><input v-model="draft.launchAtStartup" type="checkbox" role="switch" /></label>
+              <label class="setting-row"><span><b>{{ t('启动时检测云端') }}</b><small>{{ t('后台验证全部同步源的读写、列举与清理能力') }}</small></span><input v-model="draft.checkCloudOnLaunch" type="checkbox" role="switch" /></label>
+              <label class="setting-row"><span><b>{{ t('桌面通知') }}</b><small>{{ t('备份、同步和恢复完成后显示通知') }}</small></span><input v-model="draft.notifications" type="checkbox" role="switch" /></label>
+              <label class="setting-row select-row"><span><b>{{ t('关闭主窗口时') }}</b><small>{{ t('决定关闭按钮的默认行为') }}</small></span><ThemedSelect :model-value="draft.closeBehavior" :options="closeBehaviorOptions" :label="t('关闭主窗口时')" @update:model-value="updateCloseBehavior" /></label>
             </div>
           </section>
 
           <section v-else-if="activeSection === 'notifications'" aria-labelledby="notifications-title">
-            <div class="section-heading recycle-heading"><div><h3 id="notifications-title">通知与错误记录</h3><p>同步、备份和资料库操作失败时会保留脱敏后的详情。</p></div><div class="diagnostics-actions"><button :disabled="diagnosticsBusy || !diagnostics.length" @click="copyDiagnostics()"><ClipboardCopy :size="14" />复制全部</button><button class="empty-button" :disabled="diagnosticsBusy || !diagnostics.length" @click="clearDiagnostics"><Trash2 :size="14" />清空</button></div></div>
+            <div class="section-heading recycle-heading"><div><h3 id="notifications-title">{{ t('通知与错误记录') }}</h3><p>{{ t('同步、备份和资料库操作失败时会保留脱敏后的详情。') }}</p></div><div class="diagnostics-actions"><button :disabled="diagnosticsBusy || !diagnostics.length" @click="copyDiagnostics()"><ClipboardCopy :size="14" />{{ t('复制全部') }}</button><button class="empty-button" :disabled="diagnosticsBusy || !diagnostics.length" @click="clearDiagnostics"><Trash2 :size="14" />{{ t('清空') }}</button></div></div>
             <p v-if="diagnosticsError" class="recycle-error" role="alert">{{ diagnosticsError }}</p>
-            <div v-if="diagnosticsBusy && !diagnostics.length" class="recycle-empty">正在读取错误记录…</div>
-            <div v-else-if="!diagnostics.length" class="recycle-empty"><BellRing :size="24" /><b>暂无错误记录</b><span>后续失败操作会显示在这里。</span></div>
-            <div v-else class="diagnostics-list"><article v-for="entry in diagnostics" :key="entry.id"><span><b>{{ entry.operation }}</b><small>{{ new Date(entry.occurredAt).toLocaleString('zh-CN') }} · {{ entry.message }}</small><code>{{ entry.details }}</code></span><button :aria-label="`复制 ${entry.operation} 错误详情`" :title="`复制 ${entry.operation} 错误详情`" @click="copyDiagnostics(entry)"><ClipboardCopy :size="15" />复制</button></article></div>
+            <div v-if="diagnosticsBusy && !diagnostics.length" class="recycle-empty">{{ t('正在读取错误记录…') }}</div>
+            <div v-else-if="!diagnostics.length" class="recycle-empty"><BellRing :size="24" /><b>{{ t('暂无错误记录') }}</b><span>{{ t('后续失败操作会显示在这里。') }}</span></div>
+            <div v-else class="diagnostics-list"><article v-for="entry in diagnostics" :key="entry.id"><span><b>{{ entry.operation }}</b><small>{{ new Date(entry.occurredAt).toLocaleString(locale) }} · {{ entry.message }}</small><code>{{ entry.details }}</code></span><button :aria-label="t('复制 {value1} 错误详情', { value1: entry.operation })" :title="t('复制 {value1} 错误详情', { value1: entry.operation })" @click="copyDiagnostics(entry)"><ClipboardCopy :size="15" />{{ t('复制') }}</button></article></div>
           </section>
 
           <section v-else-if="activeSection === 'backup'" aria-labelledby="backup-title">
-            <div class="section-heading"><h3 id="backup-title">存储与备份</h3><p>设置新存档、监听合并时间和本地版本保留方式。</p></div>
+            <div class="section-heading"><h3 id="backup-title">{{ t('存储与备份') }}</h3><p>{{ t('设置新存档、监听合并时间和本地版本保留方式。') }}</p></div>
             <div class="setting-group">
-              <label class="setting-row"><span><b>立即创建首个备份</b><small>添加文件或文件夹后建立初始时间节点</small></span><input v-model="draft.createInitialSnapshot" type="checkbox" role="switch" /></label>
-              <label class="setting-row"><span><b>合并时间</b><small>首次变化立即备份；窗口结束时再保存一次最新状态，默认 5 秒</small></span><div class="number-control"><input v-model.number="draft.autoBackupDelaySeconds" class="number-input" type="number" min="1" max="300" aria-label="自动备份合并秒数" /><em>秒</em></div></label>
-              <div class="setting-row automation-actions"><span><b>批量自动化</b><small>按存档分别保存；已开启的项目再次点击可全部关闭。</small></span><div><button :class="{ danger: allAutoBackupEnabled }" :disabled="automationBusy || !automationArchives.length" @click="toggleAllAutomation('backup')">{{ allAutoBackupEnabled ? '关闭所有自动备份' : '开启所有自动备份' }}</button><button :class="{ danger: allAutomaticUploadEnabled }" :disabled="automationBusy || !automationArchives.length" @click="toggleAllAutomation('upload')">{{ allAutomaticUploadEnabled ? '关闭所有自动上传' : '开启所有自动上传' }}</button></div></div>
-              <div class="setting-row"><span><b>每个存档保留版本</b><small>默认保留全部版本；设置上限后清理最旧的普通备份</small></span><div class="retention-control"><input v-if="draft.retentionCount !== null" v-model.number="draft.retentionCount" aria-label="版本保留数量" class="number-input" type="number" min="1" max="999" /><label><span>无限制</span><input :checked="draft.retentionCount === null" type="checkbox" role="switch" @change="toggleRetentionLimit" /></label></div></div>
-              <label class="setting-row"><span><b>启用回收站</b><small>删除的存档先移入回收站；关闭后直接永久删除</small></span><input v-model="draft.recycleBinEnabled" type="checkbox" role="switch" /></label>
-              <div class="setting-row recycle-path"><span><b>回收站位置</b><small>点击路径可在资源管理器中打开；右侧按钮用于选择新的位置</small></span><div><button class="recycle-location" type="button" :title="recycleLocation" :disabled="!isTauri()" @click="openRecycleBin">{{ recycleLocation }}</button><button aria-label="选择回收站文件夹" title="选择回收站文件夹" :disabled="!isTauri()" @click="chooseRecycleBinPath"><FolderOpen :size="15" /></button></div></div>
+              <label class="setting-row"><span><b>{{ t('立即创建首个备份') }}</b><small>{{ t('添加文件或文件夹后建立初始时间节点') }}</small></span><input v-model="draft.createInitialSnapshot" type="checkbox" role="switch" /></label>
+              <label class="setting-row"><span><b>{{ t('合并时间') }}</b><small>{{ t('首次变化立即备份；窗口结束时再保存一次最新状态，默认 5 秒') }}</small></span><div class="number-control"><input v-model.number="draft.autoBackupDelaySeconds" class="number-input" type="number" min="1" max="300" :aria-label="t('自动备份合并秒数')" /><em>{{ t('秒') }}</em></div></label>
+              <div class="setting-row automation-actions"><span><b>{{ t('批量自动化') }}</b><small>{{ t('按存档分别保存；已开启的项目再次点击可全部关闭。') }}</small></span><div><button :class="{ danger: allAutoBackupEnabled }" :disabled="automationBusy || !automationArchives.length" @click="toggleAllAutomation('backup')">{{ allAutoBackupEnabled ? t('关闭所有自动备份') : t('开启所有自动备份') }}</button><button :class="{ danger: allAutomaticUploadEnabled }" :disabled="automationBusy || !automationArchives.length" @click="toggleAllAutomation('upload')">{{ allAutomaticUploadEnabled ? t('关闭所有自动上传') : t('开启所有自动上传') }}</button></div></div>
+              <div class="setting-row"><span><b>{{ t('每个存档保留版本') }}</b><small>{{ t('默认保留全部版本；设置上限后清理最旧的普通备份') }}</small></span><div class="retention-control"><input v-if="draft.retentionCount !== null" v-model.number="draft.retentionCount" :aria-label="t('版本保留数量')" class="number-input" type="number" min="1" max="999" /><label><span>{{ t('无限制') }}</span><input :checked="draft.retentionCount === null" type="checkbox" role="switch" @change="toggleRetentionLimit" /></label></div></div>
+              <label class="setting-row"><span><b>{{ t('启用回收站') }}</b><small>{{ t('删除的存档先移入回收站；关闭后直接永久删除') }}</small></span><input v-model="draft.recycleBinEnabled" type="checkbox" role="switch" /></label>
+              <div class="setting-row recycle-path"><span><b>{{ t('回收站位置') }}</b><small>{{ t('点击路径可在资源管理器中打开；右侧按钮用于选择新的位置') }}</small></span><div><button class="recycle-location" type="button" :title="recycleLocation" :disabled="!isTauri()" @click="openRecycleBin">{{ recycleLocation }}</button><button :aria-label="t('选择回收站文件夹')" :title="t('选择回收站文件夹')" :disabled="!isTauri()" @click="chooseRecycleBinPath"><FolderOpen :size="15" /></button></div></div>
               <p v-if="recycleLocationError" class="recycle-location-error" role="alert">{{ recycleLocationError }}</p>
             </div>
           </section>
 
           <section v-else-if="activeSection === 'recycle'" aria-labelledby="recycle-title">
-            <div class="section-heading recycle-heading"><div><h3 id="recycle-title">回收站</h3><p>删除内容默认永久保留，可恢复或永久清理。</p></div><button class="empty-button" :disabled="recycleBusy || !recycleItems.length" @click="emptyRecycleBin"><Trash2 :size="14" />清空</button></div>
+            <div class="section-heading recycle-heading"><div><h3 id="recycle-title">{{ t('回收站') }}</h3><p>{{ t('删除内容默认永久保留，可恢复或永久清理。') }}</p></div><button class="empty-button" :disabled="recycleBusy || !recycleItems.length" @click="emptyRecycleBin"><Trash2 :size="14" />{{ t('清空') }}</button></div>
             <p v-if="recycleError" class="recycle-error" role="alert">{{ recycleError }}</p>
-            <div v-if="recycleBusy && !recycleItems.length" class="recycle-empty">正在读取回收站…</div>
-            <div v-else-if="!recycleItems.length" class="recycle-empty"><Trash2 :size="24" /><b>回收站为空</b><span>删除的存档和分类会显示在这里。</span></div>
+            <div v-if="recycleBusy && !recycleItems.length" class="recycle-empty">{{ t('正在读取回收站…') }}</div>
+            <div v-else-if="!recycleItems.length" class="recycle-empty"><Trash2 :size="24" /><b>{{ t('回收站为空') }}</b><span>{{ t('删除的存档和分类会显示在这里。') }}</span></div>
             <div v-else class="recycle-list">
               <article v-for="item in recycleItems" :key="item.id">
-                <span class="recycle-icon"><Trash2 :size="17" /></span><span><b>{{ item.displayName }}</b><small>{{ item.kind === 'category' ? '分类' : '存档' }} · {{ item.entryCount }} 个存档 · {{ formatBytes(item.sizeBytes) }} · {{ new Date(item.deletedAt).toLocaleString() }}</small></span>
-                <div><button :disabled="recycleBusy" :aria-label="`恢复 ${item.displayName}`" :title="`恢复 ${item.displayName}`" @click="restoreItem(item)"><Undo2 :size="14" />恢复</button><button class="danger" :disabled="recycleBusy" :aria-label="`永久删除 ${item.displayName}`" :title="`永久删除 ${item.displayName}`" @click="deleteItem(item)"><Trash2 :size="14" />删除</button></div>
+                <span class="recycle-icon"><Trash2 :size="17" /></span><span><b>{{ item.displayName }}</b><small>{{ item.kind === 'category' ? t('分类') : t('存档') }} · {{ t('{count} 个存档', { count: item.entryCount }) }} · {{ formatBytes(item.sizeBytes) }} · {{ new Date(item.deletedAt).toLocaleString(locale) }}</small></span>
+                <div><button :disabled="recycleBusy" :aria-label="t('恢复 {value1}', { value1: item.displayName })" :title="t('恢复 {value1}', { value1: item.displayName })" @click="restoreItem(item)"><Undo2 :size="14" />{{ t('恢复') }}</button><button class="danger" :disabled="recycleBusy" :aria-label="t('永久删除 {value1}', { value1: item.displayName })" :title="t('永久删除 {value1}', { value1: item.displayName })" @click="deleteItem(item)"><Trash2 :size="14" />{{ t('删除') }}</button></div>
               </article>
             </div>
           </section>
 
           <section v-else-if="activeSection === 'hotkeys'" aria-labelledby="hotkeys-title">
-            <div class="section-heading"><h3 id="hotkeys-title">热键</h3><p>点击热键后按下组合键保存；Esc 取消，Delete 清除。</p></div>
+            <div class="section-heading"><h3 id="hotkeys-title">{{ t('热键') }}</h3><p>{{ t('点击热键后按下组合键保存；Esc 取消，Delete 清除。') }}</p></div>
             <div class="setting-group hotkey-group">
-              <div class="setting-row"><span><b>聚焦搜索</b><small>在存档列表中开始查找</small></span><ShortcutRecorder v-model="draft.searchShortcut" label="聚焦搜索热键" /></div>
-              <div class="setting-row"><span><b>创建备份</b><small>为当前选中的存档创建时间节点</small></span><ShortcutRecorder v-model="draft.snapshotShortcut" label="创建备份热键" /></div>
-              <div class="setting-row"><span><b>打开设置</b><small>从任意主界面打开此窗口</small></span><ShortcutRecorder v-model="draft.settingsShortcut" label="打开设置热键" /></div>
+              <div class="setting-row"><span><b>{{ t('聚焦搜索') }}</b><small>{{ t('在存档列表中开始查找') }}</small></span><ShortcutRecorder v-model="draft.searchShortcut" :label="t('聚焦搜索热键')" /></div>
+              <div class="setting-row"><span><b>{{ t('创建备份') }}</b><small>{{ t('为当前选中的存档创建时间节点') }}</small></span><ShortcutRecorder v-model="draft.snapshotShortcut" :label="t('创建备份热键')" /></div>
+              <div class="setting-row"><span><b>{{ t('打开设置') }}</b><small>{{ t('从任意主界面打开此窗口') }}</small></span><ShortcutRecorder v-model="draft.settingsShortcut" :label="t('打开设置热键')" /></div>
             </div>
           </section>
 
           <section v-else aria-labelledby="about-title">
-            <div class="section-heading"><h3 id="about-title">关于</h3><p>本地云端通用文件快照管理器。</p></div>
-            <div class="about-card"><img class="about-logo" :src="appIcon" alt="Chronicle 图标" /><div><h4>{{ appMetadata.name }}</h4><p>版本 {{ appMetadata.version }}</p><p>作者 {{ appMetadata.author }}</p><a class="about-repository-link" href="https://github.com/ThermalEX/Chronicle" target="_blank" rel="noreferrer">查看 GitHub 仓库</a></div></div>
-            <dl class="about-list"><div><dt>存储引擎</dt><dd>Rust · 7z · SHA-256</dd></div><div><dt>桌面框架</dt><dd>Tauri 2 · Vue 3</dd></div><div><dt>许可证</dt><dd>尚未指定</dd></div></dl>
-            <div class="setting-row about-update-action"><span><b>新手教程</b><small>重新了解创建存档、备份与云端同步。</small></span><button @click="emit('restart-tutorial')"><RotateCcw :size="15" />重新开始教程</button></div>
+            <div class="section-heading"><h3 id="about-title">{{ t('关于') }}</h3><p>{{ t('本地云端通用文件快照管理器。') }}</p></div>
+            <div class="about-card"><img class="about-logo" :src="appIcon" :alt="t('Chronicle 图标')" /><div><h4>{{ appMetadata.name }}</h4><p>{{ t('版本') }} {{ appMetadata.version }}</p><p>{{ t('作者') }} {{ appMetadata.author }}</p><a class="about-repository-link" href="https://github.com/ThermalEX/Chronicle" target="_blank" rel="noreferrer">{{ t('查看 GitHub 仓库') }}</a></div></div>
+            <dl class="about-list"><div><dt>{{ t('存储引擎') }}</dt><dd>Rust · 7z · SHA-256</dd></div><div><dt>{{ t('桌面框架') }}</dt><dd>Tauri 2 · Vue 3</dd></div><div><dt>{{ t('许可证') }}</dt><dd>{{ t('尚未指定') }}</dd></div></dl>
+            <div class="setting-row about-update-action"><span><b>{{ t('新手教程') }}</b><small>{{ t('重新了解创建存档、备份与云端同步。') }}</small></span><button @click="emit('restart-tutorial')"><RotateCcw :size="15" />{{ t('重新开始教程') }}</button></div>
             <div class="setting-group about-update-group">
-              <label class="setting-row select-row"><span><b>更新频道</b><small>正式版只检查稳定发布；测试版同时接收预发布版本。</small></span><ThemedSelect :model-value="draft.updateChannel" :options="updateChannelOptions" label="更新频道" @update:model-value="updateUpdateChannel" /></label>
-              <label class="setting-row"><span><b>启动时检查更新</b><small>发现新版本时显示更新说明，不会自动下载。</small></span><input v-model="draft.checkForUpdates" type="checkbox" role="switch" /></label>
-              <div class="setting-row about-update-action"><span><b>手动检查</b><small>立即检查所选频道是否有新版本。</small></span><button :disabled="props.updateChecking" @click="emit('check-update', draft.updateChannel)"><RefreshCw :size="15" :class="{ spinning: props.updateChecking }" />{{ props.updateChecking ? '检查中' : '检查更新' }}</button></div>
+              <label class="setting-row select-row"><span><b>{{ t('更新频道') }}</b><small>{{ t('正式版只检查稳定发布；测试版同时接收预发布版本。') }}</small></span><ThemedSelect :model-value="draft.updateChannel" :options="updateChannelOptions" :label="t('更新频道')" @update:model-value="updateUpdateChannel" /></label>
+              <label class="setting-row"><span><b>{{ t('启动时检查更新') }}</b><small>{{ t('发现新版本时显示更新说明，不会自动下载。') }}</small></span><input v-model="draft.checkForUpdates" type="checkbox" role="switch" /></label>
+              <div class="setting-row about-update-action"><span><b>{{ t('手动检查') }}</b><small>{{ t('立即检查所选频道是否有新版本。') }}</small></span><button :disabled="props.updateChecking" @click="emit('check-update', draft.updateChannel)"><RefreshCw :size="15" :class="{ spinning: props.updateChecking }" />{{ props.updateChecking ? t('检查中') : t('检查更新') }}</button></div>
             </div>
           </section>
         </main>
       </div>
 
-      <footer><button class="reset-button" :disabled="saving" @click="reset"><RotateCcw :size="15" />恢复默认设置</button><div><button class="cancel-button" :disabled="saving" @click="emit('close')">取消</button><button class="save-button" :disabled="saving" @click="save">{{ saving ? '保存中' : '保存设置' }}</button></div></footer>
+      <footer><button class="reset-button" :disabled="saving" @click="reset"><RotateCcw :size="15" />{{ t('恢复默认设置') }}</button><div><button class="cancel-button" :disabled="saving" @click="emit('close')">{{ t('取消') }}</button><button class="save-button" :disabled="saving" @click="save">{{ saving ? t('保存中') : t('保存设置') }}</button></div></footer>
     </section>
-    <ConfirmDialog v-if="confirmAction" :title="confirmAction.title" :message="confirmAction.message" confirm-label="确定" danger @cancel="confirmAction = undefined" @confirm="runRecycleAction" />
+    <ConfirmDialog v-if="confirmAction" :title="confirmAction.title" :message="confirmAction.message" :confirm-label="t('确定')" danger @cancel="confirmAction = undefined" @confirm="runRecycleAction" />
   </div>
 </template>
 

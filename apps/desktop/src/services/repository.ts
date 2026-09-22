@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 import { invoke, isTauri as detectTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
@@ -60,7 +61,7 @@ class TauriArchiveRepository implements ArchiveRepository {
       directory: kind === "folder",
       multiple: true,
       recursive: kind === "folder",
-      title: kind === "folder" ? "选择存档文件夹" : "选择存档文件",
+      title: kind === "folder" ? t("选择存档文件夹") : t("选择存档文件"),
     });
     const paths = typeof selected === "string" ? [selected] : selected ?? [];
     return paths.map((path) => ({
@@ -169,11 +170,11 @@ class TauriArchiveRepository implements ArchiveRepository {
 
   async createSnapshot(
     archive: ArchiveRecord,
-    title = "手动备份",
+    title = t("手动备份"),
     safety = false,
     onProgress?: (progress: SnapshotProgress) => void,
   ): Promise<SnapshotRecord> {
-    onProgress?.({ current: 0, total: 1, currentPath: "正在由本地仓库创建归档" });
+    onProgress?.({ current: 0, total: 1, currentPath: t("正在由本地仓库创建归档") });
     const snapshot = await invoke<SnapshotRecord>("create_snapshot", {
       entryId: archive.id,
       title,

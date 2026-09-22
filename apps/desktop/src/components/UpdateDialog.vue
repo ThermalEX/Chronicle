@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../services/i18n";
 import { ClipboardCopy, Download, ExternalLink, X } from "@lucide/vue";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -14,9 +15,9 @@ const message = ref("");
 async function copyDownloadLink(): Promise<void> {
   try {
     await navigator.clipboard.writeText(props.update.downloadUrl);
-    message.value = "下载链接已复制";
+    message.value = t("下载链接已复制");
   } catch {
-    message.value = "无法复制下载链接";
+    message.value = t("无法复制下载链接");
   }
 }
 
@@ -31,7 +32,7 @@ async function openReleasePage(): Promise<void> {
 async function downloadAndInstall(): Promise<void> {
   if (!props.update.installer || installing.value) return;
   installing.value = true;
-  message.value = "正在下载并校验安装包…";
+  message.value = t("正在下载并校验安装包…");
   try {
     await invoke("download_and_install_update", {
       url: props.update.installer.browserDownloadUrl,
@@ -51,17 +52,17 @@ onMounted(() => { void nextTick(() => closeButton.value?.focus()); });
   <div class="update-backdrop">
     <section class="update-dialog" role="dialog" aria-modal="true" aria-labelledby="update-title" @keydown.esc="emit('close')">
       <header>
-        <div><p>发现新版本</p><h2 id="update-title">{{ update.title }}</h2></div>
-        <button ref="closeButton" aria-label="关闭更新提示" title="关闭更新提示" @click="emit('close')"><X :size="19" /></button>
+        <div><p>{{ t('发现新版本') }}</p><h2 id="update-title">{{ update.title }}</h2></div>
+        <button ref="closeButton" :aria-label="t('关闭更新提示')" :title="t('关闭更新提示')" @click="emit('close')"><X :size="19" /></button>
       </header>
       <main>
-        <p class="update-version">当前版本将更新至 {{ update.version }}</p>
+        <p class="update-version">{{ t('当前版本将更新至 {version}', { version: update.version }) }}</p>
         <pre>{{ update.notes }}</pre>
         <p v-if="message" class="update-message" role="status">{{ message }}</p>
       </main>
       <footer>
-        <button class="subtle" @click="copyDownloadLink"><ClipboardCopy :size="15" />复制链接</button>
-        <div><button class="subtle" @click="openReleasePage"><ExternalLink :size="15" />在浏览器中打开</button><button class="install" :disabled="!update.installer || installing" @click="downloadAndInstall"><Download :size="15" />{{ installing ? '下载并校验中' : update.installer ? '下载并安装' : '暂无 Windows 安装包' }}</button></div>
+        <button class="subtle" @click="copyDownloadLink"><ClipboardCopy :size="15" />{{ t('复制链接') }}</button>
+        <div><button class="subtle" @click="openReleasePage"><ExternalLink :size="15" />{{ t('在浏览器中打开') }}</button><button class="install" :disabled="!update.installer || installing" @click="downloadAndInstall"><Download :size="15" />{{ installing ? t('下载并校验中') : update.installer ? t('下载并安装') : t('暂无 Windows 安装包') }}</button></div>
       </footer>
     </section>
   </div>

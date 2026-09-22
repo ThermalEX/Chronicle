@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { locale, t } from "../services/i18n";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ArrowRight, Cloud, FolderArchive, HardDrive, ShieldCheck, X } from "@lucide/vue";
 import type { TutorialView } from "../services/onboarding";
@@ -7,10 +8,11 @@ import appIcon from "../assets/icon.png";
 import TutorialThemePicker from "./TutorialThemePicker.vue";
 import type { Appearance } from "../services/appearance";
 
-const props = defineProps<{ welcome?: boolean; appearancePage?: boolean; appearance: Appearance; appearanceSaving?: boolean; route?: boolean; finish?: boolean; step?: TutorialView; hasArchive?: boolean }>();
-const emit = defineEmits<{ "appearance-change": [appearance: Appearance]; start: []; skip: []; local: []; cloud: []; next: []; "use-existing": [] }>();
+const props = defineProps<{ welcome?: boolean; languageSaving?: boolean; appearancePage?: boolean; appearance: Appearance; appearanceSaving?: boolean; route?: boolean; finish?: boolean; step?: TutorialView; hasArchive?: boolean }>();
+const emit = defineEmits<{ "language-change": [language: "zh-CN" | "en"]; "appearance-change": [appearance: Appearance]; start: []; skip: []; local: []; cloud: []; next: []; "use-existing": [] }>();
 const card = ref<HTMLElement>();
 const paused = ref(false);
+const languageChosen = ref(false);
 const targetRect = ref<{ left: number; top: number; right: number; bottom: number }>();
 const placement = ref({ left: 12, top: 12 });
 const viewport = ref({ width: window.innerWidth, height: window.innerHeight });
@@ -129,30 +131,41 @@ onBeforeUnmount(() => {
         <div v-if="targetRect" class="tutorial-outline" :style="pixels({ left: targetRect.left, top: targetRect.top, width: targetRect.right - targetRect.left, height: targetRect.bottom - targetRect.top })" />
       </template>
       <section ref="card" class="tutorial-card" :class="{ 'welcome-card': fullPage, 'appearance-card': appearancePage }" :style="fullPage ? undefined : pixels(placement)" role="dialog" aria-modal="true" aria-labelledby="tutorial-title" aria-describedby="tutorial-body" tabindex="-1">
-        <button class="tutorial-close" aria-label="跳过教程" title="跳过教程" @click="emit('skip')"><X :size="18" /></button>
-        <template v-if="welcome">
+        <button class="tutorial-close" :aria-label="t('跳过教程')" :title="t('跳过教程')" @click="emit('skip')"><X :size="18" /></button>
+        <template v-if="welcome && !languageChosen">
+          <div class="welcome-greetings" aria-hidden="true"><span v-for="(greeting, index) in ['Hello', '你好', 'Hola', 'Bonjour']" :key="greeting" :style="{ animationDelay: `${index * 3}s` }">{{ greeting }}</span></div>
+          <p class="tutorial-eyebrow">CHRONICLE</p>
+          <h1 id="tutorial-title">{{ t('选择你的语言') }}</h1>
+          <p id="tutorial-body">{{ t('从熟悉的语言开始，之后可在设置中更改。') }}</p>
+          <div class="welcome-languages" :aria-label="t('界面语言')">
+            <button type="button" :aria-pressed="locale === 'zh-CN'" :disabled="languageSaving" @click="emit('language-change', 'zh-CN')"><span>简体中文</span></button>
+            <button type="button" :aria-pressed="locale === 'en'" :disabled="languageSaving" @click="emit('language-change', 'en')"><span>English</span></button>
+          </div>
+          <button class="tutorial-primary" :disabled="languageSaving" @click="languageChosen = true">{{ t('继续') }} <ArrowRight :size="16" /></button>
+        </template>
+        <template v-else-if="welcome">
           <img class="tutorial-logo" :src="appIcon" alt="Chronicle" />
-          <p class="tutorial-eyebrow">欢迎使用 CHRONICLE</p>
-          <h1 id="tutorial-title">让每次改变，都有迹可循</h1>
-          <p id="tutorial-body">为文件、文件夹和注册表保存可恢复的历史快照，<br />也能同步到云端。用几次点击，建立你的第一份存档。</p>
-          <div class="tutorial-benefits"><span><FolderArchive :size="21" />保存历史</span><span><ShieldCheck :size="21" />安心恢复</span><span><Cloud :size="21" />云端同步</span></div>
-          <button class="tutorial-primary" @click="emit('start')">开始使用 <ArrowRight :size="16" /></button><button class="tutorial-link" @click="emit('skip')">跳过教程，直接进入</button>
+          <p class="tutorial-eyebrow">{{ t('欢迎使用 CHRONICLE') }}</p>
+          <h1 id="tutorial-title">{{ t('让每次改变，都有迹可循') }}</h1>
+          <p id="tutorial-body">{{ t('为文件、文件夹和注册表保存可恢复的历史快照，') }}<br />{{ t('也能同步到云端。用几次点击，建立你的第一份存档。') }}</p>
+          <div class="tutorial-benefits"><span><FolderArchive :size="21" />{{ t('保存历史') }}</span><span><ShieldCheck :size="21" />{{ t('安心恢复') }}</span><span><Cloud :size="21" />{{ t('云端同步') }}</span></div>
+          <button class="tutorial-primary" @click="emit('start')">{{ t('开始使用') }} <ArrowRight :size="16" /></button><button class="tutorial-link" @click="emit('skip')">{{ t('跳过教程，直接进入') }}</button>
         </template>
         <template v-else-if="appearancePage">
-          <p class="tutorial-eyebrow">你的 CHRONICLE</p><h1 id="tutorial-title">选一个喜欢的外观</h1><p id="tutorial-body">让熟悉的工作空间，有你喜欢的颜色。</p>
+          <p class="tutorial-eyebrow">{{ t('你的 CHRONICLE') }}</p><h1 id="tutorial-title">{{ t('选一个喜欢的外观') }}</h1><p id="tutorial-body">{{ t('让熟悉的工作空间，有你喜欢的颜色。') }}</p>
           <TutorialThemePicker :appearance="appearance" :saving="appearanceSaving" @change="emit('appearance-change', $event)" />
-          <button class="tutorial-primary" :disabled="appearanceSaving" @click="emit('next')">{{ appearanceSaving ? '保存中…' : '继续，选择使用方式' }} <ArrowRight :size="16" /></button>
+          <button class="tutorial-primary" :disabled="appearanceSaving" @click="emit('next')">{{ appearanceSaving ? t('保存中…') : t('继续，选择使用方式') }} <ArrowRight :size="16" /></button>
         </template>
         <template v-else-if="route">
-          <p class="tutorial-eyebrow">开始之前</p><h1 id="tutorial-title">先从哪里开始？</h1><p id="tutorial-body">数据始终保存在本地。云端是可选的，你随时可以回来配置。</p>
-          <div class="tutorial-routes"><button @click="emit('cloud')"><Cloud :size="24" /><b>先配置云端</b><small>连接同步源，方便跨设备使用</small></button><button @click="emit('local')"><HardDrive :size="24" /><b>暂时仅本地</b><small>无需账号，先创建第一份存档</small></button></div>
+          <p class="tutorial-eyebrow">{{ t('开始之前') }}</p><h1 id="tutorial-title">{{ t('先从哪里开始？') }}</h1><p id="tutorial-body">{{ t('数据始终保存在本地。云端是可选的，你随时可以回来配置。') }}</p>
+          <div class="tutorial-routes"><button @click="emit('cloud')"><Cloud :size="24" /><b>{{ t('先配置云端') }}</b><small>{{ t('连接同步源，方便跨设备使用') }}</small></button><button @click="emit('local')"><HardDrive :size="24" /><b>{{ t('暂时仅本地') }}</b><small>{{ t('无需账号，先创建第一份存档') }}</small></button></div>
         </template>
         <template v-else-if="finish">
-          <ShieldCheck class="tutorial-finish-icon" :size="48" /><p class="tutorial-eyebrow">准备就绪</p><h1 id="tutorial-title">你的时间线，从这里开始</h1><p id="tutorial-body">分类、排除规则和注册表备份可以在需要时再了解。<br />在「设置 → 关于」中可随时重新开始教程。</p><button class="tutorial-primary" @click="emit('next')">开始使用 Chronicle</button>
+          <ShieldCheck class="tutorial-finish-icon" :size="48" /><p class="tutorial-eyebrow">{{ t('准备就绪') }}</p><h1 id="tutorial-title">{{ t('你的时间线，从这里开始') }}</h1><p id="tutorial-body">{{ t('分类、排除规则和注册表备份可以在需要时再了解。') }}<br />{{ t('在「设置 → 关于」中可随时重新开始教程。') }}</p><button class="tutorial-primary" @click="emit('next')">{{ t('开始使用 Chronicle') }}</button>
         </template>
         <template v-else>
-          <p class="tutorial-eyebrow">快速入门 · {{ step?.stage }} / 6</p><h2 id="tutorial-title">{{ step?.title }}</h2><p id="tutorial-body" aria-live="polite">{{ targetRect ? step?.body : '当前区域尚未显示。可以关闭当前弹窗后重试，或随时跳过教程。' }}</p>
-          <div class="tutorial-card-actions"><button v-if="step?.primaryLabel && targetRect" class="tutorial-primary" @click="emit('next')">{{ step.primaryLabel }} <ArrowRight :size="14" /></button><button v-if="step?.target?.startsWith('cloud')" class="tutorial-link" @click="emit('local')">暂时仅本地</button><button v-if="step?.target === 'create-entry' && hasArchive" class="tutorial-link" @click="emit('use-existing')">使用已有存档</button><button class="tutorial-link" @click="emit('skip')">跳过教程</button></div>
+          <p class="tutorial-eyebrow">{{ t('快速入门 · {stage} / 7', { stage: step?.stage || 1 }) }}</p><h2 id="tutorial-title">{{ step?.title }}</h2><p id="tutorial-body" aria-live="polite">{{ targetRect ? step?.body : t('当前区域尚未显示。可以关闭当前弹窗后重试，或随时跳过教程。') }}</p>
+          <div class="tutorial-card-actions"><button v-if="step?.primaryLabel && targetRect" class="tutorial-primary" @click="emit('next')">{{ step.primaryLabel }} <ArrowRight :size="14" /></button><button v-if="step?.target?.startsWith('cloud')" class="tutorial-link" @click="emit('local')">{{ t('暂时仅本地') }}</button><button v-if="step?.target === 'create-entry' && hasArchive" class="tutorial-link" @click="emit('use-existing')">{{ t('使用已有存档') }}</button><button class="tutorial-link" @click="emit('skip')">{{ t('跳过教程') }}</button></div>
         </template>
       </section>
     </div>
@@ -160,6 +173,13 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.welcome-greetings { position: relative; height: 110px; margin: 12px 0 26px; color: var(--primary); font-size: clamp(48px, 8vw, 76px); font-weight: 650; letter-spacing: -.04em; }
+.welcome-greetings span { position: absolute; inset: 0; display: grid; place-items: center; opacity: 0; animation: welcome-greeting 12s infinite; }
+@keyframes welcome-greeting { 0% { opacity: 0; transform: translateY(12px); } 3%, 21% { opacity: 1; transform: translateY(0); } 25%, 100% { opacity: 0; transform: translateY(-12px); } }
+.welcome-languages { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; max-width: 420px; margin: 28px auto; }
+.welcome-languages button { display: grid; gap: 5px; text-align: left; padding: 18px 22px; border-radius: 12px; border: 1px solid var(--border-2); color: var(--text); background: var(--surface); transition: border-color .16s, background .16s; }
+.welcome-languages button[aria-pressed="true"] { border-color: var(--primary); background: var(--primary-soft); box-shadow: inset 0 0 0 1px var(--primary); }
+.welcome-languages span { font-size: 17px; font-weight: 650; }
 .tutorial-layer { position: fixed; inset: 0; z-index: 10000; overflow: hidden; pointer-events: none; }
 .tutorial-layer.full-page { display: grid; place-items: center; background: var(--app-background); pointer-events: auto; padding: 24px; overflow: auto; }
 .tutorial-dim { position: absolute; pointer-events: auto; }
@@ -181,7 +201,7 @@ h1 { font-size: 27px; line-height: 1.35; margin: 12px 0 18px; } h2 { font-size: 
 .tutorial-routes { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 28px; }.tutorial-routes button { display: grid; justify-items: start; text-align: left; gap: 12px; padding: 24px; border: 1px solid var(--border-2); background: var(--subtle); border-radius: 12px; color: var(--primary-dark); }.tutorial-routes small { color: var(--text-2); font-size: 12px; line-height: 1.5; }
 .tutorial-finish-icon { color: var(--primary); margin-bottom: 20px; }button:hover { filter: brightness(.96); }button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
 @media(max-width: 560px) { .tutorial-card.welcome-card { padding: 36px 20px 24px; }.tutorial-routes { grid-template-columns: 1fr; }h1 { font-size: 23px; } }
-@media(prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
+@media(prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; }.welcome-greetings span { animation: none; }.welcome-greetings span:first-child { opacity: 1; } }
 </style>
 
 <style>

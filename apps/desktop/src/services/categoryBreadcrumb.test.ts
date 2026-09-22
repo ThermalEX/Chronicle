@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { categoryBreadcrumb } from "./categoryBreadcrumb";
+import { setLocale } from "./i18n";
 
 describe("categoryBreadcrumb", () => {
+  it("updates the root language without translating user category names", () => {
+    try {
+      setLocale("en");
+      expect(categoryBreadcrumb([{ id: "games", name: "游戏" }], "games")).toBe("Library / 游戏");
+      setLocale("zh-CN");
+      expect(categoryBreadcrumb([], "all")).toBe("资料库");
+    } finally { setLocale("zh-CN"); }
+  });
   it("shows the library-rooted path for a nested category", () => {
     expect(categoryBreadcrumb([
       { id: "games", name: "游戏" },

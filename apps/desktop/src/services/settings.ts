@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { reactive } from "vue";
+import { reactive, watch } from "vue";
+import { normalizeLocale, setLocale, t, type Locale } from "./i18n";
 import { normalizeAppearance, type ColorMode, type ColorTheme } from "./appearance";
 import { publicConfigKeys } from "./opendal";
 
@@ -9,6 +10,7 @@ export type BackupSchedule = "off" | "15m" | "1h" | "6h" | "daily";
 export type CloudProvider = "legacy_webdav" | "legacy_github" | "opendal";
 
 export interface AppSettings {
+  language: Locale;
   colorTheme: ColorTheme;
   colorMode: ColorMode;
   launchAtStartup: boolean;
@@ -64,11 +66,11 @@ export function cloudLibraryIndicator(
   settings: Pick<CloudSettings, "enabled" | "sources">,
   health: CloudHealth = { status: "unchecked" },
 ): { available: boolean; label: string } {
-  if (!settings.enabled || !settings.sources.length) return { available: false, label: "云端资料库未启用" };
-  if (health.status === "checking") return { available: false, label: "云端资料库：检测中" };
-  if (health.status === "unavailable") return { available: false, label: `云端资料库：${health.sourceName ?? "同步源"} 无法使用` };
-  if (health.status === "available") return { available: true, label: `云端资料库：${settings.sources.length} 个同步源可用` };
-  return { available: false, label: "云端资料库：未检测" };
+  if (!settings.enabled || !settings.sources.length) return { available: false, label: t("云端资料库未启用") };
+  if (health.status === "checking") return { available: false, label: t("云端资料库：检测中") };
+  if (health.status === "unavailable") return { available: false, label: t("云端资料库：{name} 无法使用", { name: health.sourceName ?? t("同步源") }) };
+  if (health.status === "available") return { available: true, label: t("云端资料库：{count} 个同步源可用", { count: settings.sources.length }) };
+  return { available: false, label: t("云端资料库：未检测") };
 }
 
 const APP_SETTINGS_KEY = "chronicle.app-settings.v2";
@@ -81,6 +83,7 @@ export interface SettingsDocument {
 }
 
 const defaultAppSettings: AppSettings = {
+  language: "zh-CN",
   colorTheme: "teal",
   colorMode: "light",
   launchAtStartup: false,
@@ -126,6 +129,7 @@ export function normalizeAppSettings(value: LegacyAppSettings = {}): AppSettings
   return {
     ...defaultAppSettings,
     ...current,
+    language: normalizeLocale(value.language),
     updateChannel: requestedUpdateChannel,
     autoBackupDelaySeconds: Math.max(1, Math.min(300, Number.isFinite(delay) && delay >= 1 ? delay : 5)),
   };
@@ -182,6 +186,7 @@ function loadSettings<T extends object>(key: string, defaults: T): T {
 }
 
 export const appSettings = reactive({ ...defaultAppSettings });
+watch(() => appSettings.language, setLocale, { immediate: true, flush: "sync" });
 export const cloudSettings = reactive<CloudSettings>(normalizedCloud());
 
 function settingsDocument(): SettingsDocument {
@@ -215,15 +220,17 @@ export async function persistSettings(): Promise<void> {
 }
 
 export async function saveAppSettings(value: AppSettings): Promise<void> {
-  Object.assign(appSettings, value);
-  await persistSettings();
+  const previous = { ...appSettings };
+  Object.assign(appSettings, value, { language: normalizeLocale(value.language) });
+  try { await persistSettings(); }
+  catch (error) { Object.assign(appSettings, previous); throw error; }
 }
 
 export async function saveCloudSettings(value: CloudSettings): Promise<void> {
   const normalized = normalizedCloud(value);
   for (const source of normalized.sources) {
     if (source.provider === "opendal" && Object.keys(source.config ?? {}).some((key) => !publicConfigKeys.includes(key) || source.secretKeys?.includes(key))) {
-      throw new Error("机密值不能保存在公开设置中");
+      throw new Error(t("机密值不能保存在公开设置中"));
     }
   }
   if (isTauri()) {

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../services/i18n";
 import { ChevronDown } from "@lucide/vue";
 import { computed, ref, watch, type CSSProperties } from "vue";
 import { floatingMenuStyle, positionFloatingMenu } from "../services/floatingMenu";
@@ -21,7 +22,7 @@ const open = ref(false);
 const picker = ref<HTMLElement>();
 const optionsStyle = ref<CSSProperties>();
 let triggerElement: HTMLButtonElement | undefined;
-const selectedLabel = computed(() => props.options.find((option) => option.value === props.modelValue)?.label ?? "未选择");
+const selectedLabel = computed(() => props.options.find((option) => option.value === props.modelValue)?.label ?? t("未选择"));
 
 function choose(value: string | null): void {
   open.value = false;

@@ -28,7 +28,7 @@ describe("appearance stylesheet", () => {
   });
 
   it("keeps the active mode icon white on every theme", () => {
-    expect(rule(".toolbar-action.mode-toggle.is-dark")).toContain("color: #ffffff");
+    expect(rule(".floating-theme-toggle.is-dark")).toContain("color: #ffffff");
   });
 
   it("uses the titlebar foreground for the brand in dark mode", () => {

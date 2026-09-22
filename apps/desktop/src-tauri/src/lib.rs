@@ -1,7 +1,9 @@
 mod auto_backup;
 mod cloud;
 mod commands;
+mod language;
 mod onboarding;
+mod steam_scan;
 mod storage_root;
 #[cfg(test)]
 mod storage_root_tests;
@@ -45,6 +47,7 @@ pub fn run() {
             }
             let repository = LocalRepository::open(repository_root)
                 .map_err(|error| io::Error::other(error.to_string()))?;
+            let saved_settings = repository.load_settings().unwrap_or_default();
             let repository = Arc::new(Mutex::new(repository));
             app.manage(AppState {
                 auto_backup: auto_backup::AutoBackupManager::new(
@@ -53,9 +56,11 @@ pub fn run() {
                 ),
                 repository,
             });
-            let show = MenuItem::with_id(app, "show", "显示 Chronicle", true, None::<&str>)?;
-            let exit = MenuItem::with_id(app, "exit", "退出 Chronicle", true, None::<&str>)?;
+            let (show_label, exit_label) = language::tray_labels(&saved_settings);
+            let show = MenuItem::with_id(app, "show", show_label, true, None::<&str>)?;
+            let exit = MenuItem::with_id(app, "exit", exit_label, true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &exit])?;
+            app.manage(language::TrayMenu { show, exit });
             let tray_icon = app
                 .default_window_icon()
                 .cloned()
@@ -107,6 +112,8 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            steam_scan::scan_steam_saves,
+            steam_scan::load_steam_scan_results,
             onboarding::load_onboarding,
             onboarding::save_onboarding,
             commands::list_entries,

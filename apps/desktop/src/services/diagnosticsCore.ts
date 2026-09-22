@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 export interface DiagnosticContext {
   operation: string;
   archiveId?: string;
@@ -36,7 +37,7 @@ export function diagnosticFromError(error: unknown, context: DiagnosticContext):
     id: crypto.randomUUID(),
     occurredAt: Date.now(),
     ...context,
-    message: details.split("\n")[0] || "操作失败",
-    details: details || "操作失败",
+    message: details.split("\n")[0] || t("操作失败"),
+    details: details || t("操作失败"),
   };
 }

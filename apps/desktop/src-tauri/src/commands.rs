@@ -555,7 +555,11 @@ pub fn load_settings(state: State<'_, AppState>) -> Result<Value, String> {
 }
 
 #[tauri::command(async)]
-pub fn save_settings(state: State<'_, AppState>, settings: Value) -> Result<(), String> {
+pub fn save_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: Value,
+) -> Result<(), String> {
     let repository = state.repository.lock().map_err(|_| state_error())?;
     let previous = repository
         .load_settings()
@@ -563,7 +567,10 @@ pub fn save_settings(state: State<'_, AppState>, settings: Value) -> Result<(), 
     crate::cloud::validate_settings(&settings, &previous)?;
     repository
         .save_settings(&settings)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    drop(repository);
+    crate::language::update_tray(&app, &settings);
+    Ok(())
 }
 
 fn diagnostics_path(repository: &chronicle_storage::LocalRepository) -> PathBuf {

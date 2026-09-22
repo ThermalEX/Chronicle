@@ -1,8 +1,8 @@
+import { t } from "./i18n";
 import type { CategoryRecord } from "../domain";
 
-const libraryRootLabel = "资料库";
-
 export function categoryBreadcrumb(categories: CategoryRecord[], categoryId: string): string {
+  const libraryRootLabel = t("资料库");
   if (categoryId === "all") return libraryRootLabel;
 
   const byId = new Map(categories.map((category) => [category.id, category]));
