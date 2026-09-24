@@ -91,7 +91,7 @@ const path = require('node:path');
     await title('把存档同步');
     await shot('sync-highlight');
     await page.locator('[data-tour="sync"]').click();
-    await title('识别 Steam');
+    await title('游戏存档识别');
     await page.locator('[data-tour="steam-entry"]').click();
     await page.getByRole('button', { name: '关闭游戏存档识别', exact: true }).click();
     await title('你的时间线');

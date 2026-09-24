@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { t, locale, type Locale } from "./services/i18n";
 import {
-  AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, Clock3, CloudCog, File, Info,
+  AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, Clock3, CloudCog, File, Gamepad2, Info,
   Folder, FolderArchive, FolderOpen, HardDrive, LockKeyhole, MoreHorizontal, Moon, Pencil, Plus, RotateCcw, Save,
   RefreshCw, Search, Settings2, SlidersHorizontal, UploadCloud, X,
   Star, Sun, Trash2,
@@ -21,7 +21,6 @@ import CreateCategoryDialog from "./components/CreateCategoryDialog.vue";
 import CreateArchiveDialog from "./components/CreateArchiveDialog.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
 import SteamScanDialog from "./components/SteamScanDialog.vue";
-import SteamIcon from "./components/SteamIcon.vue";
 import UpdateDialog from "./components/UpdateDialog.vue";
 import TutorialOverlay from "./components/TutorialOverlay.vue";
 import { advanceTutorial, createTutorialState, loadTutorialProgress, saveTutorialProgress, shouldOfferTutorial, tutorialViews, type TutorialEvent, type TutorialProgress, type TutorialState } from "./services/onboarding";
@@ -1162,7 +1161,7 @@ onBeforeUnmount(() => {
     <header class="titlebar">
       <div class="brand"><time :datetime="currentTime">{{ currentTime }}</time></div>
       <div class="sync-states"><button class="sync-state sync-state-button" :title="t('打开本地资料库')" @click="openRepositoryFolder"><i></i>{{ t("本地资料库可用") }}</button><button class="sync-state sync-state-button" :class="cloudStateClass" :title="cloudHealth.reason || t('检测云端资料库')" @click="openCloudHealthDialog"><i :class="{ pulse: cloudHealth.status === 'checking' }"></i>{{ cloudLibrary.label }}</button><button class="sync-state sync-state-button sync-progress-button" :style="{ '--sync-progress': allSyncProgressFraction }" :disabled="syncingArchive || syncingAllArchives" :title="t('同步所有启用云端保存的存档')" @click="syncAllArchives"><span><UploadCloud :size="16" />{{ syncingAllArchives ? t("正在同步 {syncProgressText}", { syncProgressText: syncProgressText }) : t("同步所有存档") }}</span></button></div>
-      <div class="toolbar"><button class="toolbar-action" data-tour="steam-entry" :aria-label="t('游戏存档识别')" :title="t('识别 Steam 游戏存档')" @click="steamScanOpen = true"><SteamIcon /></button><button class="toolbar-action" data-tour="cloud-entry" :aria-label="t('云端设置')" :title="t('云端设置')" @click="cloudSettingsOpen = true"><CloudCog :size="17" /></button><button class="toolbar-action" :aria-label="t('应用设置')" :title="t('应用设置')" @click="settingsOpen = true"><Settings2 :size="17" /></button></div>
+      <div class="toolbar"><button class="toolbar-action" data-tour="steam-entry" :aria-label="t('游戏存档识别')" :title="t('游戏存档识别')" @click="steamScanOpen = true"><Gamepad2 :size="19" /></button><button class="toolbar-action" data-tour="cloud-entry" :aria-label="t('云端设置')" :title="t('云端设置')" @click="cloudSettingsOpen = true"><CloudCog :size="17" /></button><button class="toolbar-action" :aria-label="t('应用设置')" :title="t('应用设置')" @click="settingsOpen = true"><Settings2 :size="17" /></button></div>
     </header>
 
     <aside class="sidebar">

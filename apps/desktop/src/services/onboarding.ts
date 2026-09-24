@@ -67,5 +67,5 @@ export const tutorialViews: Partial<Record<TutorialStep, TutorialView>> = {
   restore: { target: "restore", get title() { return t("恢复以前的状态"); }, get body() { return t("这里可以恢复快照，恢复前会先创建安全快照。本步只是了解功能，点击高亮区域不会恢复文件。"); }, stage: 6, mode: "explain", get primaryLabel() { return t("了解，不执行恢复"); } },
   lock: { target: "lock", get title() { return t("为重要快照加星"); }, get body() { return t("点击星标可锁定或解锁快照。锁定后不参与自动清理，删除前需要解锁。不想改变状态也可以继续。"); }, stage: 6, mode: "action", get primaryLabel() { return t("继续，不改变星标"); } },
   sync: { target: "sync", get title() { return t("把存档同步到云端"); }, get body() { return t("此入口将存档同步到启用的云端源；需要“本地与云端”保存方式。此处仅介绍入口，不会发起上传。"); }, stage: 6, mode: "explain", get primaryLabel() { return t("知道了"); } },
-  "steam-entry": { target: "steam-entry", get title() { return t("识别 Steam 游戏存档"); }, get body() { return t("点击 Steam 图标打开识别窗口，可扫描多个游戏库，按账号选择并添加存档。结果保存在本机，需要时手动刷新；打开窗口不会自动扫描。关闭窗口后完成教程。"); }, stage: 7, mode: "action", get primaryLabel() { return t("暂不体验"); } },
+  "steam-entry": { target: "steam-entry", get title() { return t("游戏存档识别"); }, get body() { return t("点击游戏手柄图标打开识别窗口，在 Steam 和 Galgame 分页中扫描并选择存档。结果保存在本机，需要时手动刷新；打开窗口不会自动扫描。关闭窗口后完成教程。"); }, stage: 7, mode: "action", get primaryLabel() { return t("暂不体验"); } },
 };

@@ -1,6 +1,7 @@
 mod auto_backup;
 mod cloud;
 mod commands;
+mod galgame_scan;
 mod language;
 mod onboarding;
 mod steam_scan;
@@ -33,6 +34,7 @@ pub(crate) struct AppState {
 /// Panics when the Tauri runtime cannot be started.
 pub fn run() {
     tauri::Builder::default()
+        .manage(galgame_scan::ScanTasks::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -112,6 +114,10 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            galgame_scan::scan_galgame_saves,
+            galgame_scan::cancel_galgame_scan,
+            galgame_scan::load_galgame_scan_results,
+            galgame_scan::validate_galgame_sources,
             steam_scan::scan_steam_saves,
             steam_scan::load_steam_scan_results,
             onboarding::load_onboarding,

@@ -1,5 +1,6 @@
 import { t } from "./i18n";
-import type { ArchiveRecord, SourceKind } from "../domain";
+import type { SourceKind } from "../domain";
+export { sourceKey, alreadyManaged } from "./scanSources";
 
 export type SteamUser = { accountId: string; displayName: string; steamId64?: string | null };
 export type SteamSource = { path: string; kind: SourceKind; user?: SteamUser | null };
@@ -26,14 +27,4 @@ export function steamSourceGroups(game: SteamGame) {
   }
   if (groups.size > 1 && groups.has("local")) groups.get("local")!.archiveName = t("{name} · 本机存档", { name: game.name });
   return [...groups.values()];
-}
-export function sourceKey(source: SteamSource): string {
-  return `${source.kind === "registry" ? "registry" : "file"}:${source.path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()}`;
-}
-export function alreadyManaged(source: SteamSource, archives: ArchiveRecord[]): boolean {
-  const key = sourceKey(source);
-  return archives.some(archive => archive.sources.some(existing => {
-    const existingKey = sourceKey(existing);
-    return key === existingKey || (existing.kind !== "file" && key.startsWith(`${existingKey}/`));
-  }));
 }
