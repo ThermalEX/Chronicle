@@ -2,7 +2,7 @@
 
 已发布版本的正文按发布时间倒序汇总于此；GitHub Release 页面负责显示版本大标题。未发布的本地测试版单独标注。
 
-## v1.3.4-beta
+## v1.3.3-beta
 
 ### 新增
 
@@ -27,7 +27,7 @@
 
 ### Windows 下载
 
-- 安装版：`Chronicle_1.3.4-beta_x64-setup.exe`；便携版：`Chronicle-1.3.4-beta-windows-x64-portable.zip`。
+- 安装版：`Chronicle_1.3.3-beta_x64-setup.exe`；便携版：`Chronicle-1.3.3-beta-windows-x64-portable.zip`。
 - 下载后可使用 `SHA256SUMS.txt` 校验文件；Windows 构建未签名。
 - 此版本标记为测试版，仅测试版更新渠道接收，不替换最新正式版。
 
