@@ -127,3 +127,8 @@ archives/<存档目录>/<时间>.7z
 ## 更新日志
 
 [查看完整更新日志](docs/changelog.md)
+
+## License
+
+This project is licensed under the GNU General Public License v3.0.
+See [LICENSE](LICENSE) for details.
