@@ -9,6 +9,11 @@ const snapshots: SnapshotRecord[] = [
 ];
 
 describe("snapshot timeline", () => {
+  it("filters exact device IDs independently from the search query", () => {
+    const tagged = snapshots.map((snapshot, index) => ({ ...snapshot, deviceId: `device-${index}` }));
+    expect(filterTimeline(tagged, "", "newest", "device-0").map((snapshot) => snapshot.id)).toEqual(["older"]);
+    expect(filterTimeline(tagged, "boss", "newest", "device-0")).toEqual([]);
+  });
   it("filters descriptions and sorts newest snapshots first by default", () => {
     expect(filterTimeline(snapshots, "boss", "newest").map((snapshot) => snapshot.id)).toEqual(["newer"]);
     expect(filterTimeline(snapshots, "第二阶段", "newest").map((snapshot) => snapshot.id)).toEqual(["newer"]);

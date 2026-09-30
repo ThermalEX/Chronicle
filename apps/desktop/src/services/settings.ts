@@ -19,6 +19,7 @@ export interface AppSettings {
   updateChannel: UpdateChannel;
   checkCloudOnLaunch: boolean;
   notifications: boolean;
+  showSyncDetails: boolean;
   createInitialSnapshot: boolean;
   autoBackupDelaySeconds: number;
   backupHealthStaleDays: number;
@@ -83,16 +84,17 @@ export interface SettingsDocument {
   cloud: CloudSettings;
 }
 
-const defaultAppSettings: AppSettings = {
+export const defaultAppSettings: AppSettings = {
   language: "zh-CN",
   colorTheme: "teal",
-  colorMode: "light",
+  colorMode: "system",
   launchAtStartup: false,
   closeBehavior: "ask",
   checkForUpdates: true,
   updateChannel: "stable",
   checkCloudOnLaunch: false,
   notifications: true,
+  showSyncDetails: false,
   createInitialSnapshot: true,
   autoBackupDelaySeconds: 5,
   backupHealthStaleDays: 7,
@@ -133,6 +135,7 @@ export function normalizeAppSettings(value: LegacyAppSettings = {}): AppSettings
     ...current,
     language: normalizeLocale(value.language),
     updateChannel: requestedUpdateChannel,
+    showSyncDetails: value.showSyncDetails === true,
     backupHealthStaleDays: Number.isFinite(value.backupHealthStaleDays) && Number(value.backupHealthStaleDays) >= 1 ? Math.min(365, Math.floor(Number(value.backupHealthStaleDays))) : 7,
     autoBackupDelaySeconds: Math.max(1, Math.min(300, Number.isFinite(delay) && delay >= 1 ? delay : 5)),
   };

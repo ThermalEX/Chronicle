@@ -20,6 +20,8 @@ import { notifyTrayBackground } from "./services/trayNotification";
 import CreateCategoryDialog from "./components/CreateCategoryDialog.vue";
 import CreateArchiveDialog from "./components/CreateArchiveDialog.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
+import SnapshotSyncDialog from "./components/SnapshotSyncDialog.vue";
+import { snapshotSync, quickSyncPlan, type OperationResult } from "./services/snapshotSync";
 import BackupHealthDialog from "./components/BackupHealthDialog.vue";
 import { setBackupTrigger, getBackupRuntimeStates, subscribeBackupRuntime, acceptBackupRuntime, backupAutomationLabel, type BackupRuntimeStatus } from "./services/backupAutomation";
 import SteamScanDialog from "./components/SteamScanDialog.vue";
@@ -29,15 +31,16 @@ import { advanceTutorial, createTutorialState, loadTutorialProgress, saveTutoria
 import ThemedSelect, { type ThemedSelectOption } from "./components/ThemedSelect.vue";
 import type { ArchiveRecord, ArchiveSource, CategoryRecord, CreateArchiveInput, RepositoryInfo, SnapshotRecord, SourceKind } from "./domain";
 import { archiveRepository, isTauriRuntime } from "./services/repository";
-import { cloudRepository, syncArchivesAcrossSources, type CloudSyncResult } from "./services/cloud";
+import { cloudRepository, type CloudSyncResult } from "./services/cloud";
 import { runCloudHealthCheck, type CloudHealthCheckItem } from "./services/cloudHealthCheck";
 import { diagnosticsRepository } from "./services/diagnostics";
 import { diagnosticFromError, type DiagnosticContext } from "./services/diagnosticsCore";
 import { compareArchiveNames, type ArchiveSortMode } from "./services/archiveSorting";
 import { selectArchivePanelCategory, selectCategoryPanel } from "./services/archiveWorkspace";
-import { applyAppearance, normalizeAppearance, type Appearance } from "./services/appearance";
+import { animateAppearance, applyAppearance, normalizeAppearance, resolvedColorMode, watchSystemAppearance, type Appearance } from "./services/appearance";
 import { floatingMenuStyle, positionFloatingMenu } from "./services/floatingMenu";
 import { filterTimeline, type TimelineSort } from "./services/snapshotTimeline";
+import { deviceRepository, deviceLabel, readKnownDevices, type DeviceIdentity, type KnownSourceDevices } from "./services/devices";
 import { appSettings, cloudLibraryIndicator, cloudSettings, enabledCloudSources, initializeSettings, saveAppSettings, shortcutMatches, type CloudHealth } from "./services/settings";
 import { runAcrossEnabledSources, type SourceSyncOutcome } from "./services/multiSourceSync";
 import { categoryBreadcrumb } from "./services/categoryBreadcrumb";
@@ -72,6 +75,19 @@ const snapshotDescription = ref("");
 const snapshotNote = ref("");
 const snapshotSearch = ref("");
 const snapshotSort = ref<TimelineSort>("newest");
+const snapshotDevice = ref("");
+const localDevice = ref<DeviceIdentity>();
+const knownDeviceSources = ref<KnownSourceDevices[]>([]);
+const knownDeviceNames = computed(() => [...(localDevice.value ? [localDevice.value] : []), ...knownDeviceSources.value.flatMap((source) => source.devices).sort((left, right) => right.revision - left.revision)]);
+const settingsInitialSection = ref<"software" | "device">("software");
+const timelineDeviceOptions = computed(() => [
+  { value: "", label: t("所有设备") },
+  ...Array.from(new Map(snapshots.value.map((snapshot) => [snapshot.deviceId || "unknown", {
+    value: snapshot.deviceId || "unknown",
+    label: deviceLabel(snapshot.deviceId, snapshot.deviceName, knownDeviceNames.value),
+  }])).values()),
+]);
+function openDeviceSettings(): void { settingsInitialSection.value = "device"; settingsOpen.value = true; }
 const timelineSortOptions = computed<ThemedSelectOption[]>(() => [
   { value: "newest", label: t("时间 新–旧") },
   { value: "oldest", label: t("时间 旧–新") },
@@ -96,6 +112,9 @@ const categoryDialogOpen = ref(false);
 const creatingCategory = ref(false);
 const createCategoryError = ref<string>();
 const settingsOpen = ref(false);
+const syncPreview = ref<{ archives: ArchiveRecord[]; sourceIds: string[]; snapshotId?: string; allArchives?: boolean }>();
+const changingColorMode = ref(false);
+let stopSystemAppearance: (() => void) | undefined;
 const backupHealthOpen = ref(false);
 const backupRuntime = ref<Record<string, BackupRuntimeStatus>>({});
 let backupRuntimeGeneration = 0;
@@ -150,8 +169,10 @@ async function changeTutorialAppearance(appearance: Appearance) {
   if (tutorialAppearanceSaving.value) return;
   const previous = normalizeAppearance(appSettings);
   tutorialAppearanceSaving.value = true;
-  applyAppearance(appearance);
-  try { await saveAppSettings({ ...appSettings, ...appearance }); }
+  try {
+    await animateAppearance(appearance);
+    await saveAppSettings({ ...appSettings, ...appearance });
+  }
   catch (error) {
     Object.assign(appSettings, previous);
     applyAppearance(previous);
@@ -312,7 +333,7 @@ const filteredArchives = computed(() => {
 });
 const selectedArchive = computed(() => archives.value.find((archive) => archive.id === selectedArchiveId.value));
 const selectedSnapshot = computed(() => snapshots.value.find((snapshot) => snapshot.id === selectedSnapshotId.value));
-const visibleSnapshots = computed(() => filterTimeline(snapshots.value, snapshotSearch.value, snapshotSort.value));
+const visibleSnapshots = computed(() => filterTimeline(snapshots.value, snapshotSearch.value, snapshotSort.value, snapshotDevice.value));
 const syncProgressFraction = computed(() => syncProgress.value ? syncProgress.value.current / syncProgress.value.total : 0);
 const currentSyncProgressFraction = computed(() => syncProgressTarget.value === "current" ? syncProgressFraction.value : 0);
 const allSyncProgressFraction = computed(() => syncProgressTarget.value === "all" ? syncProgressFraction.value : 0);
@@ -407,11 +428,13 @@ async function refreshLibrary(): Promise<void> {
   finally { refreshingLibrary.value = false; }
 }
 
-async function handleSettingsChanged() {
-  applyAppearance(appSettings);
+async function handleSettingsChanged(notify = true) {
+  localDevice.value = await deviceRepository.read();
+  knownDeviceSources.value = await readKnownDevices();
+  await animateAppearance(appSettings);
   if (isTauriRuntime) await archiveRepository.refreshAutoBackup();
   await Promise.all([refreshArchives(), refreshCategories(), refreshRepositoryInfo()]);
-  showNotice(t("设置已保存"));
+  if (notify) showNotice(t("设置已保存"));
 }
 
 function handleCloudSettingsChanged(connectionVerified = false): void {
@@ -727,15 +750,14 @@ function syncArchiveToSources(archive: ArchiveRecord, sources: ReturnType<typeof
   return runAcrossEnabledSources(
     sources,
     async (source) => {
-      const result = await cloudRepository.sync(source.id, archive.id);
-      if (result.status !== "conflict") await cloudRepository.uploadSyncMetadata(source.id, [archive.id]);
+      const result = await cloudRepository.uploadNewSnapshots(source.id, archive.id);
       return result;
     },
     () => { if (syncProgress.value) syncProgress.value.current += 1; },
   );
 }
 
-async function syncSelectedArchive() {
+async function syncSelectedArchive(snapshotId?: string) {
   const archive = selectedArchive.value;
   if (!archive || syncingArchive.value || syncingAllArchives.value) return;
   if (!isTauriRuntime) {
@@ -752,26 +774,7 @@ async function syncSelectedArchive() {
     showNotice(t("请先添加同步源，并点击开始同步"), "info");
     return;
   }
-  syncingArchive.value = true;
-  syncProgressTarget.value = "current";
-  syncProgress.value = { current: 0, total: sources.length };
-  try {
-    const outcomes = await syncArchiveToSources(archive, sources);
-    reportSourceFailures(outcomes, archive, t("同步存档"));
-    await refreshArchives(archive.id);
-    await refreshSnapshots(archive.id);
-    const completed = outcomes.filter((outcome): outcome is Extract<SourceSyncOutcome<CloudSyncResult>, { status: "fulfilled" }> => outcome.status === "fulfilled");
-    if (completed.length) {
-      const hasConflict = completed.some((outcome) => outcome.value.status === "conflict");
-      showNotice(t("已完成 {length} / {length2} 个同步源", { length: completed.length, length2: outcomes.length }), hasConflict ? "info" : "success");
-    }
-  } catch (error) {
-    reportError(error, { operation: t("同步存档"), archiveId: archive.id });
-  } finally {
-    syncingArchive.value = false;
-    syncProgress.value = undefined;
-    syncProgressTarget.value = undefined;
-  }
+  await startSnapshotSync({ archives: [archive], sourceIds: sources.map((source) => source.id), snapshotId });
 }
 
 async function syncAllArchives() {
@@ -787,34 +790,50 @@ async function syncAllArchives() {
     return;
   }
   const remoteArchives = archives.value.filter((archive) => archive.storagePolicy === "local_and_remote");
-  if (!remoteArchives.length) {
-    showNotice(t("没有启用云端保存的存档"), "info");
-    return;
-  }
-  syncingAllArchives.value = true;
-  syncProgressTarget.value = "all";
-  syncProgress.value = { current: 0, total: (remoteArchives.length + 1) * sources.length };
+  await startSnapshotSync({ archives: remoteArchives, sourceIds: sources.map((source) => source.id), allArchives: true });
+}
+
+async function startSnapshotSync(target: NonNullable<typeof syncPreview.value>): Promise<void> {
+  if (appSettings.showSyncDetails) { syncPreview.value = target; return; }
+  if (target.allArchives) syncingAllArchives.value = true;
+  else syncingArchive.value = true;
+  syncProgressTarget.value = target.allArchives ? "all" : "current";
+  syncProgress.value = { current: 0, total: target.sourceIds.length };
+  const requestId = crypto.randomUUID();
+  let dispose: (() => void) | undefined;
+  let operationIds: string[] = [];
   try {
-    const { outcomes, metadataOutcomes, hasFailures } = await syncArchivesAcrossSources(sources, remoteArchives, () => {
-      if (syncProgress.value) syncProgress.value.current += 1;
+    dispose = await listen<{ requestId: string; results?: OperationResult[]; sourcesChecked?: number }>("snapshot-sync-progress", ({ payload }) => {
+      if (payload.requestId !== requestId || !syncProgress.value) return;
+      if (payload.results) syncProgress.value.current = payload.results.filter((result) => operationIds.includes(result.operationId)).length;
+      else if (payload.sourcesChecked !== undefined) syncProgress.value.current = payload.sourcesChecked;
     });
-    for (const outcome of outcomes) reportSourceFailures([outcome], outcome.item, t("同步全部存档"));
-    const succeeded = outcomes.filter((outcome): outcome is Extract<(typeof outcomes)[number], { status: "fulfilled" }> => outcome.status === "fulfilled");
-    const completed = succeeded.length;
-    const conflicts = succeeded.some((outcome) => outcome.value.status === "conflict");
-    for (const outcome of metadataOutcomes) {
-      if (outcome.status === "rejected") reportError(outcome.reason, { operation: t("同步云端元数据"), sourceId: outcome.source.id });
-    }
-    await refreshArchives(selectedArchiveId.value);
-    if (selectedArchive.value) await refreshSnapshots(selectedArchive.value.id);
-    showNotice(t("已完成 {completed} / {value} 项存档同步{value3}", { completed: completed, value: remoteArchives.length * sources.length, value3: hasFailures ? t("，部分操作失败，请查看错误记录") : "" }), conflicts || hasFailures ? "info" : "success");
-  } catch (error) {
-    reportError(error, { operation: t("同步全部存档") });
-  } finally {
+    const plan = await snapshotSync.preview(requestId, target.sourceIds, target.allArchives ? [] : target.archives.map((archive) => archive.id), target.snapshotId);
+    const decision = quickSyncPlan(plan, false);
+    if (decision.requiresReview) { syncPreview.value = target; return; }
+    operationIds = decision.operationIds;
+    syncProgress.value = { current: 0, total: Math.max(1, operationIds.length) };
+    const results = plan.sources.some((source) => !source.error && !source.upgradeRequired)
+      ? await snapshotSync.apply(plan.id, decision.operationIds) : [];
+    await refreshAfterSync();
+    const failures = [...plan.sources.filter((source) => source.error).map((source) => `${source.sourceName}: ${t(source.error!)}`),
+      ...results.filter((result) => result.status !== "success").map((result) => t(result.error || result.status))];
+    if (failures.length) reportError(new Error(failures.join("\n")), { operation: t("同步存档") });
+    else showNotice(t("同步完成"));
+  } catch (error) { reportError(error, { operation: t("同步存档") }); }
+  finally {
+    dispose?.();
+    syncingArchive.value = false;
     syncingAllArchives.value = false;
     syncProgress.value = undefined;
     syncProgressTarget.value = undefined;
   }
+}
+
+async function refreshAfterSync(): Promise<void> {
+  knownDeviceSources.value = await readKnownDevices();
+  await refreshArchives(selectedArchiveId.value);
+  if (selectedArchive.value) await refreshSnapshots(selectedArchive.value.id);
 }
 
 async function restoreSnapshot() {
@@ -871,9 +890,9 @@ async function deleteSnapshot(snapshot: SnapshotRecord): Promise<void> {
   const archive = selectedArchive.value;
   if (!archive || busyAction.value || snapshot.locked) return;
   const confirmed = await requestConfirmation(
-    t("永久删除时间节点"),
-    t("将永久删除 {time} 的快照文件及其备注，无法恢复。", { time: formatTime(snapshot.createdAt) }),
-    t("永久删除"),
+    t(isTauriRuntime ? "回收时间节点" : "删除时间节点"),
+    isTauriRuntime ? t("将 {time} 的快照移入快照回收区。手动同步并选择删除项后才会同步到云端。", { time: formatTime(snapshot.createdAt) }) : t("时间节点已永久删除"),
+    t(isTauriRuntime ? "移入回收区" : "删除"),
     true,
   );
   if (!confirmed) return;
@@ -882,7 +901,7 @@ async function deleteSnapshot(snapshot: SnapshotRecord): Promise<void> {
     await refreshArchives(archive.id);
     await refreshSnapshots(archive.id);
     await refreshRepositoryInfo();
-    showNotice(t("时间节点已永久删除"));
+    showNotice(t(isTauriRuntime ? "时间节点已移入回收区" : "时间节点已永久删除"));
   } catch (error) {
     reportError(error, { operation: t("删除时间节点"), archiveId: archive.id });
   }
@@ -908,13 +927,19 @@ function addRegistrySource(path: string): void {
   createArchiveError.value = undefined;
 }
 
-async function toggleColorMode(): Promise<void> {
+async function toggleColorMode(event: MouseEvent): Promise<void> {
+  if (changingColorMode.value) return;
   const appearance = normalizeAppearance(appSettings, true);
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+  changingColorMode.value = true;
   try {
+    await animateAppearance(appearance, { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
     await saveAppSettings({ ...appSettings, ...appearance });
-    applyAppearance(appSettings);
   } catch (error) {
+    applyAppearance(appSettings);
     showNotice(readableError(error), "error");
+  } finally {
+    changingColorMode.value = false;
   }
 }
 
@@ -1102,6 +1127,7 @@ async function dropOnCategory(categoryId: string) {
 }
 
 function handleShortcut(event: KeyboardEvent) {
+  if (settingsOpen.value) return;
   if (steamScanOpen.value) return;
   if (tutorialActive.value && !confirmRequest.value && !closeRequestOpen.value) return;
   if (event.key === "Escape") {
@@ -1145,8 +1171,11 @@ onMounted(async () => {
   window.addEventListener("keydown", handleShortcut);
   refreshCurrentTime();
   try {
+    localDevice.value = await deviceRepository.read();
+    knownDeviceSources.value = await readKnownDevices();
     await initializeSettings();
     applyAppearance(appSettings);
+    stopSystemAppearance = watchSystemAppearance(() => appSettings);
     startupUpdatePending = appSettings.checkForUpdates;
     if (isTauriRuntime) {
       await listen<{ archiveId: string; error?: string }>("auto-backup-created", async ({ payload }) => {
@@ -1179,6 +1208,7 @@ onMounted(async () => {
   finally { loading.value = false; }
 });
 onBeforeUnmount(() => {
+  stopSystemAppearance?.();
   window.removeEventListener("keydown", handleShortcut);
   window.clearTimeout(noticeTimer);
   window.clearTimeout(clockTimer);
@@ -1223,7 +1253,7 @@ onBeforeUnmount(() => {
       <div class="spacer"></div>
       <div v-if="draggedArchiveId || draggedCategoryId" class="trash-drop-zone" :class="{ active: trashDropActive }" @dragover="handleTrashDragOver" @dragleave="trashDropActive = false" @drop.prevent="dropInTrash"><Trash2 :size="19" /><span><b>{{ appSettings.recycleBinEnabled ? t("移入回收站") : t("永久删除") }}</b><small>{{ t("拖到这里后松开") }}</small></span></div>
       <section class="storage"><div><HardDrive :size="17" /><span>{{ t("本地存储") }}</span><b>{{ formatBytes(repositoryInfo.totalBytes) }}</b><button :aria-label="t('打开本地资料库文件夹')" :title="t('打开本地资料库文件夹')" @click="openRepositoryFolder"><FolderOpen :size="14" /></button></div><small :title="repositoryInfo.path">{{ repositoryInfo.path || t("Chronicle 本地资料库") }}</small></section>
-      <div class="account"><span class="avatar">T</span><span><b>ThermalEX</b><small>{{ t("本机设备") }}</small></span></div>
+      <button class="account" :aria-label="t('设备')" :title="t('设备')" @click="openDeviceSettings"><span class="avatar">{{ localDevice?.name.slice(0, 1) || 'C' }}</span><span><b>{{ localDevice?.name || t('本机设备') }}</b><small>{{ localDevice?.id.slice(0, 8) }}</small></span></button>
     </aside>
 
     <main class="workspace" :class="{ 'archive-panel-collapsed': archivePanelCollapsed }">
@@ -1245,7 +1275,7 @@ onBeforeUnmount(() => {
       <section v-if="selectedArchive" class="detail-panel" aria-labelledby="detail-title">
         <header class="detail-header">
           <div class="identity"><span class="detail-icon"><Folder v-if="selectedArchive.kind === 'folder'" /><File v-else-if="selectedArchive.kind === 'file'" /><FolderArchive v-else /></span><div class="title-line"><h2 id="detail-title"><button class="detail-archive-name" :title="t('编辑存档 {name}', { name: selectedArchive.name })" @click="openEditArchive">{{ selectedArchive.name }}</button></h2><span class="automation-badges"><button class="automation-badge" :class="{ active: selectedArchive.autoBackupEnabled }" :title="t('编辑 {name} 的自动备份设置', { name: selectedArchive.name })" @click="openEditArchive">{{ t("自动备份") }}</button><button class="automation-badge" :class="{ active: selectedArchive.automaticUploadEnabled }" :title="t('编辑 {name} 的自动上传设置', { name: selectedArchive.name })" @click="openEditArchive">{{ t("自动上传") }}</button></span></div></div>
-          <div class="actions"><button data-tour="sync" class="secondary sync-progress-button" :style="{ '--sync-progress': currentSyncProgressFraction }" :disabled="syncingArchive || syncingAllArchives" @click="syncSelectedArchive"><span><UploadCloud :size="17" />{{ syncingArchive ? t("同步中 {syncProgressText}", { syncProgressText: syncProgressText }) : t("同步") }}</span></button><div class="more-control"><button class="icon-button" :aria-label="t('更多操作')" :title="t('更多操作')" :aria-expanded="archiveMenuOpen" @click="archiveMenuOpen = !archiveMenuOpen"><MoreHorizontal :size="19" /></button><div v-if="archiveMenuOpen" class="archive-actions-menu"><button @click="openSelectedArchiveSources"><FolderOpen :size="15" />{{ t("打开来源") }}</button><button @click="openSelectedArchiveStorage"><HardDrive :size="15" />{{ t("打开资料库") }}</button><button @click="openEditArchive"><Pencil :size="15" />{{ t("编辑存档") }}</button><button class="danger" @click="selectedArchive && deleteArchive(selectedArchive)"><Trash2 :size="15" />{{ t("删除存档") }}</button></div></div></div>
+          <div class="actions"><button data-tour="sync" class="secondary sync-progress-button" :style="{ '--sync-progress': currentSyncProgressFraction }" :disabled="syncingArchive || syncingAllArchives" @click="syncSelectedArchive()"><span><UploadCloud :size="17" />{{ syncingArchive ? t("同步中 {syncProgressText}", { syncProgressText: syncProgressText }) : t("同步") }}</span></button><div class="more-control"><button class="icon-button" :aria-label="t('更多操作')" :title="t('更多操作')" :aria-expanded="archiveMenuOpen" @click="archiveMenuOpen = !archiveMenuOpen"><MoreHorizontal :size="19" /></button><div v-if="archiveMenuOpen" class="archive-actions-menu"><button @click="openSelectedArchiveSources"><FolderOpen :size="15" />{{ t("打开来源") }}</button><button @click="openSelectedArchiveStorage"><HardDrive :size="15" />{{ t("打开资料库") }}</button><button @click="openEditArchive"><Pencil :size="15" />{{ t("编辑存档") }}</button><button class="danger" @click="selectedArchive && deleteArchive(selectedArchive)"><Trash2 :size="15" />{{ t("删除存档") }}</button></div></div></div>
         </header>
 
         <ArchiveMetadata :archive="selectedArchive" :saving-tags="savingTags" @add-tag="addArchiveTag" @remove-tag="removeArchiveTag" />
@@ -1255,8 +1285,8 @@ onBeforeUnmount(() => {
           <section class="timeline-area">
             <div class="section-title"><div><p class="label">{{ t("版本历史") }}</p><h3>{{ t("时间节点") }}</h3></div></div>
             <div class="snapshot-create"><input v-model="snapshotDescription" maxlength="160" :placeholder="t('输入新存档描述信息（可留空）')" @keydown.enter.prevent="createSnapshotFromDetail" /><button data-tour="snapshot" class="accent" :disabled="busyAction !== undefined" @click="createSnapshotFromDetail"><Plus :size="16" />{{ busyAction === 'snapshot' ? t("创建中") : t("创建新快照") }}</button></div>
-            <div class="timeline-toolbar"><label><Search :size="15" /><input v-model="snapshotSearch" type="search" :placeholder="t('搜索快照描述')" /></label><ThemedSelect :model-value="snapshotSort" :options="timelineSortOptions" :label="t('时间线排序')" @update:model-value="updateTimelineSort" /></div>
-            <div v-if="visibleSnapshots.length" data-tour="timeline" class="timeline-table"><div class="timeline-table-head"><span>{{ t("备份时间") }}</span><span>{{ t("描述") }}</span><span>{{ t("位置 / 大小") }}</span><span>{{ t("操作") }}</span></div><article v-for="snapshot in visibleSnapshots" :key="snapshot.id" :class="{ selected: selectedSnapshotId === snapshot.id }" tabindex="0" @click="selectedSnapshotId = snapshot.id" @keydown.enter="selectedSnapshotId = snapshot.id"><time>{{ formatTime(snapshot.createdAt) }}</time><span><b>{{ snapshot.title }}</b><small>{{ snapshot.note || snapshotDetail(snapshot) }}</small></span><span>{{ t("本机 ·") }} {{ formatBytes(snapshot.totalBytes) }}</span><div class="timeline-actions"><button data-tour="lock" class="snapshot-star" :class="{ locked: snapshot.locked }" :disabled="Boolean(lockingSnapshotId) || busyAction !== undefined" :aria-label="snapshot.locked ? t('解锁重要快照') : t('标记为重要快照')" :title="snapshot.locked ? t('重要快照：不会自动清理，点击解锁') : t('标记为重要快照，防止自动清理')" :aria-pressed="Boolean(snapshot.locked)" @click.stop="toggleSnapshotLock(snapshot)"><Star :size="16" :fill="snapshot.locked ? 'currentColor' : 'none'" /></button><button class="info" :class="{ active: activityPanelOpen && selectedSnapshotId === snapshot.id }" :aria-label="t('查看 {time} 的时间节点详情', { time: formatTime(snapshot.createdAt) })" :title="t('查看 {time} 的时间节点详情', { time: formatTime(snapshot.createdAt) })" :aria-pressed="activityPanelOpen && selectedSnapshotId === snapshot.id" @click.stop="selectedSnapshotId = snapshot.id; activityPanelOpen = true"><Info :size="16" /></button><button data-tour="restore" :disabled="busyAction !== undefined" :aria-label="t('恢复 {time} 的时间节点', { time: formatTime(snapshot.createdAt) })" :title="t('恢复 {time} 的时间节点', { time: formatTime(snapshot.createdAt) })" @click.stop="selectedSnapshotId = snapshot.id; restoreSnapshot()"><RotateCcw :size="16" /><span>{{ t("恢复") }}</span></button><button :disabled="syncingArchive || syncingAllArchives" :aria-label="t('同步 {time} 的时间节点', { time: formatTime(snapshot.createdAt) })" :title="t('同步 {time} 的时间节点', { time: formatTime(snapshot.createdAt) })" @click.stop="selectedSnapshotId = snapshot.id; syncSelectedArchive()"><UploadCloud :size="16" /><span>{{ t("同步") }}</span></button><button class="danger" :disabled="busyAction !== undefined || snapshot.locked || Boolean(lockingSnapshotId)" :aria-label="t('删除 {time} 的时间节点', { time: formatTime(snapshot.createdAt) })" :title="snapshot.locked ? t('请先解锁重要快照再删除') : t('删除 {time} 的时间节点', { time: formatTime(snapshot.createdAt) })" @click.stop="deleteSnapshot(snapshot)"><Trash2 :size="16" /></button></div></article></div>
+            <div class="timeline-toolbar"><label><Search :size="15" /><input v-model="snapshotSearch" type="search" :placeholder="t('搜索快照描述')" /></label><ThemedSelect :model-value="snapshotDevice" :options="timelineDeviceOptions" :label="t('设备来源')" @update:model-value="snapshotDevice = $event || ''" /><ThemedSelect :model-value="snapshotSort" :options="timelineSortOptions" :label="t('时间线排序')" @update:model-value="updateTimelineSort" /></div>
+            <div v-if="visibleSnapshots.length" data-tour="timeline" class="timeline-table"><div class="timeline-table-head"><span>{{ t("备份时间") }}</span><span>{{ t("描述") }}</span><span>{{ t("位置 / 大小") }}</span><span>{{ t("操作") }}</span></div><article v-for="snapshot in visibleSnapshots" :key="snapshot.id" :class="{ selected: selectedSnapshotId === snapshot.id }" tabindex="0" @click="selectedSnapshotId = snapshot.id" @keydown.enter="selectedSnapshotId = snapshot.id"><time>{{ formatTime(snapshot.createdAt) }}</time><span><b>{{ snapshot.title }}</b><small>{{ snapshot.note || snapshotDetail(snapshot) }}</small></span><span>{{ formatBytes(snapshot.totalBytes) }}<small>{{ deviceLabel(snapshot.deviceId, snapshot.deviceName, knownDeviceNames) }}</small></span><div class="timeline-actions"><button data-tour="lock" class="snapshot-star" :class="{ locked: snapshot.locked }" :disabled="Boolean(lockingSnapshotId) || busyAction !== undefined" :aria-label="snapshot.locked ? t('解锁重要快照') : t('标记为重要快照')" :title="snapshot.locked ? t('重要快照：不会自动清理，点击解锁') : t('标记为重要快照，防止自动清理')" :aria-pressed="Boolean(snapshot.locked)" @click.stop="toggleSnapshotLock(snapshot)"><Star :size="16" :fill="snapshot.locked ? 'currentColor' : 'none'" /></button><button class="info" :class="{ active: activityPanelOpen && selectedSnapshotId === snapshot.id }" :aria-label="t('查看 {time} 的时间节点详情', { time: formatTime(snapshot.createdAt) })" :title="t('查看 {time} 的时间节点详情', { time: formatTime(snapshot.createdAt) })" :aria-pressed="activityPanelOpen && selectedSnapshotId === snapshot.id" @click.stop="selectedSnapshotId = snapshot.id; activityPanelOpen = true"><Info :size="16" /></button><button data-tour="restore" :disabled="busyAction !== undefined" :aria-label="t('恢复 {time} 的时间节点', { time: formatTime(snapshot.createdAt) })" :title="t('恢复 {time} 的时间节点', { time: formatTime(snapshot.createdAt) })" @click.stop="selectedSnapshotId = snapshot.id; restoreSnapshot()"><RotateCcw :size="16" /><span>{{ t("恢复") }}</span></button><button :disabled="syncingArchive || syncingAllArchives" :aria-label="t('同步 {time} 的时间节点', { time: formatTime(snapshot.createdAt) })" :title="t('同步 {time} 的时间节点', { time: formatTime(snapshot.createdAt) })" @click.stop="selectedSnapshotId = snapshot.id; syncSelectedArchive(snapshot.id)"><UploadCloud :size="16" /><span>{{ t("同步") }}</span></button><button class="danger" :disabled="busyAction !== undefined || snapshot.locked || Boolean(lockingSnapshotId)" :aria-label="t('删除 {time} 的时间节点', { time: formatTime(snapshot.createdAt) })" :title="snapshot.locked ? t('请先解锁重要快照再删除') : t('删除 {time} 的时间节点', { time: formatTime(snapshot.createdAt) })" @click.stop="deleteSnapshot(snapshot)"><Trash2 :size="16" /></button></div></article></div>
             <div v-else class="timeline-empty"><Clock3 :size="25" /><b>{{ t("还没有时间节点") }}</b><p>{{ t("创建首个备份后，可以从这里查看和恢复历史版本。") }}</p><button :disabled="busyAction !== undefined" @click="createSnapshot('初始版本')">{{ t("创建首个备份") }}</button></div>
           </section>
 
@@ -1278,10 +1308,11 @@ onBeforeUnmount(() => {
     </main>
 
     <AppToast v-if="notice" :message="notice.message" :type="notice.type" @close="notice = undefined" />
-    <SettingsDialog v-if="settingsOpen" @backup-health="backupHealthOpen = true" @restart-tutorial="restartTutorial" :update-checking="updateChecking" @close="settingsOpen = false" @saved="handleSettingsChanged" @check-update="checkForApplicationUpdate(true, $event)" />
+    <SnapshotSyncDialog v-if="syncPreview" :archives="syncPreview.archives" :source-ids="syncPreview.sourceIds" :snapshot-id="syncPreview.snapshotId" :all-archives="syncPreview.allArchives" @close="syncPreview = undefined" @changed="refreshAfterSync" />
+    <SettingsDialog v-if="settingsOpen" :initial-section="settingsInitialSection" @backup-health="backupHealthOpen = true" @restart-tutorial="restartTutorial" :update-checking="updateChecking" @close="settingsOpen = false; settingsInitialSection = 'software'" @saved="handleSettingsChanged" @changed="handleSettingsChanged(false)" @check-update="checkForApplicationUpdate(true, $event)" />
     <BackupHealthDialog v-if="backupHealthOpen" @close="backupHealthOpen = false" @open-archive="handleHealthAction($event, 'open')" @edit-sources="handleHealthAction($event, 'edit')" @backup-now="handleHealthAction($event, 'backup')" />
     <SteamScanDialog v-if="steamScanOpen" @close="steamScanOpen = false" @saved="handleSettingsChanged" />
-    <button class="floating-theme-toggle" :class="{ 'is-dark': appSettings.colorMode === 'dark' }" :aria-label="appSettings.colorMode === 'dark' ? t('切换到日间模式') : t('切换到夜间模式')" :title="appSettings.colorMode === 'dark' ? t('切换到日间模式') : t('切换到夜间模式')" :aria-pressed="appSettings.colorMode === 'dark'" @click="toggleColorMode"><Sun v-if="appSettings.colorMode === 'dark'" :size="17" /><Moon v-else :size="17" /></button>
+    <button class="floating-theme-toggle" :class="{ 'is-dark': resolvedColorMode === 'dark' }" :disabled="changingColorMode" :aria-label="resolvedColorMode === 'dark' ? t('切换到日间模式') : t('切换到夜间模式')" :title="resolvedColorMode === 'dark' ? t('切换到日间模式') : t('切换到夜间模式')" :aria-pressed="resolvedColorMode === 'dark'" @click="toggleColorMode"><Sun v-if="resolvedColorMode === 'dark'" :size="17" /><Moon v-else :size="17" /></button>
     <UpdateDialog v-if="availableUpdate && !tutorialActive" :update="availableUpdate" @close="availableUpdate = undefined" />
     <CloudCenterDialog v-if="cloudSettingsOpen" @close="cloudSettingsOpen = false" @saved="handleCloudSettingsChanged" @downloaded="handleCloudDownload" @settings-downloaded="handleCloudSettingsDownload" />
     <CloudHealthDialog v-if="cloudHealthDialogOpen" :items="cloudHealthCheckItems" :running="cloudHealthCheckRunning" @close="cloudHealthDialogOpen = false" />

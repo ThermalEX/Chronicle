@@ -8,6 +8,7 @@ const props = defineProps<{
   title: string;
   message: string;
   confirmLabel?: string;
+  cancelLabel?: string;
   destructive?: boolean;
   busy?: boolean;
 }>();
@@ -24,7 +25,7 @@ onMounted(() => cancelButton.value?.focus());
       <header><span :class="{ destructive }"><AlertTriangle :size="20" /></span><div><p>{{ t('需要确认') }}</p><h2 id="confirm-title">{{ title }}</h2></div><button :aria-label="t('关闭确认窗口')" :title="t('关闭确认窗口')" :disabled="busy" @click="emit('cancel')"><X :size="18" /></button></header>
       <p id="confirm-message" class="message">{{ message }}</p>
       <slot name="body-extra" />
-      <footer><button ref="cancelButton" class="cancel" :disabled="busy" @click="emit('cancel')">{{ t('取消') }}</button><slot name="extra-actions" /><button class="confirm" :class="{ destructive }" :disabled="busy" @click="emit('confirm')">{{ busy ? t('处理中') : (confirmLabel || t('确认')) }}</button></footer>
+      <footer><button ref="cancelButton" class="cancel" :disabled="busy" @click="emit('cancel')">{{ cancelLabel || t('取消') }}</button><slot name="extra-actions" /><button class="confirm" :class="{ destructive }" :disabled="busy" @click="emit('confirm')">{{ busy ? t('处理中') : (confirmLabel || t('确认')) }}</button></footer>
     </section>
   </div>
 </template>

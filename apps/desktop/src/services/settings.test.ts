@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { cloudLibraryIndicator, enabledCloudSources, normalizeAppSettings, normalizedCloud, shortcutFromKeyboardEvent, shortcutMatches, type CloudSettings } from "./settings";
+import { describe, expect, it, vi } from "vitest";
+import { appSettings, cloudLibraryIndicator, enabledCloudSources, initializeSettings, normalizeAppSettings, normalizedCloud, resetAppSettings, saveAppSettings, shortcutFromKeyboardEvent, shortcutMatches, type CloudSettings } from "./settings";
 
 function keyEvent(key: string, options: Partial<KeyboardEvent> = {}): KeyboardEvent {
   return { key, ctrlKey: false, shiftKey: false, altKey: false, metaKey: false, ...options } as KeyboardEvent;
@@ -77,6 +77,10 @@ describe("multi-source cloud settings", () => {
 });
 
 describe("automatic backup settings", () => {
+  it("keeps detailed sync opt-in when migrating old settings", () => {
+    expect(normalizeAppSettings({}).showSyncDetails).toBe(false);
+    expect(normalizeAppSettings({ showSyncDetails: true }).showSyncDetails).toBe(true);
+  });
   it("migrates an old schedule into the global backup delay only", () => {
     expect(normalizeAppSettings({ backupSchedule: "15m" })).toMatchObject({
       autoBackupDelaySeconds: 300,
@@ -99,4 +103,22 @@ describe("update channel settings", () => {
   it("keeps the explicitly selected beta channel", () => {
     expect(normalizeAppSettings({ updateChannel: "beta" } as any).updateChannel).toBe("beta");
   });
+});
+
+it("retains system mode after saving and reloading settings", async () => {
+  const stored = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => stored.get(key) ?? null,
+    setItem: (key: string, value: string) => stored.set(key, value),
+  });
+  try {
+    await saveAppSettings({ ...appSettings, colorMode: "system", colorTheme: "rose" });
+    appSettings.colorMode = "light";
+    await initializeSettings();
+    expect(appSettings.colorMode).toBe("system");
+    expect(appSettings.colorTheme).toBe("rose");
+  } finally {
+    resetAppSettings();
+    vi.unstubAllGlobals();
+  }
 });

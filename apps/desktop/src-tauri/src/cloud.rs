@@ -116,8 +116,8 @@ pub struct CloudPreviewDto {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncResultDto {
-    status: String,
-    message: String,
+    pub(crate) status: String,
+    pub(crate) message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -421,6 +421,40 @@ fn configured_client(
     let (source, root, request_policy) = configured_source(state, source_id)?;
     let client = client(&source, credential(&source)?, request_policy)?;
     Ok((client, source, root))
+}
+
+fn snapshot_source_signature(source: &CloudSourceInput) -> Result<Vec<u8>, String> {
+    let mut canonical = serde_json::to_value(source).map_err(|error| error.to_string())?;
+    canonical.sort_all_objects();
+    serde_json::to_vec(&canonical).map_err(|error| error.to_string())
+}
+
+pub(crate) fn snapshot_remote(
+    state: &State<'_, AppState>,
+    source_id: &str,
+) -> Result<
+    (
+        chronicle_sync::snapshot_protocol::SnapshotRemote,
+        PathBuf,
+        String,
+        Vec<u8>,
+    ),
+    String,
+> {
+    use chronicle_sync::snapshot_protocol::SnapshotRemote;
+    let (source, root, request_policy) = configured_source(state, source_id)?;
+    let signature = snapshot_source_signature(&source)?;
+    let name = source.name.clone();
+    let remote = if source.provider == "legacy_github" {
+        SnapshotRemote::GitHub(github_client(
+            &source,
+            credential(&source)?,
+            request_policy,
+        )?)
+    } else {
+        SnapshotRemote::Store(client(&source, credential(&source)?, request_policy)?)
+    };
+    Ok((remote, root, name, signature))
 }
 
 fn configured_github_client(
@@ -1842,6 +1876,7 @@ pub async fn cloud_overwrite_upload(
     source_id: String,
     entry_id: String,
 ) -> Result<(), String> {
+    crate::snapshot_sync::guard_legacy_write(&state, &source_id).await?;
     let (configured_source, root, request_policy) = configured_source(&state, &source_id)?;
     if configured_source.provider == "legacy_github" {
         let client = github_client(
@@ -2142,6 +2177,7 @@ pub async fn cloud_overwrite_download(
     entry_id: String,
     use_cloud_category_tree: bool,
 ) -> Result<(), String> {
+    crate::snapshot_sync::guard_legacy_write(&state, &source_id).await?;
     let (configured_source, root, request_policy) = configured_source(&state, &source_id)?;
     if configured_source.provider == "legacy_github" {
         let client = github_client(
@@ -2350,7 +2386,19 @@ pub async fn cloud_sync_entry(
     source_id: String,
     entry_id: String,
 ) -> Result<SyncResultDto, String> {
+    crate::snapshot_sync::guard_legacy_write(&state, &source_id).await?;
     let (configured_source, root, request_policy) = configured_source(&state, &source_id)?;
+    if crate::snapshot_sync::enabled(&root, &source_id)
+        || !state
+            .repository
+            .lock()
+            .map_err(|_| storage_error())?
+            .list_snapshot_deletions()
+            .map_err(|error| error.to_string())?
+            .is_empty()
+    {
+        return Err("此资料库使用快照删除保护，请通过同步预览操作".into());
+    }
     if configured_source.provider == "legacy_github" {
         let client = github_client(
             &configured_source,
@@ -2490,6 +2538,7 @@ pub async fn cloud_delete_entries(
     source_id: String,
     entry_ids: Vec<String>,
 ) -> Result<(), String> {
+    crate::snapshot_sync::guard_legacy_write(&state, &source_id).await?;
     let (configured_source, _, request_policy) = configured_source(&state, &source_id)?;
     if configured_source.provider == "legacy_github" {
         let client = github_client(
@@ -2588,6 +2637,12 @@ pub async fn cloud_delete_configurations(
     source_id: String,
     configuration_ids: Vec<String>,
 ) -> Result<(), String> {
+    if configuration_ids
+        .iter()
+        .any(|id| matches!(id.as_str(), "config:catalog" | "config:library"))
+    {
+        crate::snapshot_sync::guard_legacy_write(&state, &source_id).await?;
+    }
     let paths = configuration_ids
         .iter()
         .map(|id| configuration_path(id).ok_or_else(|| "不支持删除该云端设置".to_owned()))
@@ -2690,6 +2745,40 @@ pub async fn cloud_set_entry_sync_mode(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn snapshot_source_signature_is_stable_after_reloading_settings() {
+        let settings = serde_json::json!({
+            "id":"source", "name":"Cloud", "provider":"legacy_webdav",
+            "endpoint":"https://example.invalid/dav", "username":"user",
+            "remotePath":"Chronicle", "credentialRef":"source",
+            "config":{"endpoint":"https://example.invalid", "root":"Chronicle", "bucket":"snapshots", "region":"test"}
+        });
+        let source: super::CloudSourceInput = serde_json::from_value(settings.clone()).unwrap();
+        let expected = super::snapshot_source_signature(&source).unwrap();
+        for _ in 0..128 {
+            let reloaded = serde_json::from_value(settings.clone()).unwrap();
+            assert_eq!(
+                super::snapshot_source_signature(&reloaded).unwrap(),
+                expected,
+                "Reloading unchanged settings must not invalidate a sync preview"
+            );
+        }
+        let mut changed = source.clone();
+        changed
+            .config
+            .insert("root".into(), "AnotherLibrary".into());
+        assert_ne!(
+            super::snapshot_source_signature(&changed).unwrap(),
+            expected
+        );
+        changed = source;
+        changed.endpoint = "https://other.invalid/dav".into();
+        assert_ne!(
+            super::snapshot_source_signature(&changed).unwrap(),
+            expected
+        );
+    }
+
     #[test]
     fn snapshot_annotations_merge_without_changing_archive_contents() {
         let mut local = serde_json::json!([

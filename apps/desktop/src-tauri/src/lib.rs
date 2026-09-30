@@ -8,6 +8,7 @@ mod game_exit;
 mod language;
 mod onboarding;
 mod process_monitor;
+mod snapshot_sync;
 mod steam_scan;
 mod storage_root;
 #[cfg(test)]
@@ -25,6 +26,7 @@ use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
 };
+use tauri_plugin_window_state::StateFlags;
 
 pub(crate) struct AppState {
     pub repository: Arc<Mutex<LocalRepository>>,
@@ -43,6 +45,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_filter(|label| label == "main")
+                // A tray-hidden window should still be visible on the next launch.
+                .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
+                .build(),
+        )
         .setup(|app| {
             let executable = std::env::current_exe()?;
             let repository_root = storage_root::resolve_repository_root(
@@ -129,6 +138,20 @@ pub fn run() {
             onboarding::save_onboarding,
             commands::list_entries,
             commands::repository_info,
+            snapshot_sync::preview_snapshot_sync,
+            snapshot_sync::apply_snapshot_sync_plan,
+            snapshot_sync::cancel_snapshot_sync,
+            snapshot_sync::enable_snapshot_sync_protocol,
+            snapshot_sync::cloud_upload_new_snapshots,
+            snapshot_sync::read_known_devices,
+            snapshot_sync::list_snapshot_recovery,
+            snapshot_sync::read_remote_snapshot_recovery,
+            snapshot_sync::restore_remote_snapshot_recovery,
+            snapshot_sync::restore_snapshot_recovery,
+            snapshot_sync::purge_snapshot_recovery,
+            commands::read_device,
+            commands::rename_device,
+            commands::reset_device_identity,
             commands::open_repository_folder,
             commands::open_entry_storage,
             commands::open_entry_sources,

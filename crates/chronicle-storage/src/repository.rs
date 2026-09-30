@@ -126,6 +126,37 @@ struct DeviceDocument {
     format_version: u32,
     id: String,
     name: String,
+    #[serde(default)]
+    revision: u64,
+}
+
+/// Local identity; names may change without rewriting historical snapshots.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceIdentity {
+    pub id: String,
+    pub name: String,
+    pub revision: u64,
+}
+
+/// Durable deletion fact and local recovery information. Never inferred from missing files.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotDeletion {
+    pub operation_id: String,
+    pub snapshot: Snapshot,
+    pub device: DeviceIdentity,
+    pub reason: String,
+    pub deleted_at_ms: u64,
+    pub committed: bool,
+    pub purged: bool,
+    pub restored_snapshot: Option<Snapshot>,
+    #[serde(default)]
+    pub restore_committed: bool,
+    #[serde(default)]
+    pub observed_revisions: Vec<String>,
+    #[serde(default)]
+    pub entry_metadata: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1182,6 +1213,7 @@ impl LocalRepository {
             unix_millis(SystemTime::now()).max(snapshot.metadata_updated_at_ms.saturating_add(1));
         let updated = snapshot.clone();
         self.refresh_catalog_entry(entry_id, &timeline)?;
+        self.record_snapshot_revision(&updated)?;
         Ok(updated)
     }
 
@@ -1227,14 +1259,39 @@ impl LocalRepository {
             unix_millis(SystemTime::now()).max(snapshot.metadata_updated_at_ms.saturating_add(1));
         let updated = snapshot.clone();
         self.refresh_catalog_entry(entry_id, &timeline)?;
+        self.record_snapshot_revision(&updated)?;
         Ok(updated)
     }
 
-    /// Permanently deletes one stored snapshot and its archive object.
+    /// Recoverably deletes one snapshot, preserving an explicit deletion record.
     ///
     /// # Errors
     /// Returns an error when the entry or snapshot does not exist, or its archive cannot be removed.
     pub fn delete_snapshot(&self, entry_id: &str, snapshot_id: &str) -> Result<()> {
+        self.delete_snapshot_with_reason(entry_id, snapshot_id, "manual")
+    }
+
+    /// Records a manual or retention deletion before moving its verified archive.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid reason, locked or corrupt snapshot, or failed storage I/O.
+    pub fn delete_snapshot_with_reason(
+        &self,
+        entry_id: &str,
+        snapshot_id: &str,
+        reason: &str,
+    ) -> Result<()> {
+        if !matches!(reason, "manual" | "retention" | "sync") {
+            return Err(StorageError::InvalidBackupOption("无效删除原因".into()));
+        }
+        self.recover_snapshot_operations()?;
+        if self
+            .list_snapshot_deletions()?
+            .iter()
+            .any(|item| item.snapshot.id == snapshot_id && item.snapshot.entry_id == entry_id)
+        {
+            return Ok(());
+        }
         let timeline = self.list_snapshots(entry_id)?;
         let snapshot = timeline
             .iter()
@@ -1243,19 +1300,503 @@ impl LocalRepository {
         if snapshot.locked {
             return Err(StorageError::SnapshotLocked);
         }
-        let archive = self.entry_dir(entry_id)?.join(&snapshot.archive_name);
-        let staged = self.temp_dir().join(format!("delete-{snapshot_id}.7z"));
-        fs::rename(&archive, &staged)?;
-        let remaining = timeline
-            .into_iter()
-            .filter(|item| item.id != snapshot_id)
-            .collect::<Vec<_>>();
-        if let Err(error) = self.refresh_catalog_entry(entry_id, &remaining) {
-            let _ = fs::rename(&staged, &archive);
-            return Err(error);
+        if !self.verify_snapshot(snapshot_id)? {
+            return Err(StorageError::IntegrityMismatch);
         }
-        fs::remove_file(staged)?;
+        let deletion = SnapshotDeletion {
+            operation_id: Uuid::new_v4().to_string(),
+            snapshot: snapshot.clone(),
+            device: self.read_device()?,
+            reason: reason.into(),
+            deleted_at_ms: unix_millis(SystemTime::now()),
+            committed: false,
+            purged: false,
+            restored_snapshot: None,
+            restore_committed: false,
+            observed_revisions: self.observed_snapshot_revisions(snapshot_id)?,
+            entry_metadata: Some(serde_json::to_value(
+                self.read_catalog()?
+                    .entries
+                    .into_iter()
+                    .find(|entry| entry.id == entry_id)
+                    .ok_or_else(|| StorageError::EntryNotFound(entry_id.into()))?,
+            )?),
+        };
+        self.write_snapshot_deletion(&deletion)?;
+        self.recover_snapshot_operations()?;
         Ok(())
+    }
+
+    fn snapshot_operations_dir(&self) -> PathBuf {
+        self.config_dir().join("snapshot-deletions")
+    }
+
+    /// Immutable local edits awaiting manual publication.
+    ///
+    /// # Errors
+    /// Returns an error if revision records cannot be read or decoded.
+    pub fn snapshot_revision_records(&self) -> Result<Vec<Value>> {
+        let path = self.config_dir().join("snapshot-revisions");
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let mut records = Vec::new();
+        for file in fs::read_dir(path)? {
+            let file = file?;
+            if file
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                records.push(read_json::<Value>(&file.path())?);
+            }
+        }
+        records.sort_by(|left, right| {
+            left["operationId"]
+                .as_str()
+                .cmp(&right["operationId"].as_str())
+        });
+        Ok(records)
+    }
+    fn observed_snapshot_revisions(&self, snapshot_id: &str) -> Result<Vec<String>> {
+        let path = self.config_dir().join("snapshot-observed-revisions.json");
+        let mut parents: Vec<String> = if path.exists() {
+            read_json::<HashMap<String, Vec<String>>>(&path)?
+                .remove(snapshot_id)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        for record in self.snapshot_revision_records()? {
+            if record["kind"]["snapshot"]["id"].as_str() == Some(snapshot_id) {
+                parents.push(
+                    record["operationId"]
+                        .as_str()
+                        .ok_or_else(|| StorageError::RestoreConflict("快照修订记录无效".into()))?
+                        .into(),
+                );
+            }
+        }
+        parents.sort();
+        parents.dedup();
+        Ok(parents)
+    }
+    fn record_snapshot_revision(&self, snapshot: &Snapshot) -> Result<()> {
+        let id = Uuid::new_v4().to_string();
+        let record = serde_json::json!({"operationId":id,"device":self.read_device()?,"kind":{"type":"revised","snapshot":snapshot,"parents":self.observed_snapshot_revisions(&snapshot.id)?}});
+        let path = self.config_dir().join("snapshot-revisions");
+        fs::create_dir_all(&path)?;
+        write_json_atomic(&path.join(format!("{id}.json")), &record, &self.temp_dir())
+    }
+
+    /// Applies a remote annotation without changing immutable snapshot identity/content.
+    ///
+    /// # Errors
+    /// Returns an error if the base no longer matches or the catalog cannot be updated.
+    pub fn apply_cloud_snapshot_revision(&self, base: &Snapshot, updated: &Snapshot) -> Result<()> {
+        let mut timeline = self.list_snapshots(&updated.entry_id)?;
+        let current = timeline
+            .iter_mut()
+            .find(|snapshot| snapshot.id == updated.id)
+            .ok_or_else(|| StorageError::SnapshotNotFound(updated.id.clone()))?;
+        if current != base {
+            return Err(StorageError::RestoreConflict(
+                "快照已改变，请重新预览".into(),
+            ));
+        }
+        let mut expected = current.clone();
+        expected.note.clone_from(&updated.note);
+        expected.locked = updated.locked;
+        expected.metadata_updated_at_ms = updated.metadata_updated_at_ms;
+        if expected != *updated {
+            return Err(StorageError::RestoreConflict("修订不能改变快照内容".into()));
+        }
+        *current = updated.clone();
+        self.refresh_catalog_entry(&updated.entry_id, &timeline)
+    }
+    fn snapshot_recycle_path(&self, operation_id: &str) -> Result<PathBuf> {
+        Uuid::parse_str(operation_id)
+            .map_err(|_| StorageError::RestoreConflict(operation_id.into()))?;
+        Ok(self
+            .root
+            .join("recycle-snapshots")
+            .join(format!("{operation_id}.7z")))
+    }
+    fn write_snapshot_deletion(&self, deletion: &SnapshotDeletion) -> Result<()> {
+        self.snapshot_recycle_path(&deletion.operation_id)?;
+        fs::create_dir_all(self.snapshot_operations_dir())?;
+        write_json_atomic(
+            &self
+                .snapshot_operations_dir()
+                .join(format!("{}.json", deletion.operation_id)),
+            deletion,
+            &self.temp_dir(),
+        )
+    }
+    fn read_snapshot_deletion(&self, operation_id: &str) -> Result<SnapshotDeletion> {
+        self.snapshot_recycle_path(operation_id)?;
+        read_json(
+            &self
+                .snapshot_operations_dir()
+                .join(format!("{operation_id}.json")),
+        )
+    }
+
+    /// Lists committed deletion facts, including purged and restored records.
+    ///
+    /// # Errors
+    /// Returns an error if a deletion record cannot be read or decoded.
+    pub fn list_snapshot_deletions(&self) -> Result<Vec<SnapshotDeletion>> {
+        Ok(self
+            .read_snapshot_operations()?
+            .into_iter()
+            .filter(|item| item.committed)
+            .collect())
+    }
+
+    /// Accepts an explicit remote deletion only after verifying its recovery bytes.
+    ///
+    /// # Errors
+    /// Returns an error for mismatched bytes, conflicting local state, or failed storage I/O.
+    ///
+    /// # Panics
+    /// Panics only if the validated recycle path has no parent directory.
+    pub fn accept_snapshot_deletion(
+        &self,
+        mut deletion: SnapshotDeletion,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.recover_snapshot_operations()?;
+        let recycled = self.snapshot_recycle_path(&deletion.operation_id)?;
+        if self
+            .list_snapshot_deletions()?
+            .iter()
+            .any(|item| item.operation_id == deletion.operation_id)
+        {
+            return Ok(());
+        }
+        if hash_bytes(bytes) != deletion.snapshot.object_hash {
+            return Err(StorageError::IntegrityMismatch);
+        }
+        let current = match self.get_snapshot(&deletion.snapshot.id) {
+            Ok(snapshot) => Some(snapshot),
+            Err(StorageError::SnapshotNotFound(_)) => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(snapshot) = &current {
+            if snapshot.locked {
+                return Err(StorageError::SnapshotLocked);
+            }
+            if snapshot != &deletion.snapshot {
+                return Err(StorageError::RestoreConflict(
+                    "快照已修改，请重新预览".into(),
+                ));
+            }
+        }
+        if let Some(entry) = self
+            .read_catalog()?
+            .entries
+            .iter()
+            .find(|entry| entry.id == deletion.snapshot.entry_id)
+        {
+            deletion.entry_metadata = Some(serde_json::to_value(entry)?);
+        } else if let Some(metadata) = &mut deletion.entry_metadata {
+            // A foreign descriptor is not a binding on this device.
+            let mut entry: CatalogEntry = serde_json::from_value(metadata.clone())?;
+            if entry.id != deletion.snapshot.entry_id {
+                return Err(StorageError::RestoreConflict("存档与节点标识不一致".into()));
+            }
+            entry.sources.clear();
+            entry.source_count = 0;
+            *metadata = serde_json::to_value(entry)?;
+        }
+        fs::create_dir_all(recycled.parent().unwrap())?;
+        fs::write(&recycled, bytes)?;
+        deletion.committed = current.is_none();
+        deletion.purged = false;
+        deletion.restored_snapshot = None;
+        deletion.restore_committed = false;
+        self.write_snapshot_deletion(&deletion)?;
+        self.recover_snapshot_operations()?;
+        // Recovery already holds a verified copy; remove the old active object afterwards.
+        if current.is_some() {
+            let path = self
+                .entry_dir(&deletion.snapshot.entry_id)?
+                .join(&deletion.snapshot.archive_name);
+            if path.exists() {
+                fs::remove_file(path)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Imports verified cloud bytes without modifying local source bindings or device identity.
+    ///
+    /// # Errors
+    /// Returns an error for mismatched bytes, a deleted node, invalid metadata, or failed storage I/O.
+    ///
+    /// # Panics
+    /// Panics only if the catalog entry just inserted or verified disappears within this call.
+    pub fn import_cloud_snapshot(
+        &self,
+        metadata: Value,
+        snapshot: Snapshot,
+        bytes: &[u8],
+    ) -> Result<()> {
+        if hash_bytes(bytes) != snapshot.object_hash {
+            return Err(StorageError::IntegrityMismatch);
+        }
+        if self
+            .list_snapshot_deletions()?
+            .iter()
+            .any(|item| item.snapshot.id == snapshot.id)
+        {
+            return Err(StorageError::RestoreConflict(
+                "已删除节点不能重新导入".into(),
+            ));
+        }
+        for name in [
+            &snapshot.archive_name,
+            metadata.get("folder").and_then(Value::as_str).unwrap_or(""),
+        ] {
+            validate_snapshot_filename(name)?;
+        }
+        if let Ok(existing) = self.get_snapshot(&snapshot.id)
+            && existing != snapshot
+        {
+            return Err(StorageError::RestoreConflict("快照元数据冲突".into()));
+        }
+        let mut catalog = self.read_catalog()?;
+        let mut imported: CatalogEntry = serde_json::from_value(metadata)?;
+        if imported.id != snapshot.entry_id {
+            return Err(StorageError::RestoreConflict("存档与节点标识不一致".into()));
+        }
+        if !catalog.entries.iter().any(|entry| entry.id == imported.id) {
+            imported.snapshots.clear();
+            imported.snapshot_count = 0;
+            imported.stored_bytes = 0;
+            imported.auto_backup_enabled = false;
+            imported.automatic_upload_enabled = false;
+            // Never adopt remote paths as this device's bindings.
+            imported.sources.clear();
+            imported.source_count = 0;
+            catalog.entries.push(imported);
+        }
+        let entry = catalog
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == snapshot.entry_id)
+            .unwrap();
+        let path = self
+            .entries_dir()
+            .join(&entry.folder)
+            .join(&snapshot.archive_name);
+        fs::create_dir_all(path.parent().unwrap())?;
+        let staged = self
+            .temp_dir()
+            .join(format!("import-{}.7z", Uuid::new_v4()));
+        fs::write(&staged, bytes)?;
+        if path.exists() && hash_file(&path)? != snapshot.object_hash {
+            fs::remove_file(&staged)?;
+            return Err(StorageError::IntegrityMismatch);
+        }
+        fs::rename(&staged, &path)?;
+        if !entry.snapshots.iter().any(|item| item.id == snapshot.id) {
+            entry.snapshots.push(snapshot);
+        }
+        entry.snapshot_count = entry.snapshots.len();
+        entry.stored_bytes = entry.snapshots.iter().map(|item| item.size_bytes).sum();
+        entry.last_snapshot_at_ms = entry.snapshots.iter().map(|item| item.created_at_ms).max();
+        self.write_catalog(&mut catalog)
+    }
+
+    fn read_snapshot_operations(&self) -> Result<Vec<SnapshotDeletion>> {
+        let path = self.snapshot_operations_dir();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let mut records = Vec::new();
+        for file in fs::read_dir(path)? {
+            let file = file?;
+            if file
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                records.push(read_json::<SnapshotDeletion>(&file.path())?);
+            }
+        }
+        records.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));
+        Ok(records)
+    }
+
+    fn recover_snapshot_operations(&self) -> Result<()> {
+        for mut deletion in self.read_snapshot_operations()? {
+            for snapshot in
+                std::iter::once(&deletion.snapshot).chain(deletion.restored_snapshot.iter())
+            {
+                validate_snapshot_filename(&snapshot.archive_name)?;
+            }
+            let recycled = self.snapshot_recycle_path(&deletion.operation_id)?;
+            if !deletion.committed {
+                let archive = self
+                    .entry_dir(&deletion.snapshot.entry_id)?
+                    .join(&deletion.snapshot.archive_name);
+                if !recycled.exists() {
+                    if hash_file(&archive)? != deletion.snapshot.object_hash {
+                        return Err(StorageError::IntegrityMismatch);
+                    }
+                    fs::create_dir_all(recycled.parent().unwrap())?;
+                    fs::rename(&archive, &recycled)?;
+                }
+                if hash_file(&recycled)? != deletion.snapshot.object_hash {
+                    return Err(StorageError::IntegrityMismatch);
+                }
+                let remaining = self
+                    .list_snapshots(&deletion.snapshot.entry_id)?
+                    .into_iter()
+                    .filter(|item| item.id != deletion.snapshot.id)
+                    .collect::<Vec<_>>();
+                self.refresh_catalog_entry(&deletion.snapshot.entry_id, &remaining)?;
+                deletion.committed = true;
+                self.write_snapshot_deletion(&deletion)?;
+            }
+            if deletion.purged {
+                if recycled.exists() {
+                    fs::remove_file(&recycled)?;
+                }
+            } else if let Some(restored) = &deletion.restored_snapshot
+                && !deletion.restore_committed
+            {
+                match self.ensure_snapshot_recovery_entry(&deletion) {
+                    Err(StorageError::EntryNotFound(_)) => continue,
+                    result => result?,
+                }
+                let target = self
+                    .entry_dir(&restored.entry_id)?
+                    .join(&restored.archive_name);
+                if hash_file(&recycled)? != restored.object_hash {
+                    return Err(StorageError::IntegrityMismatch);
+                }
+                fs::create_dir_all(target.parent().unwrap())?;
+                fs::copy(&recycled, &target)?;
+                if hash_file(&target)? != restored.object_hash {
+                    return Err(StorageError::IntegrityMismatch);
+                }
+                let mut timeline = self.list_snapshots(&restored.entry_id)?;
+                if !timeline.iter().any(|snapshot| snapshot.id == restored.id) {
+                    timeline.push(restored.clone());
+                }
+                self.refresh_catalog_entry(&restored.entry_id, &timeline)?;
+                deletion.restore_committed = true;
+                self.write_snapshot_deletion(&deletion)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_snapshot_recovery_entry(&self, deletion: &SnapshotDeletion) -> Result<()> {
+        let mut catalog = self.read_catalog()?;
+        if catalog
+            .entries
+            .iter()
+            .any(|entry| entry.id == deletion.snapshot.entry_id)
+        {
+            return Ok(());
+        }
+        let metadata = deletion
+            .entry_metadata
+            .clone()
+            .ok_or_else(|| StorageError::EntryNotFound(deletion.snapshot.entry_id.clone()))?;
+        let mut entry: CatalogEntry = serde_json::from_value(metadata)?;
+        if entry.id != deletion.snapshot.entry_id {
+            return Err(StorageError::RestoreConflict("回收存档标识不一致".into()));
+        }
+        entry.folder = format!("recovered-{}", Uuid::new_v4());
+        entry.category_id = None;
+        entry.snapshots.clear();
+        entry.snapshot_count = 0;
+        entry.stored_bytes = 0;
+        entry.last_snapshot_at_ms = None;
+        entry.auto_backup_enabled = false;
+        entry.automatic_upload_enabled = false;
+        catalog.entries.push(entry);
+        self.write_catalog(&mut catalog)
+    }
+
+    /// Restores into the active timeline with a new ID, never into source directories.
+    ///
+    /// # Errors
+    /// Returns an error if recovery bytes do not match, recovery is unavailable, or storage I/O fails.
+    ///
+    /// # Panics
+    /// Panics only if the validated recycle path has no parent directory.
+    pub fn restore_recycled_snapshot_from_cloud(
+        &self,
+        operation_id: &str,
+        bytes: &[u8],
+    ) -> Result<Snapshot> {
+        self.recover_snapshot_operations()?;
+        let mut deletion = self.read_snapshot_deletion(operation_id)?;
+        if hash_bytes(bytes) != deletion.snapshot.object_hash {
+            return Err(StorageError::IntegrityMismatch);
+        }
+        if deletion.purged {
+            let path = self.snapshot_recycle_path(operation_id)?;
+            fs::create_dir_all(path.parent().unwrap())?;
+            let staged = self
+                .temp_dir()
+                .join(format!("recovery-{}.7z", Uuid::new_v4()));
+            fs::write(&staged, bytes)?;
+            fs::rename(staged, path)?;
+            deletion.purged = false;
+            self.write_snapshot_deletion(&deletion)?;
+        }
+        self.restore_recycled_snapshot(operation_id)
+    }
+
+    /// Restores into the active timeline with a new ID, never into source directories.
+    ///
+    /// # Errors
+    /// Returns an error if the recycle record or bytes are unavailable, or storage I/O fails.
+    pub fn restore_recycled_snapshot(&self, operation_id: &str) -> Result<Snapshot> {
+        self.recover_snapshot_operations()?;
+        let mut deletion = self.read_snapshot_deletion(operation_id)?;
+        if deletion.purged || !deletion.committed {
+            return Err(StorageError::RestoreConflict(operation_id.into()));
+        }
+        self.ensure_snapshot_recovery_entry(&deletion)?;
+        if let Some(snapshot) = &deletion.restored_snapshot {
+            return self.get_snapshot(&snapshot.id);
+        }
+        let mut restored = deletion.snapshot.clone();
+        restored.id = Uuid::new_v4().to_string();
+        restored.archive_name = format!("{}.7z", restored.id);
+        restored.parent_id = Some(deletion.snapshot.id.clone());
+        restored.created_at_ms = unix_millis(SystemTime::now());
+        let device = self.read_device()?;
+        restored.device_id = device.id;
+        restored.device_name = device.name;
+        restored.metadata_updated_at_ms = 0;
+        deletion.restored_snapshot = Some(restored.clone());
+        self.write_snapshot_deletion(&deletion)?;
+        self.recover_snapshot_operations()?;
+        Ok(restored)
+    }
+
+    /// Removes recycled bytes but permanently preserves the deletion fact.
+    ///
+    /// # Errors
+    /// Returns an error if the deletion is uncommitted or storage I/O fails.
+    pub fn purge_recycled_snapshot(&self, operation_id: &str) -> Result<()> {
+        self.recover_snapshot_operations()?;
+        let mut deletion = self.read_snapshot_deletion(operation_id)?;
+        if !deletion.committed {
+            return Err(StorageError::RestoreConflict(operation_id.into()));
+        }
+        deletion.purged = true;
+        self.write_snapshot_deletion(&deletion)?;
+        self.recover_snapshot_operations()
     }
 
     /// Verifies a snapshot archive against its SHA-256 hash.
@@ -1425,6 +1966,7 @@ impl LocalRepository {
                     format_version: 1,
                     id: Uuid::new_v4().to_string(),
                     name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "本地设备".into()),
+                    revision: 0,
                 },
                 &self.temp_dir(),
             )?;
@@ -1441,6 +1983,7 @@ impl LocalRepository {
             )?;
         }
         self.migrate_source_bindings()?;
+        self.recover_snapshot_operations()?;
         Ok(())
     }
 
@@ -1504,6 +2047,53 @@ impl LocalRepository {
     pub fn device_identity(&self) -> Result<(String, String)> {
         let device: DeviceDocument = read_json(&self.device_path())?;
         Ok((device.id, device.name))
+    }
+
+    /// Reads the local identity and its monotonic name revision.
+    ///
+    /// # Errors
+    /// Returns an error if the device document cannot be read or decoded.
+    pub fn read_device(&self) -> Result<DeviceIdentity> {
+        let device: DeviceDocument = read_json(&self.device_path())?;
+        Ok(DeviceIdentity {
+            id: device.id,
+            name: device.name,
+            revision: device.revision,
+        })
+    }
+
+    /// Renames this device, preserving its ID and historical snapshot metadata.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid name, exhausted revision, or failed storage I/O.
+    pub fn rename_device(&self, name: &str) -> Result<DeviceIdentity> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 64 {
+            return Err(StorageError::InvalidBackupOption(
+                "设备名称须为 1–64 个字符".into(),
+            ));
+        }
+        let mut device: DeviceDocument = read_json(&self.device_path())?;
+        if device.name != name {
+            device.name = name.into();
+            device.revision = device.revision.checked_add(1).ok_or_else(|| {
+                StorageError::InvalidBackupOption("设备名称版本已超出范围".into())
+            })?;
+            write_json_atomic(&self.device_path(), &device, &self.temp_dir())?;
+        }
+        self.read_device()
+    }
+
+    /// Explicitly starts a new identity without changing library data or bindings.
+    ///
+    /// # Errors
+    /// Returns an error if the identity document cannot be read or written.
+    pub fn reset_device_identity(&self) -> Result<DeviceIdentity> {
+        let mut device: DeviceDocument = read_json(&self.device_path())?;
+        device.id = Uuid::new_v4().to_string();
+        device.revision = 0;
+        write_json_atomic(&self.device_path(), &device, &self.temp_dir())?;
+        self.read_device()
     }
 
     fn read_bindings(&self) -> Result<BindingsDocument> {
@@ -2143,6 +2733,35 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn validate_snapshot_filename(name: &str) -> Result<()> {
+    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|prefix| {
+            stem.strip_prefix(prefix)
+                .is_some_and(|tail| tail.len() == 1 && matches!(tail.as_bytes()[0], b'1'..=b'9'))
+        });
+    if name.is_empty()
+        || name.ends_with(['.', ' '])
+        || name
+            .chars()
+            .any(|ch| ch.is_control() || "/\\:<>\"|?*".contains(ch))
+        || reserved
+    {
+        return Err(StorageError::RestoreConflict("无效快照路径".into()));
+    }
+    Ok(())
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 fn hash_file(path: &Path) -> Result<String> {

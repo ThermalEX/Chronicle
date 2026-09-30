@@ -241,14 +241,14 @@ dependencies = [
 
 [[package]]
 name = "chronicle-core"
-version = "1.3.3"
+version = "1.3.4-beta"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "chronicle-storage"
-version = "1.3.3"
+version = "1.3.4-beta"
 dependencies = [
  "chronicle-core",
  "globset",
@@ -266,11 +266,12 @@ dependencies = [
 
 [[package]]
 name = "chronicle-sync"
-version = "1.3.3"
+version = "1.3.4-beta"
 dependencies = [
  "base64 0.22.1",
  "chronicle-core",
  "opendal",
+ "quick-xml",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

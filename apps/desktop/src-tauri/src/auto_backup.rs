@@ -171,7 +171,7 @@ fn create_auto_backup_snapshot(
             .map_err(|error| error.to_string())?;
         for snapshot_id in retention_candidates(&snapshots, limit) {
             repository
-                .delete_snapshot(entry_id, &snapshot_id)
+                .delete_snapshot_with_reason(entry_id, &snapshot_id, "retention")
                 .map_err(|error| error.to_string())?;
         }
     }

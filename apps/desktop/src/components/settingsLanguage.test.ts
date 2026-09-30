@@ -20,7 +20,7 @@ function dialog() {
 }
 
 describe("settings language selection", () => {
-  it("saves only language immediately, keeps other edits pending, and does not revert language on later save", async () => {
+  it("previews language immediately and persists language with other edits on save", async () => {
     const stored = new Map<string, string>();
     vi.stubGlobal("localStorage", { setItem: (key: string, value: string) => stored.set(key, value) });
     const { state, stop } = dialog();
@@ -31,25 +31,30 @@ describe("settings language selection", () => {
       expect(appSettings.retentionCount).toBeNull();
       expect(state.draft.retentionCount).toBe(7);
       expect(state.draft.language).toBe("en");
-      expect(JSON.parse(stored.get("chronicle.app-settings.v2")!).language).toBe("en");
+      expect(stored.has("chronicle.app-settings.v2")).toBe(false);
+      expect(appSettings.language).toBe("zh-CN");
       expect(state.sections.value[0].label).toBe("General");
       expect(state.colorModeOptions.value[0].label).toBe("Light");
       await state.save();
       expect(appSettings.language).toBe("en");
       expect(appSettings.retentionCount).toBe(7);
+      expect(JSON.parse(stored.get("chronicle.app-settings.v2")!).language).toBe("en");
     } finally { stop(); }
   });
 
-  it("restores the saved language on persistence failure and shows the original error", async () => {
+  it("keeps the preview on save failure and restores saved language when discarded", async () => {
     vi.stubGlobal("localStorage", { setItem: () => { throw new Error("Storage is unavailable"); } });
     const { state, stop } = dialog();
     try {
       await state.updateLanguage("en");
-      expect(locale.value).toBe("zh-CN");
+      await state.save();
+      expect(locale.value).toBe("en");
       expect(appSettings.language).toBe("zh-CN");
-      expect(state.draft.language).toBe("zh-CN");
-      expect(state.languageError.value).toBe("Storage is unavailable");
+      expect(state.draft.language).toBe("en");
+      expect(state.saveError.value).toBe("Storage is unavailable");
       expect(state.saving.value).toBe(false);
+      state.discardClose();
+      expect(locale.value).toBe("zh-CN");
     } finally { stop(); }
   });
 

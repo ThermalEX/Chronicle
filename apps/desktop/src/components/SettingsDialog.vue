@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { t, locale } from "../services/i18n";
-import { BellRing, ClipboardCopy, FolderOpen, HardDrive, Info, Keyboard, RefreshCw, RotateCcw, Settings2, Trash2, Undo2, X } from "@lucide/vue";
+import { t, locale, setLocale } from "../services/i18n";
+import { BellRing, ClipboardCopy, FolderOpen, HardDrive, Info, Keyboard, Monitor, RefreshCw, RotateCcw, Settings2, Trash2, Undo2, X } from "@lucide/vue";
 import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { computed, onMounted, reactive, ref, watch } from "vue";
-import { appSettings, resetAppSettings, saveAppSettings, type AppSettings, type CloseBehavior, type UpdateChannel } from "../services/settings";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { appSettings, defaultAppSettings, saveAppSettings, type AppSettings, type CloseBehavior, type UpdateChannel } from "../services/settings";
+import { deviceRepository, type DeviceIdentity } from "../services/devices";
 import { type ColorMode, type ColorTheme } from "../services/appearance";
 import { archiveRepository } from "../services/repository";
 import { createBackdropDismissal } from "../services/dialogDismissal";
@@ -14,20 +15,27 @@ import ConfirmDialog from "./ConfirmDialog.vue";
 import ShortcutRecorder from "./ShortcutRecorder.vue";
 import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
 import appIcon from "../assets/icon.png";
+import DeviceSettings from "./DeviceSettings.vue";
+import SnapshotRecovery from "./SnapshotRecovery.vue";
 import { appMetadata } from "../services/appMetadata";
 
-const props = withDefaults(defineProps<{ updateChecking?: boolean }>(), { updateChecking: false });
-const emit = defineEmits<{ close: []; saved: []; "restart-tutorial": []; "check-update": [channel: UpdateChannel]; "backup-health": [] }>();
-const activeSection = ref<"software" | "notifications" | "backup" | "recycle" | "hotkeys" | "about">("software");
+const props = withDefaults(defineProps<{ updateChecking?: boolean; initialSection?: "software" | "device" }>(), { updateChecking: false, initialSection: "software" });
+const emit = defineEmits<{ close: []; saved: []; changed: []; "restart-tutorial": []; "check-update": [channel: UpdateChannel]; "backup-health": [] }>();
+const activeSection = ref<"software" | "device" | "notifications" | "backup" | "recycle" | "hotkeys" | "about">(props.initialSection);
 const closeButton = ref<HTMLButtonElement>();
 const draft = reactive<AppSettings>({ ...appSettings });
 const saving = ref(false);
-const languageError = ref("");
+const saveError = ref("");
+const savedDraft = ref<AppSettings>({ ...appSettings });
+const localDevice = ref<DeviceIdentity>();
+const deviceName = ref("");
+const closeConfirmOpen = ref(false);
+const pendingClose = ref<"close" | "restart-tutorial">("close");
 const languageOptions: ThemedSelectOption[] = [
   { value: "zh-CN", label: "简体中文" },
   { value: "en", label: "English" },
 ];
-const backdrop = createBackdropDismissal(() => emit("close"), () => !saving.value);
+const backdrop = createBackdropDismissal(() => requestClose(), () => !saving.value && !closeConfirmOpen.value && !confirmAction.value);
 const recycleItems = ref<RecycleItem[]>([]);
 const recycleBusy = ref(false);
 const recycleError = ref("");
@@ -37,6 +45,7 @@ const diagnosticsBusy = ref(false);
 const diagnosticsError = ref("");
 const repositoryPath = ref("");
 const automationArchives = ref<ArchiveRecord[]>([]);
+const savedAutomation = ref(new Map<string, { backup: boolean; upload: boolean }>());
 const automationBusy = ref(false);
 const confirmAction = ref<{ title: string; message: string; run: () => Promise<void> }>();
 const recycleLocation = computed(() => draft.recycleBinPath || (repositoryPath.value ? `${repositoryPath.value}\\recycle` : "Chronicle\\recycle"));
@@ -62,10 +71,12 @@ const colorThemeOptions = computed<ThemedSelectOption[]>(() => [
 const colorModeOptions = computed<ThemedSelectOption[]>(() => [
   { value: "light", label: t('日间模式') },
   { value: "dark", label: t('夜间模式') },
+  { value: "system", label: t('跟随系统') },
 ]);
 
 const sections = computed(() => [
   { id: "software" as const, label: t('软件'), icon: Settings2 },
+  { id: "device" as const, label: t('设备'), icon: Monitor },
   { id: "notifications" as const, label: t('通知与错误'), icon: BellRing },
   { id: "backup" as const, label: t('存储与备份'), icon: HardDrive },
   { id: "recycle" as const, label: t('回收站'), icon: Trash2 },
@@ -134,16 +145,88 @@ function emptyRecycleBin(): void {
   confirmAction.value = { title: t('清空回收站'), message: t('回收站中的全部存档和分类将永久删除，无法恢复。'), run: () => archiveRepository.emptyRecycleBin() };
 }
 
+const hasChanges = computed(() => JSON.stringify(draft) !== JSON.stringify(savedDraft.value)
+  || (localDevice.value !== undefined && deviceName.value.trim() !== localDevice.value.name)
+  || automationArchives.value.some((archive) => {
+    const saved = savedAutomation.value.get(archive.id);
+    return saved && (archive.autoBackupEnabled !== saved.backup || archive.automaticUploadEnabled !== saved.upload);
+  }));
+
+async function loadDevice(): Promise<void> {
+  try {
+    localDevice.value = await deviceRepository.read();
+    deviceName.value = localDevice.value.name;
+  } catch (error) { saveError.value = error instanceof Error ? error.message : String(error); }
+}
+
+function identityReset(device: DeviceIdentity): void {
+  localDevice.value = device;
+  emit("saved");
+}
+
+function finishClose(): void {
+  setLocale(appSettings.language);
+  if (pendingClose.value === "restart-tutorial") emit("restart-tutorial");
+  else emit("close");
+}
+
+function requestClose(action: "close" | "restart-tutorial" = "close"): void {
+  if (saving.value) return;
+  pendingClose.value = action;
+  if (hasChanges.value) closeConfirmOpen.value = true;
+  else finishClose();
+}
+
+function discardClose(): void {
+  if (!saving.value) finishClose();
+}
+
+function continueEditing(): void {
+  closeConfirmOpen.value = false;
+  pendingClose.value = "close";
+}
+
+function onEscape(event: KeyboardEvent): void {
+  if (saving.value) return;
+  if (closeConfirmOpen.value) continueEditing();
+  else if (confirmAction.value) confirmAction.value = undefined;
+  else if (!(event.target as HTMLElement)?.closest('[role="alertdialog"]')) requestClose();
+}
+
 async function save(): Promise<void> {
+  if (saving.value) return;
+  saveError.value = "";
+  if (localDevice.value && (!deviceName.value.trim() || [...deviceName.value.trim()].length > 64)) {
+    saveError.value = t('设备名称须为 1–64 个字符');
+    return;
+  }
   if (draft.retentionCount !== null) {
     draft.retentionCount = Math.max(1, Math.min(999, Number(draft.retentionCount) || 30));
   }
   draft.autoBackupDelaySeconds = Math.max(1, Math.min(300, Number(draft.autoBackupDelaySeconds) || 5));
   saving.value = true;
+  let committed = false;
   try {
     await saveAppSettings({ ...draft });
+    committed = true;
+    savedDraft.value = { ...appSettings };
+    if (localDevice.value && deviceName.value.trim() !== localDevice.value.name) {
+      localDevice.value = await deviceRepository.rename(deviceName.value);
+      deviceName.value = localDevice.value.name;
+    }
+    for (const archive of automationArchives.value) {
+      const saved = savedAutomation.value.get(archive.id);
+      if (!saved || (archive.autoBackupEnabled === saved.backup && archive.automaticUploadEnabled === saved.upload)) continue;
+      await archiveRepository.setArchiveAutomation(archive.id, archive.autoBackupEnabled, archive.automaticUploadEnabled);
+      savedAutomation.value.set(archive.id, { backup: archive.autoBackupEnabled, upload: archive.automaticUploadEnabled });
+    }
     emit("saved");
-    emit("close");
+    finishClose();
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    saveError.value = committed ? `${t('部分设置已保存，剩余更改尚未保存，可重试。')} ${reason}` : reason;
+    setLocale(draft.language);
+    if (committed) emit("changed");
   } finally {
     saving.value = false;
   }
@@ -170,25 +253,15 @@ function updateColorMode(value: string | null): void {
   if (value) draft.colorMode = value as ColorMode;
 }
 
-async function updateLanguage(value: string | null): Promise<void> {
+function updateLanguage(value: string | null): void {
   if ((value !== "zh-CN" && value !== "en") || saving.value) return;
-  languageError.value = "";
-  saving.value = true;
-  try {
-    await saveAppSettings({ ...appSettings, language: value });
-    draft.language = appSettings.language;
-    emit("saved");
-  } catch (error) {
-    draft.language = appSettings.language;
-    languageError.value = error instanceof Error ? error.message : String(error);
-  } finally {
-    saving.value = false;
-  }
+  draft.language = value;
+  setLocale(value);
 }
 
 function reset(): void {
-  resetAppSettings();
-  Object.assign(draft, appSettings);
+  Object.assign(draft, defaultAppSettings);
+  setLocale(draft.language);
 }
 
 async function chooseRecycleBinPath(): Promise<void> {
@@ -207,40 +280,43 @@ async function openRecycleBin(): Promise<void> {
 }
 
 async function toggleAllAutomation(kind: "backup" | "upload"): Promise<void> {
+  if (saving.value || automationBusy.value) return;
+  const enabled = kind === "backup" ? !allAutoBackupEnabled.value : !allAutomaticUploadEnabled.value;
+  for (const archive of automationArchives.value) {
+    if (kind === "backup") archive.autoBackupEnabled = enabled;
+    else archive.automaticUploadEnabled = enabled;
+  }
+}
+
+async function loadAutomation(): Promise<void> {
   automationBusy.value = true;
   try {
-    const archives = await archiveRepository.listArchives();
-    const enabled = kind === "backup" ? !archives.every((archive) => archive.autoBackupEnabled) : !archives.every((archive) => archive.automaticUploadEnabled);
-    await Promise.all(archives.map((archive) => archiveRepository.setArchiveAutomation(
-      archive.id,
-      kind === "backup" ? enabled : archive.autoBackupEnabled,
-      kind === "upload" ? enabled : archive.automaticUploadEnabled,
-    )));
-    if (kind === "backup") await archiveRepository.refreshAutoBackup();
     automationArchives.value = await archiveRepository.listArchives();
-    emit("saved");
-  } finally {
-    automationBusy.value = false;
-  }
+    savedAutomation.value = new Map(automationArchives.value.map((archive) => [archive.id, { backup: archive.autoBackupEnabled, upload: archive.automaticUploadEnabled }]));
+  } catch (error) { saveError.value = error instanceof Error ? error.message : String(error); }
+  finally { automationBusy.value = false; }
 }
 
 onMounted(() => {
   closeButton.value?.focus();
   void loadRecycleItems();
   void loadDiagnostics();
-  void archiveRepository.listArchives().then((archives) => { automationArchives.value = archives; });
+  void loadDevice();
+  void loadAutomation();
   void archiveRepository.getRepositoryInfo().then((info) => { repositoryPath.value = info.path; });
 });
+onBeforeUnmount(() => setLocale(appSettings.language));
 
 watch(activeSection, (section) => { if (section === "notifications") void loadDiagnostics(); });
+watch(closeConfirmOpen, (open) => { if (!open) void nextTick(() => closeButton.value?.focus()); });
 </script>
 
 <template>
-  <div class="dialog-backdrop" @pointerdown="backdrop.pointerDown" @pointerup="backdrop.pointerUp" @pointercancel="backdrop.pointerCancel">
+  <div class="dialog-backdrop" @keydown.esc.stop.prevent="onEscape" @pointerdown="backdrop.pointerDown" @pointerup="backdrop.pointerUp" @pointercancel="backdrop.pointerCancel">
     <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <header>
-        <div><p>CHRONICLE</p><h2 id="settings-title">{{ t('设置') }}</h2></div>
-        <button ref="closeButton" class="close-button" :aria-label="t('关闭设置')" :title="t('关闭设置')" @click="emit('close')"><X :size="18" /></button>
+        <div><p>SETTING</p><h2 id="settings-title">{{ t('设置') }}</h2></div>
+        <button ref="closeButton" class="close-button" :disabled="saving" :aria-label="t('关闭设置')" :title="t('关闭设置')" @click="requestClose()"><X :size="18" /></button>
       </header>
 
       <div class="settings-layout">
@@ -250,14 +326,14 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
           </button>
         </nav>
 
-        <main>
+        <main :inert="saving">
+          <p v-if="saveError" class="recycle-error" role="alert">{{ saveError }}</p>
           <section v-if="activeSection === 'software'" aria-labelledby="software-title">
             <div class="section-heading"><h3 id="software-title">{{ t('软件') }}</h3><p>{{ t('控制 Chronicle 的启动、关闭和通知行为。') }}</p></div>
             <div class="setting-group">
-              <label class="setting-row select-row"><span><b>{{ t('界面语言') }}</b><small>{{ t('选择后立即应用并保存。') }}</small></span><ThemedSelect :model-value="appSettings.language" :options="languageOptions" :disabled="saving" :label="t('界面语言')" @update:model-value="updateLanguage" /></label>
-              <p v-if="languageError" class="recycle-error" role="alert">{{ languageError }}</p>
+              <label class="setting-row select-row"><span><b>{{ t('界面语言') }}</b><small>{{ t('选择后立即预览，点击保存设置后生效。') }}</small></span><ThemedSelect :model-value="draft.language" :options="languageOptions" :disabled="saving" :label="t('界面语言')" @update:model-value="updateLanguage" /></label>
               <label class="setting-row select-row"><span><b>{{ t('配色主题') }}</b><small>{{ t('为 Chronicle 选择一组强调色。') }}</small></span><ThemedSelect :model-value="draft.colorTheme" :options="colorThemeOptions" :label="t('配色主题')" @update:model-value="updateColorTheme" /></label>
-              <label class="setting-row select-row"><span><b>{{ t('显示模式') }}</b><small>{{ t('右上角太阳/月亮按钮可随时切换。') }}</small></span><ThemedSelect :model-value="draft.colorMode" :options="colorModeOptions" :label="t('显示模式')" @update:model-value="updateColorMode" /></label>
+              <label class="setting-row select-row"><span><b>{{ t('显示模式') }}</b><small>{{ t('跟随系统会自动切换明暗；右下角按钮可切换为固定模式。') }}</small></span><ThemedSelect :model-value="draft.colorMode" :options="colorModeOptions" :label="t('显示模式')" @update:model-value="updateColorMode" /></label>
               <label class="setting-row"><span><b>{{ t('随系统启动') }}</b><small>{{ t('登录 Windows 后自动启动 Chronicle') }}</small></span><input v-model="draft.launchAtStartup" type="checkbox" role="switch" /></label>
               <label class="setting-row"><span><b>{{ t('启动时检测云端') }}</b><small>{{ t('后台验证全部同步源的读写、列举与清理能力') }}</small></span><input v-model="draft.checkCloudOnLaunch" type="checkbox" role="switch" /></label>
               <label class="setting-row"><span><b>{{ t('桌面通知') }}</b><small>{{ t('备份、同步和恢复完成后显示通知') }}</small></span><input v-model="draft.notifications" type="checkbox" role="switch" /></label>
@@ -265,6 +341,7 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
             </div>
           </section>
 
+          <DeviceSettings v-else-if="activeSection === 'device'" :device="localDevice" v-model:name="deviceName" :saving="saving" @identity-reset="identityReset" />
           <section v-else-if="activeSection === 'notifications'" aria-labelledby="notifications-title">
             <div class="section-heading recycle-heading"><div><h3 id="notifications-title">{{ t('通知与错误记录') }}</h3><p>{{ t('同步、备份和资料库操作失败时会保留脱敏后的详情。') }}</p></div><div class="diagnostics-actions"><button :disabled="diagnosticsBusy || !diagnostics.length" @click="copyDiagnostics()"><ClipboardCopy :size="14" />{{ t('复制全部') }}</button><button class="empty-button" :disabled="diagnosticsBusy || !diagnostics.length" @click="clearDiagnostics"><Trash2 :size="14" />{{ t('清空') }}</button></div></div>
             <p v-if="diagnosticsError" class="recycle-error" role="alert">{{ diagnosticsError }}</p>
@@ -278,9 +355,10 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
             <div class="setting-group">
               <div class="setting-row automation-actions"><span><b>{{ t('备份健康检查') }}</b><small>{{ t('检查本地快照完整性、来源路径和未备份变化。') }}</small></span><div><button @click="emit('backup-health')">{{ t('打开健康检查') }}</button></div></div>
               <label class="setting-row"><span><b>{{ t('未备份变化提醒天数') }}</b></span><input id="health-stale-days" v-model.number="draft.backupHealthStaleDays" class="number-input" type="number" min="1" max="365" /></label>
+              <label class="setting-row"><span><b>{{ t('显示同步详细信息') }}</b><small>{{ t('开启后显示同步预览；关闭时直接同步，删除、冲突和协议升级仍需确认。') }}</small></span><input v-model="draft.showSyncDetails" type="checkbox" role="switch" /></label>
               <label class="setting-row"><span><b>{{ t('立即创建首个备份') }}</b><small>{{ t('添加文件或文件夹后建立初始时间节点') }}</small></span><input v-model="draft.createInitialSnapshot" type="checkbox" role="switch" /></label>
               <label class="setting-row"><span><b>{{ t('合并时间') }}</b><small>{{ t('文件变化后等待合并时间，再备份最新内容；内容未变则跳过，默认 5 秒。') }}</small></span><div class="number-control"><input v-model.number="draft.autoBackupDelaySeconds" class="number-input" type="number" min="1" max="300" :aria-label="t('自动备份合并秒数')" /><em>{{ t('秒') }}</em></div></label>
-              <div class="setting-row automation-actions"><span><b>{{ t('批量自动化') }}</b><small>{{ t('按存档分别保存；已开启的项目再次点击可全部关闭。') }}</small></span><div><button :class="{ danger: allAutoBackupEnabled }" :disabled="automationBusy || !automationArchives.length" @click="toggleAllAutomation('backup')">{{ allAutoBackupEnabled ? t('关闭所有自动备份') : t('开启所有自动备份') }}</button><button :class="{ danger: allAutomaticUploadEnabled }" :disabled="automationBusy || !automationArchives.length" @click="toggleAllAutomation('upload')">{{ allAutomaticUploadEnabled ? t('关闭所有自动上传') : t('开启所有自动上传') }}</button></div></div>
+              <div class="setting-row automation-actions"><span><b>{{ t('批量自动化') }}</b><small>{{ t('点击保存设置后生效；再次点击可切换全部项目。') }}</small></span><div><button :class="{ danger: allAutoBackupEnabled }" :disabled="saving || automationBusy || !automationArchives.length" @click="toggleAllAutomation('backup')">{{ allAutoBackupEnabled ? t('关闭所有自动备份') : t('开启所有自动备份') }}</button><button :class="{ danger: allAutomaticUploadEnabled }" :disabled="saving || automationBusy || !automationArchives.length" @click="toggleAllAutomation('upload')">{{ allAutomaticUploadEnabled ? t('关闭所有自动上传') : t('开启所有自动上传') }}</button></div></div>
               <div class="setting-row"><span><b>{{ t('每个存档保留版本') }}</b><small>{{ t('默认保留全部版本；设置上限后清理最旧的普通备份') }}</small></span><div class="retention-control"><input v-if="draft.retentionCount !== null" v-model.number="draft.retentionCount" :aria-label="t('版本保留数量')" class="number-input" type="number" min="1" max="999" /><label><span>{{ t('无限制') }}</span><input :checked="draft.retentionCount === null" type="checkbox" role="switch" @change="toggleRetentionLimit" /></label></div></div>
               <label class="setting-row"><span><b>{{ t('启用回收站') }}</b><small>{{ t('删除的存档先移入回收站；关闭后直接永久删除') }}</small></span><input v-model="draft.recycleBinEnabled" type="checkbox" role="switch" /></label>
               <div class="setting-row recycle-path"><span><b>{{ t('回收站位置') }}</b><small>{{ t('点击路径可在资源管理器中打开；右侧按钮用于选择新的位置') }}</small></span><div><button class="recycle-location" type="button" :title="recycleLocation" :disabled="!isTauri()" @click="openRecycleBin">{{ recycleLocation }}</button><button :aria-label="t('选择回收站文件夹')" :title="t('选择回收站文件夹')" :disabled="!isTauri()" @click="chooseRecycleBinPath"><FolderOpen :size="15" /></button></div></div>
@@ -289,6 +367,7 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
           </section>
 
           <section v-else-if="activeSection === 'recycle'" aria-labelledby="recycle-title">
+            <SnapshotRecovery @changed="emit('saved')" />
             <div class="section-heading recycle-heading"><div><h3 id="recycle-title">{{ t('回收站') }}</h3><p>{{ t('删除内容默认永久保留，可恢复或永久清理。') }}</p></div><button class="empty-button" :disabled="recycleBusy || !recycleItems.length" @click="emptyRecycleBin"><Trash2 :size="14" />{{ t('清空') }}</button></div>
             <p v-if="recycleError" class="recycle-error" role="alert">{{ recycleError }}</p>
             <div v-if="recycleBusy && !recycleItems.length" class="recycle-empty">{{ t('正在读取回收站…') }}</div>
@@ -312,9 +391,8 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
 
           <section v-else aria-labelledby="about-title">
             <div class="section-heading"><h3 id="about-title">{{ t('关于') }}</h3><p>{{ t('本地云端通用文件快照管理器。') }}</p></div>
-            <div class="about-card"><img class="about-logo" :src="appIcon" :alt="t('Chronicle 图标')" /><div><h4>{{ appMetadata.name }}</h4><p>{{ t('版本') }} {{ appMetadata.version }}</p><p>{{ t('作者') }} {{ appMetadata.author }}</p><a class="about-repository-link" href="https://github.com/ThermalEX/Chronicle" target="_blank" rel="noreferrer">{{ t('查看 GitHub 仓库') }}</a></div></div>
-            <dl class="about-list"><div><dt>{{ t('存储引擎') }}</dt><dd>Rust · 7z · SHA-256</dd></div><div><dt>{{ t('桌面框架') }}</dt><dd>Tauri 2 · Vue 3</dd></div><div><dt>{{ t('许可证') }}</dt><dd>{{ t('尚未指定') }}</dd></div></dl>
-            <div class="setting-row about-update-action"><span><b>{{ t('新手教程') }}</b><small>{{ t('重新了解创建存档、备份与云端同步。') }}</small></span><button @click="emit('restart-tutorial')"><RotateCcw :size="15" />{{ t('重新开始教程') }}</button></div>
+            <div class="about-card"><img class="about-logo" :src="appIcon" :alt="t('Chronicle 图标')" /><div><h4>{{ appMetadata.name }}</h4><p>{{ t('版本') }} {{ appMetadata.version }}</p><p>{{ t('作者') }} {{ appMetadata.author }}</p><a class="about-repository-link" href="https://github.com/ThermalEX/Chronicle" target="_blank" rel="noreferrer">{{ t('查看 GitHub 仓库') }}</a></div><button class="about-tutorial-button" type="button" @click="requestClose('restart-tutorial')"><RotateCcw :size="15" />{{ t('重新开始教程') }}</button></div>
+            <dl class="about-list"><div><dt>{{ t('存储引擎') }}</dt><dd>Rust · 7z · SHA-256</dd></div><div><dt>{{ t('桌面框架') }}</dt><dd>Tauri 2 · Vue 3</dd></div><div><dt>{{ t('许可证') }}</dt><dd>GPL-3.0</dd></div></dl>
             <div class="setting-group about-update-group">
               <label class="setting-row select-row"><span><b>{{ t('更新频道') }}</b><small>{{ t('正式版只检查稳定发布；测试版同时接收预发布版本。') }}</small></span><ThemedSelect :model-value="draft.updateChannel" :options="updateChannelOptions" :label="t('更新频道')" @update:model-value="updateUpdateChannel" /></label>
               <label class="setting-row"><span><b>{{ t('启动时检查更新') }}</b><small>{{ t('发现新版本时显示更新说明，不会自动下载。') }}</small></span><input v-model="draft.checkForUpdates" type="checkbox" role="switch" /></label>
@@ -324,15 +402,19 @@ watch(activeSection, (section) => { if (section === "notifications") void loadDi
         </main>
       </div>
 
-      <footer><button class="reset-button" :disabled="saving" @click="reset"><RotateCcw :size="15" />{{ t('恢复默认设置') }}</button><div><button class="cancel-button" :disabled="saving" @click="emit('close')">{{ t('取消') }}</button><button class="save-button" :disabled="saving" @click="save">{{ saving ? t('保存中') : t('保存设置') }}</button></div></footer>
+      <footer><button class="reset-button" :disabled="saving" @click="reset"><RotateCcw :size="15" />{{ t('恢复默认设置') }}</button><div><button class="cancel-button" :disabled="saving" @click="requestClose()">{{ t('取消') }}</button><button class="save-button" :disabled="saving" @click="save">{{ saving ? t('保存中') : t('保存设置') }}</button></div></footer>
     </section>
     <ConfirmDialog v-if="confirmAction" :title="confirmAction.title" :message="confirmAction.message" :confirm-label="t('确定')" danger @cancel="confirmAction = undefined" @confirm="runRecycleAction" />
+    <ConfirmDialog v-if="closeConfirmOpen" :title="t('保存设置？')" :message="t('设置已更改，是否保存后关闭？')" :confirm-label="t('保存并关闭')" :cancel-label="t('继续编辑')" :busy="saving" @cancel="continueEditing" @confirm="save">
+      <template #body-extra><p v-if="saveError" class="recycle-error" role="alert">{{ saveError }}</p></template>
+      <template #extra-actions><button class="exit-button" :disabled="saving" @click="discardClose">{{ t('不保存') }}</button></template>
+    </ConfirmDialog>
   </div>
 </template>
 
 <style scoped>
 .dialog-backdrop { position: fixed; z-index: 40; inset: 0; display: grid; place-items: center; padding: 32px; background: #18181b99; backdrop-filter: blur(3px); }
-.settings-dialog { display: grid; grid-template-rows: 70px minmax(0, 1fr) 66px; width: min(860px, calc(100vw - 64px)); height: min(650px, calc(100vh - 64px)); overflow: hidden; background: var(--surface); border: 1px solid var(--border-2); border-radius: 13px; box-shadow: 0 24px 80px #0d24205c; }
+.settings-dialog { display: grid; grid-template-rows: 70px minmax(0, 1fr) 66px; width: min(860px, calc(100vw - 64px)); height: min(650px, calc(100vh - 64px)); overflow: hidden; background: var(--surface); border: 1px solid var(--border-2); border-radius: 13px; box-shadow: 0 24px 80px var(--shadow-color); }
 header, footer { display: flex; align-items: center; justify-content: space-between; padding: 0 22px; }
 header { border-bottom: 1px solid var(--border); }
 header p { margin: 0; color: var(--primary); font-size: 9px; font-weight: 750; letter-spacing: .12em; }
@@ -350,14 +432,14 @@ main { min-width: 0; overflow-y: auto; padding: 28px 32px 36px; }
 .section-heading p { margin: 6px 0 0; color: var(--text-3); font-size: 11px; }
 .setting-group { overflow: hidden; border: 1px solid var(--border); border-radius: 10px; }
 .setting-row { display: flex; align-items: center; justify-content: space-between; min-height: 70px; gap: 28px; padding: 12px 16px; background: var(--surface); }
-.about-update-group { margin-top: 16px; }.about-update-action button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; min-height: 34px; padding: 0 12px; color: var(--primary-dark); background: var(--primary-soft); border: 1px solid var(--border-2); border-radius: 7px; font-size: 11px; font-weight: 650; }.about-update-action button:hover:not(:disabled) { background: var(--hover); }.about-update-action button:disabled { cursor: default; opacity: .62; }.spinning { animation: spin .85s linear infinite; }@keyframes spin { to { transform: rotate(360deg); } }
+.about-update-group { margin-top: 16px; }.about-update-action button, .about-tutorial-button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; min-height: 34px; padding: 0 12px; color: var(--primary-dark); background: var(--primary-soft); border: 1px solid var(--border-2); border-radius: 7px; font-size: 11px; font-weight: 650; }.about-update-action button:hover:not(:disabled), .about-tutorial-button:hover { background: var(--hover); }.about-update-action button:disabled { cursor: default; opacity: .62; }.spinning { animation: spin .85s linear infinite; }@keyframes spin { to { transform: rotate(360deg); } }
 .setting-row + .setting-row { border-top: 1px solid var(--border); }
 .setting-row > span { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
 .setting-row b { font-size: 12px; font-weight: 650; }
 .setting-row small { color: var(--text-3); font-size: 10px; line-height: 1.4; }
 .select-row :deep(.themed-select), .setting-row input[type="text"] { min-width: 152px; }
-.setting-row input[type="checkbox"] { position: relative; width: 38px; height: 22px; flex: none; appearance: none; background: #cbd5d1; border-radius: 20px; cursor: pointer; transition: background .16s ease; }
-.setting-row input[type="checkbox"]::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; background: #fff; border-radius: 50%; box-shadow: 0 1px 3px #102b2738; transition: transform .16s ease; }
+.setting-row input[type="checkbox"] { position: relative; width: 38px; height: 22px; flex: none; appearance: none; background: var(--border-2); border-radius: 20px; cursor: pointer; transition: background .16s ease; }
+.setting-row input[type="checkbox"]::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; background: var(--surface); border-radius: 50%; box-shadow: 0 1px 3px var(--shadow-color); transition: transform .16s ease; }
 .setting-row input[type="checkbox"]:checked { background: var(--primary); }
 .setting-row input[type="checkbox"]:checked::after { transform: translateX(16px); }
 .number-control, .retention-control { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
@@ -366,11 +448,12 @@ main { min-width: 0; overflow-y: auto; padding: 28px 32px 36px; }
 .number-input:focus { outline: 0; border-color: var(--primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 16%, transparent); }
 .retention-control label { display: flex; align-items: center; gap: 7px; color: var(--text-2); font-size: 10px; white-space: nowrap; }.retention-control .number-input { flex: 0 0 auto; }
 .automation-actions > div { display: flex; gap: 8px; }.automation-actions button { min-height: 34px; padding: 0 10px; color: var(--primary-dark); background: var(--primary-soft); border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border)); border-radius: 7px; font-size: 10px; font-weight: 650; }.automation-actions button.danger { color: var(--danger); background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 38%, var(--border)); }.automation-actions button:disabled { color: var(--text-3); background: var(--subtle); cursor: default; opacity: .65; }
-.recycle-path > div { display: flex; align-items: center; gap: 7px; }.recycle-path input { width: 220px; }.recycle-path button { display: grid; place-items: center; width: 34px; height: 34px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 6px; }.recycle-path button:hover:not(:disabled) { background: #d2e5e0; }.recycle-path button:disabled { color: var(--text-3); cursor: default; opacity: .55; }
+.recycle-path > div { display: flex; align-items: center; gap: 7px; }.recycle-path input { width: 220px; }.recycle-path button { display: grid; place-items: center; width: 34px; height: 34px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 6px; }.recycle-path button:hover:not(:disabled) { background: var(--hover); }.recycle-path button:disabled { color: var(--text-3); cursor: default; opacity: .55; }
 .path-card { display: grid; grid-template-columns: 22px 1fr auto; align-items: center; gap: 11px; margin-top: 16px; padding: 14px 16px; color: var(--primary); background: var(--primary-soft); border-radius: 9px; }
-.path-card span { display: flex; flex-direction: column; gap: 3px; color: #263431; }
+.path-card span { display: flex; flex-direction: column; gap: 3px; color: var(--text); }
 .path-card b { font-size: 11px; }.path-card small { color: var(--text-3); font-size: 9px; }.path-card em { color: var(--primary); font-size: 10px; font-style: normal; font-weight: 650; }
-.about-card { display: flex; align-items: center; gap: 14px; padding: 18px; background: var(--subtle); border: 1px solid var(--border); border-radius: 10px; }
+.about-card { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; padding: 18px; background: var(--subtle); border: 1px solid var(--border); border-radius: 10px; }
+.about-tutorial-button { margin-left: auto; }
 .about-logo { width: 48px; height: 48px; object-fit: cover; border-radius: 11px; }
 .about-card h4, .about-card p { margin: 0; }.about-card h4 { font-size: 16px; }.about-card p { margin-top: 4px; color: var(--text-3); font-size: 10px; }
 .about-repository-link { display: inline-block; margin-top: 8px; font-size: 11px; }
@@ -380,19 +463,12 @@ footer { border-top: 1px solid var(--border); }
 footer > div { display: flex; gap: 8px; }
 footer button { min-height: 36px; padding: 0 13px; border-radius: 7px; font-size: 11px; font-weight: 650; }
 .reset-button { display: inline-flex; align-items: center; gap: 7px; color: var(--text-2); background: transparent; }
-.cancel-button { background: transparent; }.save-button { color: #fff; background: var(--primary); }.save-button:hover { background: var(--primary-dark); }
-.recycle-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }.recycle-heading h3 { margin: 0; }.empty-button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 10px; color: #a52e28; background: #fff0ef; border-radius: 7px; font-size: 10px; font-weight: 650; }.empty-button:disabled { color: var(--text-3); background: #f1f3f2; cursor: default; opacity: .65; }
-.recycle-list { overflow: hidden; border: 1px solid var(--border); border-radius: 10px; }.recycle-list article { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: 66px; padding: 9px 12px; }.recycle-list article + article { border-top: 1px solid var(--border); }.recycle-icon { display: grid; place-items: center; width: 32px; height: 32px; color: #a52e28; background: #fff0ef; border-radius: 7px; }.recycle-list article > span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 4px; }.recycle-list b { font-size: 11px; }.recycle-list small { overflow: hidden; color: var(--text-3); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.recycle-list article > div { display: flex; gap: 6px; }.recycle-list button { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 0 8px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 6px; font-size: 9px; }.recycle-list button.danger { color: #a52e28; background: #fff0ef; }.recycle-list button:disabled { cursor: default; opacity: .55; }
-.recycle-empty { display: grid; place-items: center; min-height: 210px; gap: 7px; color: var(--text-3); background: #f8faf9; border: 1px dashed var(--border-2); border-radius: 10px; font-size: 10px; }.recycle-empty b { color: var(--text-2); font-size: 12px; }.recycle-error { padding: 10px 12px; color: #a52e28; background: #fff0ef; border-radius: 7px; font-size: 10px; }
-.diagnostics-actions { display: flex; gap: 7px; }.diagnostics-actions button { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 0 9px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 7px; font-size: 10px; font-weight: 650; }.diagnostics-actions .empty-button { color: #a52e28; background: #fff0ef; }.diagnostics-list { overflow: hidden; border: 1px solid var(--border); border-radius: 9px; }.diagnostics-list article { display: flex; align-items: start; justify-content: space-between; gap: 12px; padding: 12px; }.diagnostics-list article + article { border-top: 1px solid var(--border); }.diagnostics-list article > span { display: grid; min-width: 0; gap: 4px; }.diagnostics-list b { color: var(--text); font-size: 11px; }.diagnostics-list small { overflow: hidden; color: var(--text-3); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.diagnostics-list code { overflow: auto; max-height: 88px; padding: 7px; color: var(--text-2); background: #f6f8f7; border-radius: 5px; font-family: ui-monospace, Consolas, monospace; font-size: 9px; line-height: 1.45; white-space: pre-wrap; }.diagnostics-list article > button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; min-height: 30px; padding: 0 8px; color: var(--text-2); background: #f2f6f4; border-radius: 6px; font-size: 9px; }
-.recycle-path { align-items: stretch; gap: 20px; }.recycle-path > span { flex: 0 1 34%; }.recycle-path > div { display: flex; flex: 1 1 auto; align-items: stretch; min-width: 0; gap: 7px; }.recycle-location { flex: 1 1 auto; min-width: 0; min-height: 46px; padding: 8px 10px; color: var(--text-2); background: #f8faf9; border: 1px solid var(--border-2); border-radius: 6px; font-size: 10px; line-height: 1.45; text-align: left; overflow-wrap: anywhere; white-space: normal; }.recycle-location:hover:not(:disabled) { color: var(--primary-dark); border-color: #8bbdb4; background: #fff; }.recycle-path > div > button:last-child { display: grid; flex: 0 0 34px; place-items: center; width: 34px; min-height: 46px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 6px; }.recycle-path > div > button:last-child:hover:not(:disabled) { background: #d2e5e0; }.recycle-path button:disabled { color: var(--text-3); cursor: default; opacity: .55; }.recycle-location-error { margin: -3px 16px 10px; color: #a52e28; font-size: 9px; }@media (max-width: 1100px) { .settings-dialog { width: calc(100vw - 40px); height: calc(100vh - 40px); }.dialog-backdrop { padding: 20px; }.recycle-path { align-items: flex-start; flex-direction: column; }.recycle-path > span { flex-basis: auto; }.recycle-path > div { width: 100%; } }
-/* Appearance controls use the same semantic surfaces as the application. */
-.setting-row input[type="checkbox"] { background: var(--border-2); }
-.setting-row input[type="checkbox"]::after { background: var(--surface); }
-.recycle-path button:hover:not(:disabled), .recycle-path > div > button:last-child:hover:not(:disabled) { background: var(--hover); }
-.path-card span { color: var(--text); }
-.save-button { color: var(--on-primary); }
-.empty-button, .diagnostics-actions .empty-button, .recycle-list button.danger, .recycle-icon, .recycle-error { color: var(--danger); background: var(--danger-soft); }
-.recycle-empty, .diagnostics-list code, .recycle-location { background: var(--subtle); }
-.recycle-location:hover:not(:disabled) { border-color: var(--primary); background: var(--surface-raised); }
+.cancel-button { background: transparent; }.save-button { color: var(--on-primary); background: var(--primary); }.save-button:hover { background: var(--primary-dark); }
+.recycle-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }.recycle-heading h3 { margin: 0; }.empty-button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 10px; color: var(--danger); background: var(--danger-soft); border-radius: 7px; font-size: 10px; font-weight: 650; }.empty-button:disabled { color: var(--text-3); background: var(--subtle); cursor: default; opacity: .65; }
+.recycle-list { overflow: hidden; border: 1px solid var(--border); border-radius: 10px; }.recycle-list article { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: 66px; padding: 9px 12px; }.recycle-list article + article { border-top: 1px solid var(--border); }.recycle-icon { display: grid; place-items: center; width: 32px; height: 32px; color: var(--danger); background: var(--danger-soft); border-radius: 7px; }.recycle-list article > span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 4px; }.recycle-list b { font-size: 11px; }.recycle-list small { overflow: hidden; color: var(--text-3); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.recycle-list article > div { display: flex; gap: 6px; }.recycle-list button { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 0 8px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 6px; font-size: 9px; }.recycle-list button.danger { color: var(--danger); background: var(--danger-soft); }.recycle-list button:disabled { cursor: default; opacity: .55; }
+.recycle-empty { display: grid; place-items: center; min-height: 210px; gap: 7px; color: var(--text-3); background: var(--subtle); border: 1px dashed var(--border-2); border-radius: 10px; font-size: 10px; }.recycle-empty b { color: var(--text-2); font-size: 12px; }.recycle-error { padding: 10px 12px; color: var(--danger); background: var(--danger-soft); border-radius: 7px; font-size: 10px; }
+.diagnostics-actions { display: flex; gap: 7px; }.diagnostics-actions button { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 0 9px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 7px; font-size: 10px; font-weight: 650; }.diagnostics-actions .empty-button { color: var(--danger); background: var(--danger-soft); }.diagnostics-list { overflow: hidden; border: 1px solid var(--border); border-radius: 9px; }.diagnostics-list article { display: flex; align-items: start; justify-content: space-between; gap: 12px; padding: 12px; }.diagnostics-list article + article { border-top: 1px solid var(--border); }.diagnostics-list article > span { display: grid; min-width: 0; gap: 4px; }.diagnostics-list b { color: var(--text); font-size: 11px; }.diagnostics-list small { overflow: hidden; color: var(--text-3); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.diagnostics-list code { overflow: auto; max-height: 88px; padding: 7px; color: var(--text-2); background: var(--subtle); border-radius: 5px; font-family: ui-monospace, Consolas, monospace; font-size: 9px; line-height: 1.45; white-space: pre-wrap; }.diagnostics-list article > button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; min-height: 30px; padding: 0 8px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 6px; font-size: 9px; }
+.diagnostics-actions button:not(.empty-button):hover:not(:disabled), .diagnostics-list article > button:hover:not(:disabled) { background: var(--hover); }
+.diagnostics-actions button:disabled, .diagnostics-list article > button:disabled { color: var(--text-3); background: var(--subtle); cursor: default; opacity: .65; }
+.recycle-path { align-items: stretch; gap: 20px; }.recycle-path > span { flex: 0 1 34%; }.recycle-path > div { display: flex; flex: 1 1 auto; align-items: stretch; min-width: 0; gap: 7px; }.recycle-location { flex: 1 1 auto; min-width: 0; min-height: 46px; padding: 8px 10px; color: var(--text-2); background: var(--subtle); border: 1px solid var(--border-2); border-radius: 6px; font-size: 10px; line-height: 1.45; text-align: left; overflow-wrap: anywhere; white-space: normal; }.recycle-location:hover:not(:disabled) { color: var(--primary-dark); border-color: var(--primary); background: var(--surface-raised); }.recycle-path > div > button:last-child { display: grid; flex: 0 0 34px; place-items: center; width: 34px; min-height: 46px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 6px; }.recycle-path > div > button:last-child:hover:not(:disabled) { background: var(--hover); }.recycle-path button:disabled { color: var(--text-3); cursor: default; opacity: .55; }.recycle-location-error { margin: -3px 16px 10px; color: var(--danger); font-size: 9px; }@media (max-width: 1100px) { .settings-dialog { width: calc(100vw - 40px); height: calc(100vh - 40px); }.dialog-backdrop { padding: 20px; }.recycle-path { align-items: flex-start; flex-direction: column; }.recycle-path > span { flex-basis: auto; }.recycle-path > div { width: 100%; } }
 </style>

@@ -12,6 +12,43 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::AppState;
 
+#[tauri::command(async)]
+pub fn read_device(
+    state: State<'_, AppState>,
+) -> Result<chronicle_storage::DeviceIdentity, String> {
+    state
+        .repository
+        .lock()
+        .map_err(|_| state_error())?
+        .read_device()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
+pub fn rename_device(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<chronicle_storage::DeviceIdentity, String> {
+    state
+        .repository
+        .lock()
+        .map_err(|_| state_error())?
+        .rename_device(&name)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
+pub fn reset_device_identity(
+    state: State<'_, AppState>,
+) -> Result<chronicle_storage::DeviceIdentity, String> {
+    state
+        .repository
+        .lock()
+        .map_err(|_| state_error())?
+        .reset_device_identity()
+        .map_err(|error| error.to_string())
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryDto {

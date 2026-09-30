@@ -1,4 +1,5 @@
 import { t } from "./i18n";
+import { deviceRepository } from "./devices";
 import type {
   ArchiveRecord,
   ArchiveSource,
@@ -444,6 +445,7 @@ export class BrowserArchiveRepository {
     }
     for (const path of previousFiles.keys()) if (!currentFiles.has(path)) changes.deleted += 1;
     const manifest = files.map((file) => `${file.path}:${file.hash}`).join("\n");
+    const device = await deviceRepository.read();
     const snapshot: SnapshotRecord = {
       id: crypto.randomUUID(),
       archiveId: archive.id,
@@ -457,8 +459,8 @@ export class BrowserArchiveRepository {
       files,
       changes,
       safety,
-      deviceId: "browser",
-      deviceName: "浏览器设备",
+      deviceId: device.id,
+      deviceName: device.name,
     };
     const database = await openDatabase();
     const transaction = database.transaction(SNAPSHOTS, "readwrite");

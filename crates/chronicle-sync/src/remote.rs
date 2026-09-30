@@ -233,6 +233,37 @@ impl RemoteStore {
     pub async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         Ok(serde_json::from_slice(&self.get_bytes(path).await?)?)
     }
+    /// Lists the append-only operation directory without treating access errors as empty.
+    ///
+    /// # Errors
+    /// Returns an error if the path, remote listing, or returned entries are invalid.
+    pub async fn list_json_files(&self, prefix: &str) -> Result<Vec<String>> {
+        validate_relative_path(prefix)?;
+        self.pace().await;
+        match self {
+            Self::LegacyWebDav(client) => client.list_json_files(prefix).await,
+            Self::OpenDal(op, ..) => {
+                let mut result = Vec::new();
+                for entry in op.list(prefix).await.map_err(remote_error)? {
+                    let path = entry.path();
+                    validate_relative_path(path)?;
+                    let suffix = path
+                        .strip_prefix(prefix)
+                        .ok_or_else(|| invalid("列举返回了越界路径"))?;
+                    if !suffix.contains('/')
+                        && std::path::Path::new(suffix)
+                            .extension()
+                            .is_some_and(|ext| ext == "json")
+                    {
+                        result.push(path.into());
+                    }
+                }
+                result.sort();
+                result.dedup();
+                Ok(result)
+            }
+        }
+    }
     /// # Errors
     /// Returns an error for invalid configuration, paths, serialization or failed I/O.
     pub async fn put_atomic(&self, path: &str, bytes: Vec<u8>) -> Result<()> {
@@ -353,6 +384,53 @@ impl RemoteStore {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn lists_only_direct_json_operation_files() {
+        let op = opendal::Operator::new(opendal::services::Memory::default()).unwrap();
+        let store = super::RemoteStore::OpenDal(
+            op,
+            std::sync::Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now())),
+            std::time::Duration::ZERO,
+        );
+        store
+            .put_atomic("sync-v2/operations/a.json", b"{}".to_vec())
+            .await
+            .unwrap();
+        store
+            .put_atomic("sync-v2/operations/a.tmp", b"{}".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            store.list_json_files("sync-v2/operations/").await.unwrap(),
+            vec!["sync-v2/operations/a.json"]
+        );
+        assert!(store.list_json_files("../outside/").await.is_err());
+    }
+    #[tokio::test]
+    async fn append_only_events_are_idempotent_and_reject_rewrites() {
+        use crate::snapshot_protocol::{Device, Event, EventKind, SnapshotRemote};
+        let op = opendal::Operator::new(opendal::services::Memory::default()).unwrap();
+        let store = super::RemoteStore::OpenDal(
+            op,
+            std::sync::Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now())),
+            std::time::Duration::ZERO,
+        );
+        let remote = SnapshotRemote::Store(store);
+        let mut event = Event {
+            operation_id: "device-test-0".into(),
+            device: Device {
+                id: "test".into(),
+                name: "PC".into(),
+                revision: 0,
+            },
+            kind: EventKind::DeviceNamed,
+        };
+        remote.append_event(&event).await.unwrap();
+        remote.append_event(&event).await.unwrap();
+        assert_eq!(remote.load_events().await.unwrap(), vec![event.clone()]);
+        event.device.name = "Other PC".into();
+        assert!(remote.append_event(&event).await.is_err());
+    }
     use super::*;
     #[test]
     fn rejects_paths_and_uncompiled_services() {

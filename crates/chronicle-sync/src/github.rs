@@ -297,6 +297,52 @@ impl GitHubClient {
         .map_err(GitHubError::Json)
     }
 
+    /// Lists direct operation files using a complete Git tree, rejecting truncated responses.
+    ///
+    /// # Errors
+    /// Returns an error if the tree is truncated, a path is invalid, or the request fails.
+    pub async fn list_json_files(&self, prefix: &str) -> Result<Vec<String>> {
+        let scoped = format!("{}/", self.scoped_path(prefix.trim_end_matches('/'))?);
+        let (_, tree) = self.head().await?;
+        let value: Value = self
+            .request(
+                reqwest::Method::GET,
+                format!("git/trees/{tree}?recursive=1"),
+                None,
+            )
+            .await?
+            .json()
+            .await?;
+        if value.get("truncated").and_then(Value::as_bool) != Some(false) {
+            return Err(GitHubError::InvalidPath);
+        }
+        let tree = value
+            .get("tree")
+            .and_then(Value::as_array)
+            .ok_or(GitHubError::InvalidPath)?;
+        let mut result = Vec::new();
+        for entry in tree {
+            if entry.get("type").and_then(Value::as_str) != Some("blob") {
+                continue;
+            }
+            let path = entry
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or(GitHubError::InvalidPath)?;
+            if let Some(suffix) = path.strip_prefix(&scoped)
+                && !suffix.contains('/')
+                && std::path::Path::new(suffix)
+                    .extension()
+                    .is_some_and(|ext| ext == "json")
+            {
+                crate::validate_relative_path(suffix).map_err(|_| GitHubError::InvalidPath)?;
+                result.push(format!("{prefix}{suffix}"));
+            }
+        }
+        result.sort();
+        Ok(result)
+    }
+
     /// Downloads one file from the configured Chronicle directory with retry throttling.
     ///
     /// # Errors

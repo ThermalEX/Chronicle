@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { t } from "../services/i18n";
-import { Check, Folder, Moon, Plus, Sun } from "@lucide/vue";
-import type { Appearance, ColorTheme } from "../services/appearance";
+import { Check, Folder, Monitor, Moon, Plus, Sun } from "@lucide/vue";
+import { resolvedColorMode, type Appearance, type ColorTheme } from "../services/appearance";
 const props = defineProps<{ appearance: Appearance; saving?: boolean }>();
 const emit = defineEmits<{ change: [appearance: Appearance] }>();
+const previewMode = computed(() => props.appearance.colorMode === "system" ? resolvedColorMode.value : props.appearance.colorMode);
 const themes = computed<{ value: ColorTheme; label: string; color: string }[]>(() => [
   { value: "teal", label: t("青绿"), color: "#397f78" },
   { value: "indigo", label: t("靛蓝"), color: "#6270a8" },
@@ -20,8 +21,9 @@ const themes = computed<{ value: ColorTheme; label: string; color: string }[]>((
     <div class="mode-options" role="group" :aria-label="t('外观模式')">
       <button :disabled="saving" :aria-pressed="appearance.colorMode === 'light'" @click="emit('change', { ...props.appearance, colorMode: 'light' })"><Sun :size="16" />{{ t('浅色') }}</button>
       <button :disabled="saving" :aria-pressed="appearance.colorMode === 'dark'" @click="emit('change', { ...props.appearance, colorMode: 'dark' })"><Moon :size="16" />{{ t('深色') }}</button>
+      <button :disabled="saving" :aria-pressed="appearance.colorMode === 'system'" @click="emit('change', { ...props.appearance, colorMode: 'system' })"><Monitor :size="16" />{{ t('跟随系统') }}</button>
     </div>
-    <div class="theme-preview" role="img" :aria-label="t('{theme}主题，{mode}界面预览', { theme: themes.find(theme => theme.value === appearance.colorTheme)?.label || '', mode: appearance.colorMode === 'dark' ? t('深色') : t('浅色') })">
+    <div class="theme-preview" role="img" :aria-label="t('{theme}主题，{mode}界面预览', { theme: themes.find(theme => theme.value === appearance.colorTheme)?.label || '', mode: previewMode === 'dark' ? t('深色') : t('浅色') })">
       <div class="preview-titlebar"><span class="preview-dots"><i /><i /><i /></span><b>Chronicle</b><span>{{ t('界面预览') }}</span></div>
       <div class="preview-workspace">
         <div class="preview-sidebar"><span class="preview-add"><Plus :size="14" />{{ t('添加存档') }}</span><span><Folder :size="15" />{{ t('全部存档') }}</span><span class="preview-selected"><Folder :size="15" />{{ t('工作配置') }}</span></div>

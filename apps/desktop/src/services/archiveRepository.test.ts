@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ArchiveRecord } from "../domain";
 import { BrowserArchiveRepository } from "./archiveRepository";
 
@@ -51,6 +51,14 @@ function archiveFor(handle: MemoryFileHandle): ArchiveRecord {
     totalBytes: 0,
   };
 }
+
+beforeEach(() => {
+  const values = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+  });
+});
 
 afterEach(async () => {
   vi.unstubAllGlobals();

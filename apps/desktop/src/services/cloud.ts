@@ -51,6 +51,10 @@ export const cloudRepository = {
     if (!isTauri()) desktopOnly();
     return invoke("cloud_sync_entry", { sourceId, entryId });
   },
+  uploadNewSnapshots(sourceId: string, entryId: string): Promise<CloudSyncResult> {
+    if (!isTauri()) desktopOnly();
+    return invoke("cloud_upload_new_snapshots", { sourceId, entryId });
+  },
   upload(sourceId: string, entryId: string): Promise<void> {
     if (!isTauri()) desktopOnly();
     return invoke("cloud_overwrite_upload", { sourceId, entryId });

@@ -2,6 +2,7 @@
 
 mod github;
 mod remote;
+pub mod snapshot_protocol;
 mod webdav;
 pub use remote::{
     OPEN_DAL_SCHEMES, OpenDalSource, PUBLIC_CONFIG_KEYS, RemoteStore, validate_relative_path,
