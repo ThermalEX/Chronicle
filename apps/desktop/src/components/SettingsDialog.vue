@@ -18,6 +18,7 @@ import appIcon from "../assets/icon.png";
 import DeviceSettings from "./DeviceSettings.vue";
 import SnapshotRecovery from "./SnapshotRecovery.vue";
 import { appMetadata } from "../services/appMetadata";
+import { applyWallpaper, currentWallpaper, previewLocalWallpaper, saveLocalWallpaper, type WallpaperSaveRequest, type WallpaperState } from "../services/wallpaper";
 
 const props = withDefaults(defineProps<{ updateChecking?: boolean; initialSection?: "software" | "device" }>(), { updateChecking: false, initialSection: "software" });
 const emit = defineEmits<{ close: []; saved: []; changed: []; "restart-tutorial": []; "check-update": [channel: UpdateChannel]; "backup-health": [] }>();
@@ -27,6 +28,15 @@ const draft = reactive<AppSettings>({ ...appSettings });
 const saving = ref(false);
 const saveError = ref("");
 const savedDraft = ref<AppSettings>({ ...appSettings });
+const savedWallpaper = ref<WallpaperState>({ ...currentWallpaper.value });
+const wallpaperDraft = reactive<WallpaperSaveRequest>({
+  mode: savedWallpaper.value.mode,
+  transparency: savedWallpaper.value.transparency,
+  blurPx: savedWallpaper.value.blurPx,
+  removeImage: false,
+});
+const wallpaperPreviewUrl = ref(savedWallpaper.value.imageDataUrl ?? "");
+const wallpaperError = ref("");
 const localDevice = ref<DeviceIdentity>();
 const deviceName = ref("");
 const closeConfirmOpen = ref(false);
@@ -146,6 +156,10 @@ function emptyRecycleBin(): void {
 }
 
 const hasChanges = computed(() => JSON.stringify(draft) !== JSON.stringify(savedDraft.value)
+  || wallpaperDraft.mode !== savedWallpaper.value.mode
+  || wallpaperDraft.transparency !== savedWallpaper.value.transparency
+  || wallpaperDraft.blurPx !== savedWallpaper.value.blurPx
+  || !!wallpaperDraft.sourcePath || wallpaperDraft.removeImage
   || (localDevice.value !== undefined && deviceName.value.trim() !== localDevice.value.name)
   || automationArchives.value.some((archive) => {
     const saved = savedAutomation.value.get(archive.id);
@@ -178,7 +192,40 @@ function requestClose(action: "close" | "restart-tutorial" = "close"): void {
 }
 
 function discardClose(): void {
-  if (!saving.value) finishClose();
+  if (!saving.value) { applyWallpaper(savedWallpaper.value); finishClose(); }
+}
+
+function previewWallpaperDraft(): void {
+  applyWallpaper({
+    ...savedWallpaper.value,
+    mode: wallpaperDraft.mode,
+    transparency: wallpaperDraft.transparency,
+    blurPx: wallpaperDraft.blurPx,
+    imageDataUrl: wallpaperDraft.removeImage ? null : wallpaperPreviewUrl.value,
+  });
+}
+
+async function chooseWallpaper(): Promise<void> {
+  if (!isTauri()) { wallpaperError.value = t("请在桌面版选择壁纸图片"); return; }
+  const selected = await open({ multiple: false, filters: [{ name: t("图片"), extensions: ["png", "jpg", "jpeg", "webp"] }] });
+  if (typeof selected !== "string") return;
+  try {
+    const url = await previewLocalWallpaper(selected);
+    wallpaperDraft.sourcePath = selected;
+    wallpaperDraft.removeImage = false;
+    wallpaperDraft.mode = "image";
+    wallpaperPreviewUrl.value = url;
+    wallpaperError.value = "";
+    previewWallpaperDraft();
+  } catch (error) { wallpaperError.value = error instanceof Error ? error.message : String(error); }
+}
+
+function removeWallpaper(): void {
+  wallpaperDraft.removeImage = true;
+  wallpaperDraft.sourcePath = undefined;
+  wallpaperDraft.mode = "color";
+  wallpaperPreviewUrl.value = "";
+  previewWallpaperDraft();
 }
 
 function continueEditing(): void {
@@ -196,6 +243,12 @@ function onEscape(event: KeyboardEvent): void {
 async function save(): Promise<void> {
   if (saving.value) return;
   saveError.value = "";
+  wallpaperError.value = "";
+  if (wallpaperDraft.mode === "image" && !wallpaperPreviewUrl.value) {
+    wallpaperError.value = t("请先选择有效的壁纸图片");
+    saveError.value = wallpaperError.value;
+    return;
+  }
   if (localDevice.value && (!deviceName.value.trim() || [...deviceName.value.trim()].length > 64)) {
     saveError.value = t('设备名称须为 1–64 个字符');
     return;
@@ -210,6 +263,15 @@ async function save(): Promise<void> {
     await saveAppSettings({ ...draft });
     committed = true;
     savedDraft.value = { ...appSettings };
+    if (wallpaperDraft.mode !== savedWallpaper.value.mode
+      || wallpaperDraft.transparency !== savedWallpaper.value.transparency
+      || wallpaperDraft.blurPx !== savedWallpaper.value.blurPx
+      || wallpaperDraft.sourcePath || wallpaperDraft.removeImage) {
+      await saveLocalWallpaper({ ...wallpaperDraft });
+      savedWallpaper.value = { ...currentWallpaper.value };
+      wallpaperDraft.sourcePath = undefined;
+      wallpaperDraft.removeImage = false;
+    }
     if (localDevice.value && deviceName.value.trim() !== localDevice.value.name) {
       localDevice.value = await deviceRepository.rename(deviceName.value);
       deviceName.value = localDevice.value.name;
@@ -262,6 +324,8 @@ function updateLanguage(value: string | null): void {
 function reset(): void {
   Object.assign(draft, defaultAppSettings);
   setLocale(draft.language);
+  Object.assign(wallpaperDraft, { mode: "color", transparency: 28, blurPx: 12, sourcePath: undefined, removeImage: false });
+  previewWallpaperDraft();
 }
 
 async function chooseRecycleBinPath(): Promise<void> {
@@ -309,6 +373,7 @@ onBeforeUnmount(() => setLocale(appSettings.language));
 
 watch(activeSection, (section) => { if (section === "notifications") void loadDiagnostics(); });
 watch(closeConfirmOpen, (open) => { if (!open) void nextTick(() => closeButton.value?.focus()); });
+watch(() => [wallpaperDraft.mode, wallpaperDraft.transparency, wallpaperDraft.blurPx], previewWallpaperDraft);
 </script>
 
 <template>
@@ -332,6 +397,16 @@ watch(closeConfirmOpen, (open) => { if (!open) void nextTick(() => closeButton.v
             <div class="section-heading"><h3 id="software-title">{{ t('软件') }}</h3><p>{{ t('控制 Chronicle 的启动、关闭和通知行为。') }}</p></div>
             <div class="setting-group">
               <label class="setting-row select-row"><span><b>{{ t('界面语言') }}</b><small>{{ t('选择后立即预览，点击保存设置后生效。') }}</small></span><ThemedSelect :model-value="draft.language" :options="languageOptions" :disabled="saving" :label="t('界面语言')" @update:model-value="updateLanguage" /></label>
+              <div class="setting-row wallpaper-setting"><span><b>{{ t('背景类型') }}</b><small>{{ t('壁纸仅保存在本机，不会同步到云端。') }}</small></span><div class="wallpaper-options"><label><input v-model="wallpaperDraft.mode" type="radio" value="color" />{{ t('主题纯色') }}</label><label><input v-model="wallpaperDraft.mode" type="radio" value="image" />{{ t('自定义图片') }}</label></div></div>
+              <div v-if="wallpaperDraft.mode === 'image' || wallpaperPreviewUrl" class="wallpaper-controls">
+                <div class="wallpaper-preview" :style="wallpaperPreviewUrl ? { backgroundImage: `url('${wallpaperPreviewUrl}')` } : undefined"><span>{{ t('壁纸预览') }}</span></div>
+                <div class="wallpaper-buttons"><button type="button" @click="chooseWallpaper">{{ t('选择图片') }}</button><button v-if="wallpaperPreviewUrl" type="button" @click="removeWallpaper">{{ t('移除图片') }}</button></div>
+                <p v-if="wallpaperError" class="recycle-error" role="alert">{{ wallpaperError }}</p>
+              </div>
+              <div v-if="wallpaperDraft.mode === 'image'" class="wallpaper-sliders">
+                <label>{{ t('壁纸透明度') }} <output>{{ wallpaperDraft.transparency }}%</output><input v-model.number="wallpaperDraft.transparency" type="range" min="0" max="45" :aria-label="t('壁纸透明度')" /></label>
+                <label>{{ t('磨砂强度') }} <output>{{ wallpaperDraft.blurPx }} px</output><input v-model.number="wallpaperDraft.blurPx" type="range" min="0" max="24" :aria-label="t('磨砂强度')" /></label>
+              </div>
               <label class="setting-row select-row"><span><b>{{ t('配色主题') }}</b><small>{{ t('为 Chronicle 选择一组强调色。') }}</small></span><ThemedSelect :model-value="draft.colorTheme" :options="colorThemeOptions" :label="t('配色主题')" @update:model-value="updateColorTheme" /></label>
               <label class="setting-row select-row"><span><b>{{ t('显示模式') }}</b><small>{{ t('跟随系统会自动切换明暗；右下角按钮可切换为固定模式。') }}</small></span><ThemedSelect :model-value="draft.colorMode" :options="colorModeOptions" :label="t('显示模式')" @update:model-value="updateColorMode" /></label>
               <label class="setting-row"><span><b>{{ t('随系统启动') }}</b><small>{{ t('登录 Windows 后自动启动 Chronicle') }}</small></span><input v-model="draft.launchAtStartup" type="checkbox" role="switch" /></label>
@@ -471,4 +546,7 @@ footer button { min-height: 36px; padding: 0 13px; border-radius: 7px; font-size
 .diagnostics-actions button:not(.empty-button):hover:not(:disabled), .diagnostics-list article > button:hover:not(:disabled) { background: var(--hover); }
 .diagnostics-actions button:disabled, .diagnostics-list article > button:disabled { color: var(--text-3); background: var(--subtle); cursor: default; opacity: .65; }
 .recycle-path { align-items: stretch; gap: 20px; }.recycle-path > span { flex: 0 1 34%; }.recycle-path > div { display: flex; flex: 1 1 auto; align-items: stretch; min-width: 0; gap: 7px; }.recycle-location { flex: 1 1 auto; min-width: 0; min-height: 46px; padding: 8px 10px; color: var(--text-2); background: var(--subtle); border: 1px solid var(--border-2); border-radius: 6px; font-size: 10px; line-height: 1.45; text-align: left; overflow-wrap: anywhere; white-space: normal; }.recycle-location:hover:not(:disabled) { color: var(--primary-dark); border-color: var(--primary); background: var(--surface-raised); }.recycle-path > div > button:last-child { display: grid; flex: 0 0 34px; place-items: center; width: 34px; min-height: 46px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 6px; }.recycle-path > div > button:last-child:hover:not(:disabled) { background: var(--hover); }.recycle-path button:disabled { color: var(--text-3); cursor: default; opacity: .55; }.recycle-location-error { margin: -3px 16px 10px; color: var(--danger); font-size: 9px; }@media (max-width: 1100px) { .settings-dialog { width: calc(100vw - 40px); height: calc(100vh - 40px); }.dialog-backdrop { padding: 20px; }.recycle-path { align-items: flex-start; flex-direction: column; }.recycle-path > span { flex-basis: auto; }.recycle-path > div { width: 100%; } }
+.wallpaper-setting { gap: 12px; }.wallpaper-options { display: flex; flex-wrap: wrap; gap: 12px; }.wallpaper-options label { display: inline-flex; align-items: center; gap: 5px; color: var(--text-2); font-size: 11px; white-space: nowrap; }.wallpaper-options input { accent-color: var(--primary); }
+.wallpaper-controls { display: grid; gap: 9px; padding: 12px 16px; border-top: 1px solid var(--border); }.wallpaper-preview { display: grid; place-items: center; min-height: 76px; color: var(--text-2); background: var(--subtle) center / cover; border: 1px solid var(--border); border-radius: 8px; }.wallpaper-preview span { padding: 5px 9px; background: var(--surface); border-radius: 5px; font-size: 10px; }.wallpaper-buttons { display: flex; gap: 8px; }.wallpaper-buttons button { min-height: 30px; padding: 0 10px; color: var(--primary-dark); background: var(--primary-soft); border: 1px solid var(--border-2); border-radius: 6px; font-size: 10px; }
+.wallpaper-sliders { display: grid; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--border); }.wallpaper-sliders label { display: grid; grid-template-columns: 1fr auto; gap: 5px; color: var(--text-2); font-size: 11px; }.wallpaper-sliders input { grid-column: 1 / -1; width: 100%; accent-color: var(--primary); }.wallpaper-sliders output { font-variant-numeric: tabular-nums; }
 </style>

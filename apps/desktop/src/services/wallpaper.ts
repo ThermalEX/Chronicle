@@ -21,6 +21,7 @@ export const currentWallpaper = ref<WallpaperState>({ mode: "color", transparenc
 
 export function applyWallpaper(state: WallpaperState): void {
   currentWallpaper.value = { ...state };
+  if (typeof document === "undefined") return;
   const root = document.documentElement;
   root.dataset.wallpaperMode = state.mode === "image" && state.imageDataUrl ? "image" : "color";
   root.style.setProperty("--wallpaper-opacity", `${100 - state.transparency}%`);

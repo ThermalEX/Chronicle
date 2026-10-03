@@ -7,6 +7,7 @@ import { appSettings, resetAppSettings } from "../services/settings";
 import { deviceRepository } from "../services/devices";
 import { locale, setLocale } from "../services/i18n";
 import { archiveRepository } from "../services/repository";
+import * as wallpaper from "../services/wallpaper";
 
 async function dialog(configure?: (state: any) => void) {
   let state: any;
@@ -42,6 +43,52 @@ afterEach(async () => {
 });
 
 describe("settings drafts", () => {
+  it("shows background choice before accent color with independent sliders", async () => {
+    const { html } = await dialog((state) => { state.wallpaperDraft.mode = "image"; });
+    expect(html.indexOf("背景类型")).toBeLessThan(html.indexOf("配色主题"));
+    expect(html).toContain("壁纸透明度");
+    expect(html).toContain("磨砂强度");
+  });
+
+  it("previews wallpaper changes and restores the saved view on discard", async () => {
+    const apply = vi.spyOn(wallpaper, "applyWallpaper");
+    const { state } = await dialog();
+    state.wallpaperDraft.transparency = 35;
+    await state.previewWallpaperDraft();
+    expect(apply).toHaveBeenCalledWith(expect.objectContaining({ transparency: 35 }));
+    state.discardClose();
+    expect(apply).toHaveBeenLastCalledWith(expect.objectContaining({ transparency: 28 }));
+  });
+
+  it("blocks image mode without an image before saving other settings", async () => {
+    const { state, closed } = await dialog();
+    state.wallpaperDraft.mode = "image";
+    await state.save();
+    expect(closed()).toBe(0);
+    expect(state.saveError.value).not.toBe("");
+  });
+
+  it("keeps the dialog open after wallpaper persistence fails and retries", async () => {
+    const persist = vi.spyOn(wallpaper, "saveLocalWallpaper").mockRejectedValueOnce(new Error("Disk full")).mockResolvedValueOnce();
+    const { state, closed } = await dialog();
+    state.draft.autoBackupDelaySeconds = 17;
+    state.wallpaperDraft.transparency = 35;
+    await state.save();
+    expect(closed()).toBe(0);
+    expect(appSettings.autoBackupDelaySeconds).toBe(17);
+    expect(state.saveError.value).toContain("部分设置已保存");
+    await state.save();
+    expect(persist).toHaveBeenCalledTimes(2);
+    expect(closed()).toBe(1);
+  });
+
+  it("renders wallpaper controls in English", async () => {
+    setLocale("en");
+    const { html } = await dialog((state) => { state.wallpaperDraft.mode = "image"; });
+    expect(html).toContain("Background");
+    expect(html).toContain("Panel transparency");
+    expect(html).toContain("Blur strength");
+  });
   it("keeps sync details changes pending until Save settings", async () => {
     const { state } = await dialog();
     state.draft.showSyncDetails = true;
