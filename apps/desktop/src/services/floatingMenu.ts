@@ -6,12 +6,14 @@ export type FloatingMenuPosition = {
   top: number;
   left: number;
   minWidth: number;
+  maxHeight?: number;
 };
 
 export type FloatingMenuStyle = {
   top: string;
   left: string;
   minWidth: string;
+  maxHeight?: string;
 };
 
 const MENU_GAP = 5;
@@ -23,9 +25,11 @@ export function positionFloatingMenu(
   menu: Pick<FloatingMenuRect, "width" | "height">,
   viewport: FloatingMenuViewport,
 ): FloatingMenuPosition {
+  const availableHeight = Math.max(0, viewport.height - VIEWPORT_MARGIN * 2);
+  const height = Math.min(menu.height, availableHeight);
   const below = trigger.bottom + MENU_GAP;
-  const above = trigger.top - menu.height - MENU_GAP;
-  const top = below + menu.height <= viewport.height - VIEWPORT_MARGIN
+  const above = trigger.top - height - MENU_GAP;
+  const top = below + height <= viewport.height - VIEWPORT_MARGIN
     ? below
     : Math.max(VIEWPORT_MARGIN, above);
   const left = Math.max(
@@ -33,7 +37,10 @@ export function positionFloatingMenu(
     Math.min(trigger.left, viewport.width - menu.width - VIEWPORT_MARGIN),
   );
 
-  return { top, left, minWidth: trigger.width };
+  return {
+    top, left, minWidth: trigger.width,
+    ...(menu.height > availableHeight ? { maxHeight: availableHeight } : {}),
+  };
 }
 
 /** Converts menu geometry into CSS values accepted by the browser. */
@@ -42,5 +49,6 @@ export function floatingMenuStyle(position: FloatingMenuPosition): FloatingMenuS
     top: `${position.top}px`,
     left: `${position.left}px`,
     minWidth: `${position.minWidth}px`,
+    ...(position.maxHeight === undefined ? {} : { maxHeight: `${position.maxHeight}px` }),
   };
 }

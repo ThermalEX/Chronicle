@@ -39,10 +39,7 @@ async function running() {
   error.value = "";
   try {
     const result = await listBackupProcesses();
-    processes.value = result.processes.filter(
-      (p, i, all) =>
-        all.findIndex((item) => item.executablePath === p.executablePath) === i,
-    );
+    processes.value = result.processes;
     partial.value = result.partial;
     if (!result.complete) error.value = "backup_process_unknown";
   } catch (e) {

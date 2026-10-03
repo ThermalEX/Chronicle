@@ -41,8 +41,8 @@ export const setBackupTrigger = (
   entryId: string,
   config: BackupTriggerConfig,
 ) => invoke<void>("set_backup_trigger", { entryId, config });
-export const listBackupProcesses = () =>
-  invoke<{
+export const listBackupProcesses = async () => {
+  const result = await invoke<{
     processes: {
       pid: number;
       startTime: number;
@@ -52,6 +52,15 @@ export const listBackupProcesses = () =>
     complete: boolean;
     partial: boolean;
   }>("list_backup_processes");
+  const seen = new Set<string>();
+  result.processes.sort((a, b) => b.startTime - a.startTime || b.pid - a.pid);
+  result.processes = result.processes.filter((process) => {
+    if (seen.has(process.executablePath)) return false;
+    seen.add(process.executablePath);
+    return true;
+  });
+  return result;
+};
 export const getBackupRuntimeStates = () =>
   invoke<BackupRuntimeStatus[]>("get_backup_runtime_states");
 export const subscribeBackupRuntime = (

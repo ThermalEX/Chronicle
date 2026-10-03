@@ -92,7 +92,6 @@ pub fn list_backup_processes() -> Result<ProcessSample, String> {
     }
     let mut sample = sample();
     sample.processes.retain(|p| p.executable_path.is_some());
-    sample.processes.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(sample)
 }
 

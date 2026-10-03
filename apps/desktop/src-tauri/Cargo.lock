@@ -593,14 +593,14 @@ dependencies = [
 
 [[package]]
 name = "chronicle-core"
-version = "1.3.4-beta"
+version = "1.3.4"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "chronicle-desktop"
-version = "1.3.4-beta"
+version = "1.3.4"
 dependencies = [
  "chronicle-core",
  "chronicle-storage",
@@ -631,7 +631,7 @@ dependencies = [
 
 [[package]]
 name = "chronicle-storage"
-version = "1.3.4-beta"
+version = "1.3.4"
 dependencies = [
  "chronicle-core",
  "globset",
@@ -648,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "chronicle-sync"
-version = "1.3.4-beta"
+version = "1.3.4"
 dependencies = [
  "base64 0.22.1",
  "chronicle-core",
