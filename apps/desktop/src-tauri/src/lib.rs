@@ -3,6 +3,7 @@ mod backup_automation;
 mod backup_health;
 mod cloud;
 mod commands;
+mod dropped_paths;
 mod galgame_scan;
 mod game_exit;
 mod language;
@@ -191,6 +192,7 @@ pub fn run() {
             wallpaper::load_local_wallpaper,
             wallpaper::preview_local_wallpaper,
             wallpaper::save_local_wallpaper,
+            dropped_paths::describe_dropped_paths,
             commands::append_diagnostic,
             commands::list_diagnostics,
             commands::clear_diagnostics,
