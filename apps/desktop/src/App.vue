@@ -47,6 +47,7 @@ import { categoryBreadcrumb } from "./services/categoryBreadcrumb";
 import { formatCurrentTime, millisecondsUntilNextMinute } from "./services/currentTime";
 import { appMetadata } from "./services/appMetadata";
 import { checkForUpdate, type ReleaseUpdate } from "./services/updateService";
+import { loadLocalWallpaper } from "./services/wallpaper";
 
 type CategoryTreeNode = CategoryRecord & {
   nodeType: "category";
@@ -1175,6 +1176,7 @@ onMounted(async () => {
     knownDeviceSources.value = await readKnownDevices();
     await initializeSettings();
     applyAppearance(appSettings);
+    await loadLocalWallpaper();
     stopSystemAppearance = watchSystemAppearance(() => appSettings);
     startupUpdatePending = appSettings.checkForUpdates;
     if (isTauriRuntime) {

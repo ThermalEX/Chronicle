@@ -132,6 +132,23 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
   background: var(--app-background);
 }
 
+:root[data-wallpaper-mode="image"] .app-shell {
+  background: var(--wallpaper-image) center / cover fixed no-repeat;
+}
+:root[data-wallpaper-mode="image"] .titlebar {
+  background: color-mix(in srgb, var(--titlebar) var(--wallpaper-opacity), transparent);
+  backdrop-filter: blur(var(--wallpaper-blur));
+}
+:root[data-wallpaper-mode="image"] .sidebar {
+  background: color-mix(in srgb, var(--sidebar) var(--wallpaper-opacity), transparent);
+  backdrop-filter: blur(var(--wallpaper-blur));
+}
+:root[data-wallpaper-mode="image"] .archive-panel,
+:root[data-wallpaper-mode="image"] .detail-panel {
+  background: color-mix(in srgb, var(--surface) var(--wallpaper-opacity), transparent);
+  backdrop-filter: blur(var(--wallpaper-blur));
+}
+
 .titlebar {
   grid-column: 1 / -1;
   display: grid;
