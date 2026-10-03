@@ -14,6 +14,7 @@ mod storage_root;
 #[cfg(test)]
 mod storage_root_tests;
 mod update;
+mod wallpaper;
 
 use std::{
     io,
@@ -187,6 +188,9 @@ pub fn run() {
             update::download_and_install_update,
             commands::load_settings,
             commands::save_settings,
+            wallpaper::load_local_wallpaper,
+            wallpaper::preview_local_wallpaper,
+            wallpaper::save_local_wallpaper,
             commands::append_diagnostic,
             commands::list_diagnostics,
             commands::clear_diagnostics,

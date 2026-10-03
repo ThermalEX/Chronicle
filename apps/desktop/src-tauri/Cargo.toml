@@ -19,6 +19,8 @@ chronicle-storage = { path = "../../../crates/chronicle-storage" }
 chronicle-sync = { path = "../../../crates/chronicle-sync" }
 keyring = { version = "3.6.3", features = ["windows-native"] }
 sha2 = "0.10.9"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 uuid = { version = "1.18.1", features = ["v4"] }
 walkdir = "2.5.0"
 glob = "0.3"
