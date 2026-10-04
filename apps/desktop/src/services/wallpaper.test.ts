@@ -23,7 +23,8 @@ describe("local wallpaper", () => {
     vi.stubGlobal("document", { documentElement: root });
     applyWallpaper({ mode: "image", transparency: 28, blurPx: 12, imageDataUrl: "data:image/png;base64,AA==" });
     expect(root.dataset.wallpaperMode).toBe("image");
-    expect(root.style.setProperty).toHaveBeenCalledWith("--wallpaper-image", expect.stringContaining("data:image/png"));
+    expect(currentWallpaper.value.imageDataUrl).toContain("data:image/png");
+    expect(root.style.setProperty).toHaveBeenCalledWith("--wallpaper-opacity", "72%");
     applyWallpaper({ ...currentWallpaper.value, mode: "color" });
     expect(root.dataset.wallpaperMode).toBe("color");
     expect(currentWallpaper.value.imageDataUrl).toContain("data:image/png");

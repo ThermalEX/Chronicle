@@ -119,6 +119,7 @@ const categoryDialogOpen = ref(false);
 const creatingCategory = ref(false);
 const createCategoryError = ref<string>();
 const settingsOpen = ref(false);
+const wallpaperPreviewActive = ref(false);
 const syncPreview = ref<{ archives: ArchiveRecord[]; sourceIds: string[]; snapshotId?: string; allArchives?: boolean }>();
 const changingColorMode = ref(false);
 let stopSystemAppearance: (() => void) | undefined;
@@ -1315,7 +1316,8 @@ watch([settingsOpen, createDialogOpen, categoryDialogOpen, cloudSettingsOpen, tu
 </script>
 
 <template>
-  <div class="app-shell">
+  <div class="app-shell" :inert="wallpaperPreviewActive">
+    <img v-if="currentWallpaper.mode === 'image' && currentWallpaper.imageDataUrl" class="app-wallpaper" :src="currentWallpaper.imageDataUrl" alt="" aria-hidden="true" :draggable="false" />
     <div v-if="externalDropActive" class="external-drop-overlay" aria-hidden="true"><FolderOpen :size="28" /><b>{{ t("松开以添加文件或文件夹") }}</b><span>{{ t("拖入后先核对来源，再创建存档。") }}</span></div>
     <header class="titlebar">
       <div class="brand"><time :datetime="currentTime">{{ currentTime }}</time></div>
@@ -1407,7 +1409,7 @@ watch([settingsOpen, createDialogOpen, categoryDialogOpen, cloudSettingsOpen, tu
     <AppToast v-if="notice" :message="notice.message" :type="notice.type" @close="notice = undefined" />
     <div v-if="draggedArchiveId || draggedCategoryId" class="tree-drag-ghost" :style="{ left: `${treeDragPosition.x + 14}px`, top: `${treeDragPosition.y + 14}px` }" aria-hidden="true"><Folder v-if="draggedCategoryId" :size="15" /><File v-else :size="15" />{{ treeDragLabel }}</div>
     <SnapshotSyncDialog v-if="syncPreview" :archives="syncPreview.archives" :source-ids="syncPreview.sourceIds" :snapshot-id="syncPreview.snapshotId" :all-archives="syncPreview.allArchives" @close="syncPreview = undefined" @changed="refreshAfterSync" />
-    <SettingsDialog v-if="settingsOpen" :initial-section="settingsInitialSection" @backup-health="backupHealthOpen = true" @restart-tutorial="restartTutorial" :update-checking="updateChecking" @close="settingsOpen = false; settingsInitialSection = 'software'" @saved="handleSettingsChanged" @changed="handleSettingsChanged(false)" @check-update="checkForApplicationUpdate(true, $event)" />
+    <SettingsDialog v-if="settingsOpen" :initial-section="settingsInitialSection" @wallpaper-preview="wallpaperPreviewActive = $event" @backup-health="backupHealthOpen = true" @restart-tutorial="restartTutorial" :update-checking="updateChecking" @close="settingsOpen = false; settingsInitialSection = 'software'" @saved="handleSettingsChanged" @changed="handleSettingsChanged(false)" @check-update="checkForApplicationUpdate(true, $event)" />
     <BackupHealthDialog v-if="backupHealthOpen" @close="backupHealthOpen = false" @open-archive="handleHealthAction($event, 'open')" @edit-sources="handleHealthAction($event, 'edit')" @backup-now="handleHealthAction($event, 'backup')" />
     <SteamScanDialog v-if="steamScanOpen" @close="steamScanOpen = false" @saved="handleSettingsChanged" />
     <button class="floating-theme-toggle" :class="{ 'is-dark': resolvedColorMode === 'dark' }" :disabled="changingColorMode" :aria-label="resolvedColorMode === 'dark' ? t('切换到日间模式') : t('切换到夜间模式')" :title="resolvedColorMode === 'dark' ? t('切换到日间模式') : t('切换到夜间模式')" :aria-pressed="resolvedColorMode === 'dark'" @click="toggleColorMode"><Sun v-if="resolvedColorMode === 'dark'" :size="17" /><Moon v-else :size="17" /></button>

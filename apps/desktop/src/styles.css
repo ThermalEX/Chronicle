@@ -125,6 +125,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .snapshot-field { min-height: 38px; padding: 8px 10px; color: var(--text); background: var(--field); border: 1px solid var(--border-2); border-radius: 7px; font-size: 12px; }
 
 .app-shell {
+  position: relative;
+  isolation: isolate;
   display: grid;
   grid-template: 52px minmax(0, 1fr) / 224px minmax(0, 1fr);
   width: 100vw;
@@ -132,9 +134,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
   background: var(--app-background);
 }
 
-:root[data-wallpaper-mode="image"] .app-shell {
-  background: var(--wallpaper-image) center / cover fixed no-repeat;
-}
+.app-wallpaper { position: absolute; z-index: -1; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
 :root[data-wallpaper-mode="image"] .titlebar {
   background: color-mix(in srgb, var(--titlebar) var(--wallpaper-opacity), transparent);
   backdrop-filter: blur(var(--wallpaper-blur));

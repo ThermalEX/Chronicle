@@ -6,7 +6,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { appSettings, defaultAppSettings, saveAppSettings, type AppSettings, type CloseBehavior, type UpdateChannel } from "../services/settings";
 import { deviceRepository, type DeviceIdentity } from "../services/devices";
-import { type ColorMode, type ColorTheme } from "../services/appearance";
+import { applyAppearance, type ColorMode, type ColorTheme } from "../services/appearance";
 import { archiveRepository } from "../services/repository";
 import { createBackdropDismissal } from "../services/dialogDismissal";
 import { diagnosticsRepository, type DiagnosticEntry } from "../services/diagnostics";
@@ -21,7 +21,7 @@ import { appMetadata } from "../services/appMetadata";
 import { applyWallpaper, currentWallpaper, previewLocalWallpaper, saveLocalWallpaper, wallpaperWarningLabel, type WallpaperSaveRequest, type WallpaperState } from "../services/wallpaper";
 
 const props = withDefaults(defineProps<{ updateChecking?: boolean; initialSection?: "software" | "device" }>(), { updateChecking: false, initialSection: "software" });
-const emit = defineEmits<{ close: []; saved: []; changed: []; "restart-tutorial": []; "check-update": [channel: UpdateChannel]; "backup-health": [] }>();
+const emit = defineEmits<{ close: []; saved: []; changed: []; "restart-tutorial": []; "check-update": [channel: UpdateChannel]; "backup-health": []; "wallpaper-preview": [active: boolean] }>();
 const activeSection = ref<"software" | "device" | "notifications" | "backup" | "recycle" | "hotkeys" | "about">(props.initialSection);
 const closeButton = ref<HTMLButtonElement>();
 const draft = reactive<AppSettings>({ ...appSettings });
@@ -37,6 +37,9 @@ const wallpaperDraft = reactive<WallpaperSaveRequest>({
 });
 const wallpaperPreviewUrl = ref(savedWallpaper.value.imageDataUrl ?? "");
 const wallpaperError = ref("");
+const wallpaperPreviewOpen = ref(false);
+const wallpaperPreviewButton = ref<HTMLButtonElement>();
+const wallpaperReturnButton = ref<HTMLButtonElement>();
 const localDevice = ref<DeviceIdentity>();
 const deviceName = ref("");
 const closeConfirmOpen = ref(false);
@@ -205,6 +208,13 @@ function previewWallpaperDraft(): void {
   });
 }
 
+function showWallpaperPreview(active: boolean): void {
+  wallpaperPreviewOpen.value = active;
+  applyAppearance(active ? draft : appSettings);
+  emit("wallpaper-preview", active);
+  void nextTick(() => (active ? wallpaperReturnButton.value : wallpaperPreviewButton.value)?.focus());
+}
+
 async function chooseWallpaper(): Promise<void> {
   if (!isTauri()) { wallpaperError.value = t("请在桌面版选择壁纸图片"); return; }
   const selected = await open({ multiple: false, filters: [{ name: t("图片"), extensions: ["png", "jpg", "jpeg", "webp"] }] });
@@ -369,7 +379,7 @@ onMounted(() => {
   void loadAutomation();
   void archiveRepository.getRepositoryInfo().then((info) => { repositoryPath.value = info.path; });
 });
-onBeforeUnmount(() => setLocale(appSettings.language));
+onBeforeUnmount(() => { setLocale(appSettings.language); applyAppearance(appSettings); emit("wallpaper-preview", false); });
 
 watch(activeSection, (section) => { if (section === "notifications") void loadDiagnostics(); });
 watch(closeConfirmOpen, (open) => { if (!open) void nextTick(() => closeButton.value?.focus()); });
@@ -377,7 +387,7 @@ watch(() => [wallpaperDraft.mode, wallpaperDraft.transparency, wallpaperDraft.bl
 </script>
 
 <template>
-  <div class="dialog-backdrop" @keydown.esc.stop.prevent="onEscape" @pointerdown="backdrop.pointerDown" @pointerup="backdrop.pointerUp" @pointercancel="backdrop.pointerCancel">
+  <div v-show="!wallpaperPreviewOpen" class="dialog-backdrop" @keydown.esc.stop.prevent="onEscape" @pointerdown="backdrop.pointerDown" @pointerup="backdrop.pointerUp" @pointercancel="backdrop.pointerCancel">
     <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <header>
         <div><p>SETTING</p><h2 id="settings-title">{{ t('设置') }}</h2></div>
@@ -400,12 +410,12 @@ watch(() => [wallpaperDraft.mode, wallpaperDraft.transparency, wallpaperDraft.bl
               <div class="setting-row wallpaper-setting"><span><b>{{ t('背景类型') }}</b><small>{{ t('壁纸仅保存在本机，不会同步到云端。') }}</small></span><div class="wallpaper-options"><label><input v-model="wallpaperDraft.mode" type="radio" value="color" />{{ t('主题纯色') }}</label><label><input v-model="wallpaperDraft.mode" type="radio" value="image" />{{ t('自定义图片') }}</label></div></div>
               <p v-if="savedWallpaper.warning" class="recycle-error" role="alert">{{ wallpaperWarningLabel(savedWallpaper.warning) }}</p>
               <div v-if="wallpaperDraft.mode === 'image' || wallpaperPreviewUrl" class="wallpaper-controls">
-                <div class="wallpaper-preview" :style="wallpaperPreviewUrl ? { backgroundImage: `url('${wallpaperPreviewUrl}')` } : undefined"><span>{{ t('壁纸预览') }}</span></div>
-                <div class="wallpaper-buttons"><button type="button" @click="chooseWallpaper">{{ t('选择图片') }}</button><button v-if="wallpaperPreviewUrl" type="button" @click="removeWallpaper">{{ t('移除图片') }}</button></div>
+                <div class="wallpaper-buttons"><button type="button" @click="chooseWallpaper">{{ t('选择图片') }}</button><button ref="wallpaperPreviewButton" type="button" :disabled="!wallpaperPreviewUrl" @click="showWallpaperPreview(true)"><Monitor :size="14" />{{ t('预览软件界面') }}</button><button v-if="wallpaperPreviewUrl" type="button" @click="removeWallpaper">{{ t('移除图片') }}</button></div>
+                <small>{{ t('在实际软件界面中预览并调整背景效果。') }}</small>
                 <p v-if="wallpaperError" class="recycle-error" role="alert">{{ wallpaperError }}</p>
               </div>
               <div v-if="wallpaperDraft.mode === 'image'" class="wallpaper-sliders">
-                <label>{{ t('壁纸透明度') }} <output>{{ wallpaperDraft.transparency }}%</output><input v-model.number="wallpaperDraft.transparency" type="range" min="0" max="45" :aria-label="t('壁纸透明度')" /></label>
+                <label>{{ t('面板透明度') }} <output>{{ wallpaperDraft.transparency }}%</output><input v-model.number="wallpaperDraft.transparency" type="range" min="0" max="45" :aria-label="t('面板透明度')" /></label>
                 <label>{{ t('磨砂强度') }} <output>{{ wallpaperDraft.blurPx }} px</output><input v-model.number="wallpaperDraft.blurPx" type="range" min="0" max="24" :aria-label="t('磨砂强度')" /></label>
               </div>
               <label class="setting-row select-row"><span><b>{{ t('配色主题') }}</b><small>{{ t('为 Chronicle 选择一组强调色。') }}</small></span><ThemedSelect :model-value="draft.colorTheme" :options="colorThemeOptions" :label="t('配色主题')" @update:model-value="updateColorTheme" /></label>
@@ -486,6 +496,16 @@ watch(() => [wallpaperDraft.mode, wallpaperDraft.transparency, wallpaperDraft.bl
       <template #extra-actions><button class="exit-button" :disabled="saving" @click="discardClose">{{ t('不保存') }}</button></template>
     </ConfirmDialog>
   </div>
+  <Teleport to="body">
+    <div v-if="wallpaperPreviewOpen" class="wallpaper-live-preview" role="dialog" aria-modal="true" :aria-label="t('壁纸预览')" @keydown.esc.stop.prevent="showWallpaperPreview(false)">
+      <div class="wallpaper-preview-toolbar">
+        <span>{{ t('壁纸预览') }}</span>
+        <label>{{ t('面板透明度') }} <output>{{ wallpaperDraft.transparency }}%</output><input v-model.number="wallpaperDraft.transparency" type="range" min="0" max="45" :aria-label="t('面板透明度')" /></label>
+        <label>{{ t('磨砂强度') }} <output>{{ wallpaperDraft.blurPx }} px</output><input v-model.number="wallpaperDraft.blurPx" type="range" min="0" max="24" :aria-label="t('磨砂强度')" /></label>
+        <button ref="wallpaperReturnButton" type="button" @click="showWallpaperPreview(false)"><Undo2 :size="15" />{{ t('返回设置') }}</button>
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -548,6 +568,7 @@ footer button { min-height: 36px; padding: 0 13px; border-radius: 7px; font-size
 .diagnostics-actions button:disabled, .diagnostics-list article > button:disabled { color: var(--text-3); background: var(--subtle); cursor: default; opacity: .65; }
 .recycle-path { align-items: stretch; gap: 20px; }.recycle-path > span { flex: 0 1 34%; }.recycle-path > div { display: flex; flex: 1 1 auto; align-items: stretch; min-width: 0; gap: 7px; }.recycle-location { flex: 1 1 auto; min-width: 0; min-height: 46px; padding: 8px 10px; color: var(--text-2); background: var(--subtle); border: 1px solid var(--border-2); border-radius: 6px; font-size: 10px; line-height: 1.45; text-align: left; overflow-wrap: anywhere; white-space: normal; }.recycle-location:hover:not(:disabled) { color: var(--primary-dark); border-color: var(--primary); background: var(--surface-raised); }.recycle-path > div > button:last-child { display: grid; flex: 0 0 34px; place-items: center; width: 34px; min-height: 46px; color: var(--primary-dark); background: var(--primary-soft); border-radius: 6px; }.recycle-path > div > button:last-child:hover:not(:disabled) { background: var(--hover); }.recycle-path button:disabled { color: var(--text-3); cursor: default; opacity: .55; }.recycle-location-error { margin: -3px 16px 10px; color: var(--danger); font-size: 9px; }@media (max-width: 1100px) { .settings-dialog { width: calc(100vw - 40px); height: calc(100vh - 40px); }.dialog-backdrop { padding: 20px; }.recycle-path { align-items: flex-start; flex-direction: column; }.recycle-path > span { flex-basis: auto; }.recycle-path > div { width: 100%; } }
 .wallpaper-setting { gap: 12px; }.wallpaper-options { display: flex; flex-wrap: wrap; gap: 12px; }.wallpaper-options label { display: inline-flex; align-items: center; gap: 5px; color: var(--text-2); font-size: 11px; white-space: nowrap; }.wallpaper-options input { accent-color: var(--primary); }
-.wallpaper-controls { display: grid; gap: 9px; padding: 12px 16px; border-top: 1px solid var(--border); }.wallpaper-preview { display: grid; place-items: center; min-height: 76px; color: var(--text-2); background: var(--subtle) center / cover; border: 1px solid var(--border); border-radius: 8px; }.wallpaper-preview span { padding: 5px 9px; background: var(--surface); border-radius: 5px; font-size: 10px; }.wallpaper-buttons { display: flex; gap: 8px; }.wallpaper-buttons button { min-height: 30px; padding: 0 10px; color: var(--primary-dark); background: var(--primary-soft); border: 1px solid var(--border-2); border-radius: 6px; font-size: 10px; }
+.wallpaper-controls { display: grid; gap: 9px; padding: 12px 16px; border-top: 1px solid var(--border); }.wallpaper-controls > small { color: var(--text-3); font-size: 10px; }.wallpaper-buttons { display: flex; flex-wrap: wrap; gap: 8px; }.wallpaper-buttons button { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 10px; color: var(--primary-dark); background: var(--primary-soft); border: 1px solid var(--border-2); border-radius: 6px; font-size: 10px; }
+.wallpaper-live-preview { position: fixed; z-index: 100; inset: 0; display: flex; align-items: flex-end; justify-content: center; padding: 20px; pointer-events: none; }.wallpaper-preview-toolbar { display: flex; align-items: center; gap: 22px; max-width: 100%; padding: 12px 16px; color: var(--text); background: var(--surface); border: 1px solid var(--border-2); border-radius: 12px; box-shadow: 0 8px 30px var(--shadow-color); pointer-events: auto; }.wallpaper-preview-toolbar > span { font-size: 12px; font-weight: 650; white-space: nowrap; }.wallpaper-preview-toolbar label { display: grid; grid-template-columns: 1fr auto; gap: 5px 12px; min-width: 150px; font-size: 11px; color: var(--text-2); }.wallpaper-preview-toolbar input { grid-column: 1 / -1; width: 100%; accent-color: var(--primary); }.wallpaper-preview-toolbar button { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 12px; color: var(--on-primary); background: var(--primary); border-radius: 7px; font-size: 11px; white-space: nowrap; }.wallpaper-preview-toolbar button:hover { background: var(--primary-dark); }
 .wallpaper-sliders { display: grid; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--border); }.wallpaper-sliders label { display: grid; grid-template-columns: 1fr auto; gap: 5px; color: var(--text-2); font-size: 11px; }.wallpaper-sliders input { grid-column: 1 / -1; width: 100%; accent-color: var(--primary); }.wallpaper-sliders output { font-variant-numeric: tabular-nums; }
 </style>

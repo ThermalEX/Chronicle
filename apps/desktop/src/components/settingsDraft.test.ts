@@ -12,13 +12,14 @@ import * as wallpaper from "../services/wallpaper";
 async function dialog(configure?: (state: any) => void) {
   let state: any;
   let closed = 0;
+  const previewStates: boolean[] = [];
   const component = { ...SettingsDialog, setup(props: unknown, context: unknown) {
     state = (SettingsDialog as any).setup(props, context);
     configure?.(state);
     return state;
   } };
-  const html = await renderToString(createSSRApp(component, { onClose: () => closed++ }));
-  return { state, html, closed: () => closed };
+  const html = await renderToString(createSSRApp(component, { onClose: () => closed++, onWallpaperPreview: (active: boolean) => previewStates.push(active) }));
+  return { state, html, closed: () => closed, previewStates };
 }
 
 beforeEach(() => {
@@ -46,8 +47,25 @@ describe("settings drafts", () => {
   it("shows background choice before accent color with independent sliders", async () => {
     const { html } = await dialog((state) => { state.wallpaperDraft.mode = "image"; });
     expect(html.indexOf("背景类型")).toBeLessThan(html.indexOf("配色主题"));
-    expect(html).toContain("壁纸透明度");
+    expect(html).toContain("面板透明度");
     expect(html).toContain("磨砂强度");
+    expect(html).toContain("预览软件界面");
+  });
+
+  it("returns from the actual app preview without discarding or saving the draft", async () => {
+    const { state, previewStates, closed } = await dialog();
+    const root = { dataset: {} as Record<string, string> };
+    vi.stubGlobal("document", { documentElement: root });
+    state.draft.colorMode = "dark";
+    state.showWallpaperPreview(true);
+    expect(root.dataset.colorMode).toBe("dark");
+    state.wallpaperDraft.transparency = 40;
+    state.showWallpaperPreview(false);
+    expect(root.dataset.colorMode).toBe("light");
+    expect(previewStates).toEqual([true, false]);
+    expect(state.wallpaperDraft.transparency).toBe(40);
+    expect(state.hasChanges.value).toBe(true);
+    expect(closed()).toBe(0);
   });
 
   it("previews wallpaper changes and restores the saved view on discard", async () => {

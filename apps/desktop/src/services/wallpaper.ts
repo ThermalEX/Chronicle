@@ -34,8 +34,6 @@ export function applyWallpaper(state: WallpaperState): void {
   root.dataset.wallpaperMode = state.mode === "image" && state.imageDataUrl ? "image" : "color";
   root.style.setProperty("--wallpaper-opacity", `${100 - state.transparency}%`);
   root.style.setProperty("--wallpaper-blur", `${state.blurPx}px`);
-  if (state.imageDataUrl) root.style.setProperty("--wallpaper-image", `url("${state.imageDataUrl}")`);
-  else root.style.removeProperty("--wallpaper-image");
 }
 
 export async function loadLocalWallpaper(): Promise<void> {
