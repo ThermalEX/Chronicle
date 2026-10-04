@@ -1244,6 +1244,7 @@ onMounted(async () => {
   window.addEventListener("pointermove", moveTreePointer);
   window.addEventListener("pointerup", endTreePointer);
   window.addEventListener("pointercancel", cancelTreePointer);
+  window.addEventListener("blur", cancelTreePointer);
   if (isTauriRuntime) {
     try {
       stopExternalDrop = await getCurrentWebview().onDragDropEvent(({ payload }) => {
@@ -1262,7 +1263,8 @@ onMounted(async () => {
     knownDeviceSources.value = await readKnownDevices();
     await initializeSettings();
     applyAppearance(appSettings);
-    await loadLocalWallpaper();
+    try { await loadLocalWallpaper(); }
+    catch (error) { showNotice(readableError(error), "error"); }
     stopSystemAppearance = watchSystemAppearance(() => appSettings);
     startupUpdatePending = appSettings.checkForUpdates;
     if (isTauriRuntime) {
@@ -1304,6 +1306,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointermove", moveTreePointer);
   window.removeEventListener("pointerup", endTreePointer);
   window.removeEventListener("pointercancel", cancelTreePointer);
+  window.removeEventListener("blur", cancelTreePointer);
   window.clearTimeout(noticeTimer);
   window.clearTimeout(clockTimer);
 });

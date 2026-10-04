@@ -91,6 +91,13 @@ fn image_bytes(path: &Path) -> Result<(Vec<u8>, &'static str, &'static str), Str
         Some(ImageFormat::WebP) => ("image/webp", "webp"),
         _ => return Err("仅支持 PNG、JPEG 和 WebP 图片".into()),
     };
+    if reader.format() == Some(ImageFormat::WebP)
+        && image::codecs::webp::WebPDecoder::new(Cursor::new(&bytes))
+            .map_err(|error| error.to_string())?
+            .has_animation()
+    {
+        return Err("不支持动画 WebP 图片".into());
+    }
     reader.decode().map_err(|error| error.to_string())?;
     Ok((bytes, mime, ext))
 }
