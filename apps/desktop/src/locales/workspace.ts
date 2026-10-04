@@ -1,4 +1,9 @@
 export const workspaceMessages: Record<string, string> = {
+  "未添加的拖入路径": "Dropped paths not added",
+  "Invalid path": "Invalid path",
+  "Duplicate path": "Duplicate path",
+  "路径包含无效字符": "The path contains invalid characters",
+  "仅支持文件和文件夹": "Only files and folders are supported",
   "松开以添加文件或文件夹": "Release to add files or folders",
   "拖入后先核对来源，再创建存档。": "Review the sources before creating an archive.",
   "拖入的路径均不可添加：{reason}": "No dropped paths can be added: {reason}",

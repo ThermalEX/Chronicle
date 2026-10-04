@@ -10,9 +10,11 @@ import type { TutorialProgress, TutorialTip } from "../services/onboarding";
 import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
 import BackupTriggerFields from "./BackupTriggerFields.vue";
 import { backupAutomationLabel, backupAutomationSupported, defaultBackupTrigger, getBackupTrigger, validateBackupTrigger } from "../services/backupAutomation";
+import type { SkippedDroppedPath } from "../services/droppedSources";
 
 const props = defineProps<{
   sources: ArchiveSource[];
+  skippedPaths?: SkippedDroppedPath[];
   categories: CategoryRecord[];
   defaultCategoryId?: string;
   defaultInitialSnapshot: boolean;
@@ -150,6 +152,10 @@ onMounted(async () => {
               <button type="button" :aria-label="t('移除 {name}', { name: source.name })" :title="t('移除 {name}', { name: source.name })" :disabled="submitting" @click="emit('remove', source.id)"><Trash2 :size="15" /></button>
             </div>
           </div>
+          <div v-if="skippedPaths?.length" class="skipped-paths" role="status">
+            <b>{{ t('未添加的拖入路径') }}</b>
+            <ul><li v-for="(item, index) in skippedPaths" :key="`${item.path}-${index}`"><span :title="item.path">{{ item.path }}</span><small>{{ t(item.reason) }}</small></li></ul>
+          </div>
           <small v-else-if="attempted" class="field-error">{{ t('请至少添加一个来源') }}</small>
         </fieldset>
 
@@ -170,7 +176,7 @@ onMounted(async () => {
         <p v-if="error" class="submit-error" role="alert">{{ error }}</p>
       </main>
 
-      <footer><span>{{ t('{count} 个来源', { count: sources.length }) }}</span><div><button type="button" class="cancel" :disabled="submitting" @click="emit('close')">{{ t('取消') }}</button><button data-tour="create-submit" class="submit" type="submit" :disabled="submitting"><Plus :size="16" />{{ submitting ? (editName ? t('正在保存') : t('正在创建')) : (editName ? t('保存修改') : t('创建存档')) }}</button></div></footer>
+      <footer><span>{{ t('{count} 个来源', { count: sources.length }) }}</span><div><button type="button" class="cancel" :disabled="submitting" @click="emit('close')">{{ t('取消') }}</button><button data-tour="create-submit" class="submit" type="submit" :disabled="submitting || !sources.length"><Plus :size="16" />{{ submitting ? (editName ? t('正在保存') : t('正在创建')) : (editName ? t('保存修改') : t('创建存档')) }}</button></div></footer>
     </form>
   </div>
 </template>
@@ -188,6 +194,7 @@ input[type="text"] { width: 100%; height: 38px; padding: 0 11px; color: #263431;
 fieldset { margin: 20px 0; padding: 15px; border: 1px solid var(--border); border-radius: 9px; } legend { padding: 0 6px; } fieldset > p { margin: 0 0 12px; color: var(--text-3); font-size: 10px; }.source-location-required { background: #fff4d6; border-color: #f2cc60; box-shadow: 0 0 0 3px #f2cc6040; }.source-location-required > p { color: #9a6700; font-weight: 650; }.source-location-required .source-actions button { color: #9a6700; background: #fff9e8; border-color: #e4bc4d; }
 .source-actions { display: flex; gap: 8px; } .source-actions button { display: inline-flex; align-items: center; gap: 7px; min-height: 35px; padding: 0 11px; color: var(--primary-dark); background: var(--primary-soft); border: 1px solid #c5ded8; border-radius: 7px; font-size: 10px; font-weight: 650; }
 .source-list { margin-top: 12px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; } .source-list > div { display: grid; grid-template-columns: 32px minmax(0, 1fr) 34px; align-items: center; min-height: 54px; padding: 6px 8px; } .source-list > div + div { border-top: 1px solid var(--border); } .source-icon { display: grid; place-items: center; width: 28px; height: 28px; color: var(--primary); background: var(--primary-soft); border-radius: 6px; } .source-list span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 3px; } .source-list b { font-size: 10px; } .source-list small { overflow: hidden; color: var(--text-3); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; } .source-list button { display: grid; place-items: center; width: 32px; height: 32px; color: var(--text-3); background: transparent; border-radius: 6px; } .source-list button:hover { color: #b83a32; background: #fff0ef; }
+.skipped-paths { margin-top: 12px; padding: 10px 12px; color: var(--danger); background: var(--danger-soft); border-radius: 7px; font-size: 10px; }.skipped-paths ul { max-height: 120px; margin: 6px 0 0; padding-left: 16px; overflow-y: auto; }.skipped-paths li { margin-top: 5px; overflow-wrap: anywhere; }.skipped-paths li span { display: block; }.skipped-paths li small { color: var(--text-2); white-space: normal; }
 .storage-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; } .storage-options > label { display: grid; grid-template-columns: 0 22px 1fr; align-items: center; min-height: 60px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; } .storage-options > label.selected { color: var(--primary-dark); background: var(--primary-soft); border-color: #9fcfc5; } .storage-options input { opacity: 0; width: 0; } .storage-options span { display: flex; flex-direction: column; gap: 3px; } .storage-options b { font-size: 10px; } .storage-options small { color: var(--text-3); font-size: 8px; line-height: 1.35; }
 .initial-toggle { display: flex; align-items: center; justify-content: space-between; min-height: 60px; margin-top: 20px; padding: 10px 14px; background: #f5f8f7; border-radius: 8px; } .initial-toggle > span { display: flex; flex-direction: column; gap: 4px; } .initial-toggle b { font-size: 10px; } .initial-toggle small { color: var(--text-3); font-size: 9px; }
 .initial-toggle input { position: relative; width: 38px; height: 22px; flex: none; appearance: none; background: #cbd5d1; border-radius: 20px; cursor: pointer; } .initial-toggle input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; background: #fff; border-radius: 50%; box-shadow: 0 1px 3px #102b2738; transition: transform .16s; } .initial-toggle input:checked { background: var(--primary); } .initial-toggle input:checked::after { transform: translateX(16px); }

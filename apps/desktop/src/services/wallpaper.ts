@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { ref } from "vue";
+import { t } from "./i18n";
 
 export interface WallpaperState {
   mode: "color" | "image";
@@ -18,6 +19,13 @@ export interface WallpaperSaveRequest {
 }
 
 export const currentWallpaper = ref<WallpaperState>({ mode: "color", transparency: 28, blurPx: 12 });
+
+export function wallpaperWarningLabel(warning?: string | null): string {
+  if (warning === "preferences-damaged") return t("本机壁纸设置已损坏，已恢复主题纯色。");
+  if (warning === "image-unreadable") return t("本机壁纸图片无法读取，已恢复主题纯色。");
+  if (warning === "image-invalid") return t("本机壁纸文件名无效，已恢复主题纯色。");
+  return warning ?? "";
+}
 
 export function applyWallpaper(state: WallpaperState): void {
   currentWallpaper.value = { ...state };

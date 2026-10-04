@@ -13,6 +13,7 @@ use uuid::Uuid;
 const MAX_IMAGE_BYTES: u64 = 15 * 1024 * 1024;
 const FOLDER: &str = "wallpaper";
 const PREFERENCES: &str = "preferences.json";
+const PREFERENCES_BACKUP: &str = "preferences.json.backup";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,10 +70,12 @@ fn valid_filename(name: &str) -> bool {
 
 fn read_preferences(root: &Path) -> Result<WallpaperPreferences, String> {
     let path = wallpaper_dir(root).join(PREFERENCES);
-    if !path.exists() {
+    let backup = wallpaper_dir(root).join(PREFERENCES_BACKUP);
+    let readable = if path.exists() { &path } else { &backup };
+    if !readable.exists() {
         return Ok(WallpaperPreferences::default());
     }
-    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    let bytes = fs::read(readable).map_err(|error| error.to_string())?;
     serde_json::from_slice(&bytes).map_err(|error| error.to_string())
 }
 
@@ -114,23 +117,23 @@ fn preview_from_path(path: &Path) -> Result<String, String> {
 fn load_from(root: &Path) -> Result<WallpaperView, String> {
     let (preferences, mut warning) = match read_preferences(root) {
         Ok(value) => (value, None),
-        Err(error) => (
+        Err(_) => (
             WallpaperPreferences::default(),
-            Some(format!("本机壁纸设置已损坏：{error}")),
+            Some("preferences-damaged".into()),
         ),
     };
     let image_data_url = match preferences.image_filename.as_deref() {
         Some(name) if valid_filename(name) => {
             match preview_from_path(&wallpaper_dir(root).join(name)) {
                 Ok(url) => Some(url),
-                Err(error) => {
-                    warning = Some(format!("本机壁纸无法读取：{error}"));
+                Err(_) => {
+                    warning = Some("image-unreadable".into());
                     None
                 }
             }
         }
         Some(_) => {
-            warning = Some("本机壁纸文件名无效".into());
+            warning = Some("image-invalid".into());
             None
         }
         None => None,
@@ -157,8 +160,11 @@ fn write_preferences(path: &Path, preferences: &WallpaperPreferences) -> Result<
     file.write_all(&bytes).map_err(|error| error.to_string())?;
     file.sync_all().map_err(|error| error.to_string())?;
     drop(file);
-    let backup = folder.join(format!(".{}.backup", Uuid::new_v4()));
+    let backup = folder.join(PREFERENCES_BACKUP);
     if path.exists() {
+        if backup.exists() {
+            fs::remove_file(&backup).map_err(|error| error.to_string())?;
+        }
         fs::rename(path, &backup).map_err(|error| error.to_string())?;
     }
     if let Err(error) = fs::rename(&temporary, path) {
@@ -337,6 +343,37 @@ mod tests {
         let view = load_from(root.path()).unwrap();
         assert_eq!(view.mode, "color");
         assert!(view.warning.is_some());
+    }
+
+    #[test]
+    fn interrupted_preferences_swap_reads_previous_image_and_settings() {
+        let root = tempdir().unwrap();
+        let source = root.path().join("good.png");
+        fs::write(&source, PNG).unwrap();
+        save_to(root.path(), WallpaperSaveRequest::with_source(&source)).unwrap();
+        let folder = root.path().join("wallpaper");
+        fs::rename(
+            folder.join("preferences.json"),
+            folder.join("preferences.json.backup"),
+        )
+        .unwrap();
+        let view = load_from(root.path()).unwrap();
+        assert_eq!(view.mode, "image");
+        assert!(view.image_data_url.is_some());
+        assert!(view.warning.is_none());
+        save_to(
+            root.path(),
+            WallpaperSaveRequest {
+                mode: "color".into(),
+                transparency: 12,
+                blur_px: 4,
+                source_path: None,
+                remove_image: false,
+            },
+        )
+        .unwrap();
+        assert!(folder.join("preferences.json").exists());
+        assert!(!folder.join("preferences.json.backup").exists());
     }
 
     #[test]

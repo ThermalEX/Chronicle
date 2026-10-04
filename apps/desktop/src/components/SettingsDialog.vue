@@ -18,7 +18,7 @@ import appIcon from "../assets/icon.png";
 import DeviceSettings from "./DeviceSettings.vue";
 import SnapshotRecovery from "./SnapshotRecovery.vue";
 import { appMetadata } from "../services/appMetadata";
-import { applyWallpaper, currentWallpaper, previewLocalWallpaper, saveLocalWallpaper, type WallpaperSaveRequest, type WallpaperState } from "../services/wallpaper";
+import { applyWallpaper, currentWallpaper, previewLocalWallpaper, saveLocalWallpaper, wallpaperWarningLabel, type WallpaperSaveRequest, type WallpaperState } from "../services/wallpaper";
 
 const props = withDefaults(defineProps<{ updateChecking?: boolean; initialSection?: "software" | "device" }>(), { updateChecking: false, initialSection: "software" });
 const emit = defineEmits<{ close: []; saved: []; changed: []; "restart-tutorial": []; "check-update": [channel: UpdateChannel]; "backup-health": [] }>();
@@ -398,6 +398,7 @@ watch(() => [wallpaperDraft.mode, wallpaperDraft.transparency, wallpaperDraft.bl
             <div class="setting-group">
               <label class="setting-row select-row"><span><b>{{ t('界面语言') }}</b><small>{{ t('选择后立即预览，点击保存设置后生效。') }}</small></span><ThemedSelect :model-value="draft.language" :options="languageOptions" :disabled="saving" :label="t('界面语言')" @update:model-value="updateLanguage" /></label>
               <div class="setting-row wallpaper-setting"><span><b>{{ t('背景类型') }}</b><small>{{ t('壁纸仅保存在本机，不会同步到云端。') }}</small></span><div class="wallpaper-options"><label><input v-model="wallpaperDraft.mode" type="radio" value="color" />{{ t('主题纯色') }}</label><label><input v-model="wallpaperDraft.mode" type="radio" value="image" />{{ t('自定义图片') }}</label></div></div>
+              <p v-if="savedWallpaper.warning" class="recycle-error" role="alert">{{ wallpaperWarningLabel(savedWallpaper.warning) }}</p>
               <div v-if="wallpaperDraft.mode === 'image' || wallpaperPreviewUrl" class="wallpaper-controls">
                 <div class="wallpaper-preview" :style="wallpaperPreviewUrl ? { backgroundImage: `url('${wallpaperPreviewUrl}')` } : undefined"><span>{{ t('壁纸预览') }}</span></div>
                 <div class="wallpaper-buttons"><button type="button" @click="chooseWallpaper">{{ t('选择图片') }}</button><button v-if="wallpaperPreviewUrl" type="button" @click="removeWallpaper">{{ t('移除图片') }}</button></div>

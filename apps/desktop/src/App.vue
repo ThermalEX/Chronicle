@@ -48,9 +48,9 @@ import { categoryBreadcrumb } from "./services/categoryBreadcrumb";
 import { formatCurrentTime, millisecondsUntilNextMinute } from "./services/currentTime";
 import { appMetadata } from "./services/appMetadata";
 import { checkForUpdate, type ReleaseUpdate } from "./services/updateService";
-import { loadLocalWallpaper } from "./services/wallpaper";
+import { currentWallpaper, loadLocalWallpaper, wallpaperWarningLabel } from "./services/wallpaper";
 import { createTreePointerDrag, type TreeDragItem } from "./services/treePointerDrag";
-import { canAcceptExternalDrop, normalizeDroppedSources, type DroppedPathDto } from "./services/droppedSources";
+import { canAcceptExternalDrop, normalizeDroppedSources, type DroppedPathDto, type SkippedDroppedPath } from "./services/droppedSources";
 
 type CategoryTreeNode = CategoryRecord & {
   nodeType: "category";
@@ -102,6 +102,7 @@ const loading = ref(true);
 const refreshingLibrary = ref(false);
 const createDialogOpen = ref(false);
 const pendingSources = ref<ArchiveSource[]>([]);
+const skippedDroppedPaths = ref<SkippedDroppedPath[]>([]);
 const externalDropActive = ref(false);
 let stopExternalDrop: (() => void) | undefined;
 const pickingSource = ref<SourceKind>();
@@ -508,6 +509,7 @@ function openCreateArchive() {
   editingArchive.value = undefined;
   highlightSources.value = false;
   pendingSources.value = [];
+  skippedDroppedPaths.value = [];
   createArchiveError.value = undefined;
   createDialogOpen.value = true;
 }
@@ -519,7 +521,7 @@ function externalDropAllowed(): boolean {
     dialogOpen: createDialogOpen.value || settingsOpen.value || cloudSettingsOpen.value
       || categoryDialogOpen.value || steamScanOpen.value || Boolean(syncPreview.value)
       || backupHealthOpen.value || cloudHealthDialogOpen.value || Boolean(availableUpdate.value)
-      || Boolean(confirmRequest.value) || closeRequestOpen.value,
+      || Boolean(confirmRequest.value) || Boolean(registryRestoreRequest.value) || closeRequestOpen.value,
   });
 }
 
@@ -529,13 +531,9 @@ async function acceptExternalPaths(paths: string[]): Promise<void> {
     const descriptions = await invoke<DroppedPathDto[]>("describe_dropped_paths", { paths });
     if (!externalDropAllowed()) return;
     const { accepted, skipped } = normalizeDroppedSources(descriptions, []);
-    if (!accepted.length) {
-      showNotice(t("拖入的路径均不可添加：{reason}", { reason: skipped[0]?.reason ?? t("无有效文件或文件夹") }), "error");
-      return;
-    }
     openCreateArchive();
     pendingSources.value = accepted;
-    if (skipped.length) createArchiveError.value = t("已跳过 {count} 个无效或重复路径，请核对来源。", { count: skipped.length });
+    skippedDroppedPaths.value = skipped;
   } catch (error) { showNotice(readableError(error), "error"); }
 }
 
@@ -549,6 +547,7 @@ function openArchiveEditor(archive: ArchiveRecord, highlightSourceSelection = fa
   editingArchive.value = archive;
   highlightSources.value = highlightSourceSelection;
   pendingSources.value = archive.sources.map((source) => ({ ...source }));
+  skippedDroppedPaths.value = [];
   createArchiveError.value = undefined;
   archiveMenuOpen.value = false;
   createDialogOpen.value = true;
@@ -1263,7 +1262,7 @@ onMounted(async () => {
     knownDeviceSources.value = await readKnownDevices();
     await initializeSettings();
     applyAppearance(appSettings);
-    try { await loadLocalWallpaper(); }
+    try { await loadLocalWallpaper(); if (currentWallpaper.value.warning) showNotice(wallpaperWarningLabel(currentWallpaper.value.warning), "error"); }
     catch (error) { showNotice(readableError(error), "error"); }
     stopSystemAppearance = watchSystemAppearance(() => appSettings);
     startupUpdatePending = appSettings.checkForUpdates;
@@ -1427,6 +1426,7 @@ watch([settingsOpen, createDialogOpen, categoryDialogOpen, cloudSettingsOpen, tu
     <CreateArchiveDialog :tutorial-progress="tutorialProgress" @tutorial-tip="rememberTutorialTip"
       v-if="createDialogOpen"
       :sources="pendingSources"
+      :skipped-paths="skippedDroppedPaths"
       :categories="categoryRecords"
       :default-category-id="selectedCategoryId === 'all' ? undefined : selectedCategoryId"
       :default-initial-snapshot="appSettings.createInitialSnapshot"

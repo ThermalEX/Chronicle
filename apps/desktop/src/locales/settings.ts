@@ -1,4 +1,7 @@
 export const settingsMessages: Record<string, string> = {
+  "本机壁纸设置已损坏，已恢复主题纯色。": "Local wallpaper settings are damaged. Theme color has been restored.",
+  "本机壁纸图片无法读取，已恢复主题纯色。": "The local wallpaper image is unavailable. Theme color has been restored.",
+  "本机壁纸文件名无效，已恢复主题纯色。": "The local wallpaper filename is invalid. Theme color has been restored.",
   "背景类型": "Background",
   "壁纸仅保存在本机，不会同步到云端。": "The wallpaper stays on this device and is not synced to the cloud.",
   "主题纯色": "Theme color",
