@@ -8,6 +8,7 @@ import {
 } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from "vue";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { invoke } from "@tauri-apps/api/core";
 import CloudCenterDialog from "./components/CloudCenterDialog.vue";
 import AppToast from "./components/AppToast.vue";
@@ -49,6 +50,7 @@ import { appMetadata } from "./services/appMetadata";
 import { checkForUpdate, type ReleaseUpdate } from "./services/updateService";
 import { loadLocalWallpaper } from "./services/wallpaper";
 import { createTreePointerDrag, type TreeDragItem } from "./services/treePointerDrag";
+import { canAcceptExternalDrop, normalizeDroppedSources, type DroppedPathDto } from "./services/droppedSources";
 
 type CategoryTreeNode = CategoryRecord & {
   nodeType: "category";
@@ -100,6 +102,8 @@ const loading = ref(true);
 const refreshingLibrary = ref(false);
 const createDialogOpen = ref(false);
 const pendingSources = ref<ArchiveSource[]>([]);
+const externalDropActive = ref(false);
+let stopExternalDrop: (() => void) | undefined;
 const pickingSource = ref<SourceKind>();
 const creatingArchive = ref(false);
 const createArchiveError = ref<string>();
@@ -506,6 +510,33 @@ function openCreateArchive() {
   pendingSources.value = [];
   createArchiveError.value = undefined;
   createDialogOpen.value = true;
+}
+
+function externalDropAllowed(): boolean {
+  return canAcceptExternalDrop({
+    loading: loading.value,
+    tutorialActive: tutorialActive.value,
+    dialogOpen: createDialogOpen.value || settingsOpen.value || cloudSettingsOpen.value
+      || categoryDialogOpen.value || steamScanOpen.value || Boolean(syncPreview.value)
+      || backupHealthOpen.value || cloudHealthDialogOpen.value || Boolean(availableUpdate.value)
+      || Boolean(confirmRequest.value) || closeRequestOpen.value,
+  });
+}
+
+async function acceptExternalPaths(paths: string[]): Promise<void> {
+  if (!externalDropAllowed() || !paths.length) return;
+  try {
+    const descriptions = await invoke<DroppedPathDto[]>("describe_dropped_paths", { paths });
+    if (!externalDropAllowed()) return;
+    const { accepted, skipped } = normalizeDroppedSources(descriptions, []);
+    if (!accepted.length) {
+      showNotice(t("拖入的路径均不可添加：{reason}", { reason: skipped[0]?.reason ?? t("无有效文件或文件夹") }), "error");
+      return;
+    }
+    openCreateArchive();
+    pendingSources.value = accepted;
+    if (skipped.length) createArchiveError.value = t("已跳过 {count} 个无效或重复路径，请核对来源。", { count: skipped.length });
+  } catch (error) { showNotice(readableError(error), "error"); }
 }
 
 function openEditArchive() {
@@ -1213,6 +1244,18 @@ onMounted(async () => {
   window.addEventListener("pointermove", moveTreePointer);
   window.addEventListener("pointerup", endTreePointer);
   window.addEventListener("pointercancel", cancelTreePointer);
+  if (isTauriRuntime) {
+    try {
+      stopExternalDrop = await getCurrentWebview().onDragDropEvent(({ payload }) => {
+        if (payload.type === "leave") externalDropActive.value = false;
+        else if (payload.type === "enter" || payload.type === "over") externalDropActive.value = externalDropAllowed();
+        else if (payload.type === "drop") {
+          externalDropActive.value = false;
+          void acceptExternalPaths(payload.paths);
+        }
+      });
+    } catch (error) { showNotice(readableError(error), "error"); }
+  }
   refreshCurrentTime();
   try {
     localDevice.value = await deviceRepository.read();
@@ -1253,6 +1296,7 @@ onMounted(async () => {
   finally { loading.value = false; }
 });
 onBeforeUnmount(() => {
+  stopExternalDrop?.();
   cancelTreePointer();
   stopSystemAppearance?.();
   window.removeEventListener("keydown", handleShortcut);
@@ -1270,6 +1314,7 @@ watch([settingsOpen, createDialogOpen, categoryDialogOpen, cloudSettingsOpen, tu
 
 <template>
   <div class="app-shell">
+    <div v-if="externalDropActive" class="external-drop-overlay" aria-hidden="true"><FolderOpen :size="28" /><b>{{ t("松开以添加文件或文件夹") }}</b><span>{{ t("拖入后先核对来源，再创建存档。") }}</span></div>
     <header class="titlebar">
       <div class="brand"><time :datetime="currentTime">{{ currentTime }}</time></div>
       <div class="sync-states"><button class="sync-state sync-state-button" :title="t('打开本地资料库')" @click="openRepositoryFolder"><i></i>{{ t("本地资料库可用") }}</button><button class="sync-state sync-state-button" :class="cloudStateClass" :title="cloudHealth.reason || t('检测云端资料库')" @click="openCloudHealthDialog"><i :class="{ pulse: cloudHealth.status === 'checking' }"></i>{{ cloudLibrary.label }}</button><button class="sync-state sync-state-button sync-progress-button" :style="{ '--sync-progress': allSyncProgressFraction }" :disabled="syncingArchive || syncingAllArchives" :title="t('同步所有启用云端保存的存档')" @click="syncAllArchives"><span><UploadCloud :size="16" />{{ syncingAllArchives ? t("正在同步 {syncProgressText}", { syncProgressText: syncProgressText }) : t("同步所有存档") }}</span></button></div>

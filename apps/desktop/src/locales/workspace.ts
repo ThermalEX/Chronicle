@@ -1,4 +1,9 @@
 export const workspaceMessages: Record<string, string> = {
+  "松开以添加文件或文件夹": "Release to add files or folders",
+  "拖入后先核对来源，再创建存档。": "Review the sources before creating an archive.",
+  "拖入的路径均不可添加：{reason}": "No dropped paths can be added: {reason}",
+  "无有效文件或文件夹": "No valid file or folder",
+  "已跳过 {count} 个无效或重复路径，请核对来源。": "Skipped {count} invalid or duplicate paths. Review the sources.",
   "时间 新–旧": "Time: newest first",
   "时间 旧–新": "Time: oldest first",
   "主题未能保存：{value}": "Could not save theme: {value}",
