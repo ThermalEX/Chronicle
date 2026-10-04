@@ -2,7 +2,7 @@
 import { t } from "../services/i18n";
 import { Database, File, Folder, HardDrive, Plus, Trash2, UploadCloud, X } from "@lucide/vue";
 import { onMounted, ref, watch } from "vue";
-import type { ArchiveSource, CreateArchiveInput, SourceKind, StoragePolicy } from "../domain";
+import type { ArchiveSource, CategoryRecord, CreateArchiveInput, SourceKind, StoragePolicy } from "../domain";
 import { createBackdropDismissal } from "../services/dialogDismissal";
 import { normalizeRegistryPath } from "../services/backupRules";
 import TutorialHint from "./TutorialHint.vue";
@@ -13,6 +13,8 @@ import { backupAutomationLabel, backupAutomationSupported, defaultBackupTrigger,
 
 const props = defineProps<{
   sources: ArchiveSource[];
+  categories: CategoryRecord[];
+  defaultCategoryId?: string;
   defaultInitialSnapshot: boolean;
   picking?: SourceKind;
   submitting?: boolean;
@@ -36,6 +38,8 @@ const emit = defineEmits<{
 }>();
 
 const name = ref(props.editName ?? "");
+const categoryId = ref(props.defaultCategoryId ?? "");
+const categoryError = ref("");
 const excludePatterns = ref((props.editExcludePatterns ?? []).join("\n"));
 const registryPath = ref("");
 const registryError = ref("");
@@ -67,11 +71,17 @@ watch(() => props.sources, (sources) => {
 function submit(): void {
   attempted.value = true;
   if (!name.value.trim() || !props.sources.length || props.submitting) return;
+  if (!props.editName && categoryId.value && !props.categories.some((category) => category.id === categoryId.value)) {
+    categoryError.value = t("所选分类不存在，请重新选择。");
+    return;
+  }
+  categoryError.value = "";
   if (triggerLoading.value || triggerLoadFailed.value) return;
   triggerError.value = autoBackupEnabled.value ? validateBackupTrigger(backupTrigger.value) ?? "" : "";
   if (triggerError.value) return;
   emit("submit", {
     name: name.value.trim(),
+    categoryId: props.editName ? undefined : categoryId.value || undefined,
     sources: props.sources.map((source) => ({ ...source })),
     excludePatterns: excludePatterns.value.split(/\r?\n/).map((pattern) => pattern.trim()).filter(Boolean),
     storagePolicy: storagePolicy.value,
@@ -106,6 +116,15 @@ onMounted(async () => {
           <span>{{ t('存档名称') }}</span>
           <input ref="nameInput" v-model="name" type="text" maxlength="100" :placeholder="t('用于同步、查询和显示')" :aria-invalid="attempted && !name.trim()" />
           <small v-if="attempted && !name.trim()" class="field-error">{{ t('请输入存档名称') }}</small>
+        </label>
+
+        <label v-if="!editName" class="field category-field">
+          <span>{{ t('保存到分类') }}</span>
+          <select v-model="categoryId" :title="categories.find((category) => category.id === categoryId)?.name ?? t('根目录')" :aria-invalid="Boolean(categoryError)">
+            <option value="">{{ t('根目录') }}</option>
+            <option v-for="category in categories" :key="category.id" :value="category.id" :title="category.name">{{ category.name }}</option>
+          </select>
+          <small v-if="categoryError" class="field-error" role="alert">{{ categoryError }}</small>
         </label>
 
         <fieldset data-tour="sources" :class="{ 'source-location-required': highlightSources }">
@@ -164,6 +183,7 @@ header { border-bottom: 1px solid var(--border); } header p, header h2 { margin:
 header button { display: grid; place-items: center; width: 38px; height: 38px; background: transparent; border-radius: 7px; } header button:hover, .cancel:hover { background: var(--hover); }
 main { overflow-y: auto; padding: 23px 26px 28px; }
 .field { display: flex; flex-direction: column; gap: 7px; } .field > span, legend { color: var(--text-2); font-size: 10px; font-weight: 700; }
+.category-field { margin-top: 17px; }.category-field select { width: 100%; height: 38px; padding: 0 10px; overflow: hidden; color: var(--text); background: var(--field); border: 1px solid var(--border-2); border-radius: 7px; font-size: 11px; text-overflow: ellipsis; }.category-field select[aria-invalid="true"] { border-color: var(--danger); }
 input[type="text"] { width: 100%; height: 38px; padding: 0 11px; color: #263431; background: #f8faf9; border: 1px solid var(--border-2); border-radius: 7px; font-size: 11px; } input[aria-invalid="true"] { border-color: #b83a32; }
 fieldset { margin: 20px 0; padding: 15px; border: 1px solid var(--border); border-radius: 9px; } legend { padding: 0 6px; } fieldset > p { margin: 0 0 12px; color: var(--text-3); font-size: 10px; }.source-location-required { background: #fff4d6; border-color: #f2cc60; box-shadow: 0 0 0 3px #f2cc6040; }.source-location-required > p { color: #9a6700; font-weight: 650; }.source-location-required .source-actions button { color: #9a6700; background: #fff9e8; border-color: #e4bc4d; }
 .source-actions { display: flex; gap: 8px; } .source-actions button { display: inline-flex; align-items: center; gap: 7px; min-height: 35px; padding: 0 11px; color: var(--primary-dark); background: var(--primary-soft); border: 1px solid #c5ded8; border-radius: 7px; font-size: 10px; font-weight: 650; }

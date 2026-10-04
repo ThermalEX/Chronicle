@@ -574,7 +574,12 @@ async function createArchive(input: CreateArchiveInput) {
       showNotice(t("存档设置已更新"));
       return;
     }
-    const categoryId = selectedCategoryId.value === "all" ? undefined : selectedCategoryId.value;
+    const categoryId = input.categoryId;
+    if (categoryId) {
+      const currentCategories = await archiveRepository.listCategories();
+      categoryRecords.value = currentCategories;
+      if (!currentCategories.some((category) => category.id === categoryId)) throw new Error(t("所选分类不存在，请重新选择。"));
+    }
     const archive = await archiveRepository.createArchive({ ...input, autoBackupEnabled: false, categoryId });
     try { if (input.backupTrigger && input.autoBackupEnabled) await setBackupTrigger(archive.id, input.backupTrigger); }
     catch (error) {
@@ -1330,6 +1335,8 @@ onBeforeUnmount(() => {
     <CreateArchiveDialog :tutorial-progress="tutorialProgress" @tutorial-tip="rememberTutorialTip"
       v-if="createDialogOpen"
       :sources="pendingSources"
+      :categories="categoryRecords"
+      :default-category-id="selectedCategoryId === 'all' ? undefined : selectedCategoryId"
       :default-initial-snapshot="appSettings.createInitialSnapshot"
       :picking="pickingSource"
       :submitting="creatingArchive"

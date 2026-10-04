@@ -1,4 +1,7 @@
 export const dialogMessages: Record<string, string> = {
+  "保存到分类": "Save in category",
+  "根目录": "Root",
+  "所选分类不存在，请重新选择。": "The selected category no longer exists. Choose another category.",
   "已取消安装": "Installation cancelled",
   "游戏类型": "Game type",
   "Galgame 存档": "Galgame saves",
