@@ -149,6 +149,25 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
   backdrop-filter: blur(var(--wallpaper-blur));
 }
 
+/* Nested surfaces need less tint: their parent already provides the readable glass layer. */
+:root[data-wallpaper-mode="image"] .workspace {
+  --wallpaper-inset: color-mix(in srgb, var(--subtle) calc(var(--wallpaper-opacity) - 45%), transparent);
+  --wallpaper-field: color-mix(in srgb, var(--field) calc(var(--wallpaper-opacity) - 25%), transparent);
+  --wallpaper-selected: color-mix(in srgb, var(--primary-soft) calc(var(--wallpaper-opacity) - 20%), transparent);
+}
+:root[data-wallpaper-mode="image"] .workspace :is(.archive-metadata, .source-row, .search, .snapshot-create, .timeline-toolbar > label, .timeline-table-head, .inspector, .changes, .archive-row:hover, .timeline-table article:hover) {
+  background: var(--wallpaper-inset);
+}
+:root[data-wallpaper-mode="image"] .workspace :is(.snapshot-create input, .tag-input, .snapshot-note textarea, .themed-select .trigger) {
+  background: var(--wallpaper-field);
+}
+:root[data-wallpaper-mode="image"] .workspace :is(.archive-row.selected, .timeline-table article.selected, .tag-chip, .backup-runtime) {
+  background: var(--wallpaper-selected);
+}
+:root[data-wallpaper-mode="image"] .workspace .themed-select .trigger:hover {
+  background: var(--wallpaper-selected);
+}
+
 .titlebar {
   grid-column: 1 / -1;
   display: grid;
