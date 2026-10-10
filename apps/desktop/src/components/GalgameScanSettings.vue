@@ -7,7 +7,7 @@ import { FolderOpen, Search, Square } from "@lucide/vue";
 import { locale, t } from "../services/i18n";
 import { appSettings } from "../services/settings";
 import { archiveRepository } from "../services/repository";
-import { alreadyManaged } from "../services/scanSources";
+import { createManagedSourceIndex } from "../services/managedSourceIndex";
 import { galgameError, galgameKey, importGalgameSelection, type GalgameProgress, type GalgameScanResult, type GalgameSource } from "../services/galgameScan";
 import type { ArchiveRecord } from "../domain";
 
@@ -29,9 +29,13 @@ const progress = ref<GalgameProgress>({ taskId: "", checkedDirectories: 0, found
 const initialSnapshot = ref(appSettings.createInitialSnapshot);
 const busy = computed(() => loading.value || scanning.value || importing.value);
 const visible = computed(() => result.value?.games.filter(game => `${game.name} ${game.installPath}`.toLowerCase().includes(search.value.toLowerCase())) || []);
-const managed = (source: GalgameSource) => alreadyManaged(source, archives.value);
+const managedIndex = computed(() => createManagedSourceIndex(archives.value));
+const managed = (source: GalgameSource) => managedIndex.value.has(source);
+const selectedSet = computed(() => new Set(selected.value));
 const available = computed(() => visible.value.flatMap(game => game.sources.filter(source => !managed(source)).map(source => galgameKey(game, source))));
-const count = computed(() => result.value?.games.filter(game => game.sources.some(source => selected.value.includes(galgameKey(game, source)) && !managed(source))).length || 0);
+const availableSet = computed(() => new Set(available.value));
+const allSelected = computed(() => available.value.length > 0 && available.value.every(key => selectedSet.value.has(key)));
+const count = computed(() => result.value?.games.filter(game => game.sources.some(source => selectedSet.value.has(galgameKey(game, source)) && !managed(source))).length || 0);
 let unlisten: UnlistenFn | undefined;
 let disposed = false;
 
@@ -73,7 +77,7 @@ async function cancel() {
   try { await invoke("cancel_galgame_scan", { taskId: taskId.value }); }
   catch (e) { error.value = galgameError(e); cancelling.value = false; }
 }
-function selectAll() { selected.value = available.value.every(key => selected.value.includes(key)) ? selected.value.filter(key => !available.value.includes(key)) : [...new Set([...selected.value, ...available.value])]; }
+function selectAll() { selected.value = allSelected.value ? selected.value.filter(key => !availableSet.value.has(key)) : [...new Set([...selected.value, ...available.value])]; }
 async function importSelected() {
   importing.value = true; emit("busy", true); error.value = ""; message.value = "";
   try {
@@ -107,7 +111,7 @@ const evidenceLabel = (evidence: string) => t(evidence === "engine" ? "引擎规
       <p class="result-root">{{ t('结果所属目录：{path}', { path: result.rootPath }) }}</p>
       <p class="summary">{{ t('识别 {games} 个游戏，{saves} 个找到存档位置。', { games: result.games.length, saves: result.games.filter(game => game.sources.length).length }) }}</p>
       <details v-if="result.warnings.length"><summary>{{ t('扫描提示（{count}）', { count: result.warnings.length }) }}</summary><p v-for="(warning, index) in result.warnings" :key="index">{{ warning }}</p></details>
-      <div class="selection-bar"><input v-model="search" type="search" :aria-label="t('搜索已扫描的游戏')" :placeholder="t('搜索游戏名称或安装目录')" /><button :disabled="busy || !available.length" @click="selectAll">{{ available.length && available.every(key => selected.includes(key)) ? t('取消全选') : t('全选可添加项') }}</button></div>
+      <div class="selection-bar"><input v-model="search" type="search" :aria-label="t('搜索已扫描的游戏')" :placeholder="t('搜索游戏名称或安装目录')" /><button :disabled="busy || !available.length" @click="selectAll">{{ allSelected ? t('取消全选') : t('全选可添加项') }}</button></div>
       <div class="game-list">
         <article v-for="game in visible" :key="game.installPath">
           <h4>{{ game.name }} <span class="engine">{{ game.engine === 'Generic' ? t('通用识别') : game.engine }}</span></h4>

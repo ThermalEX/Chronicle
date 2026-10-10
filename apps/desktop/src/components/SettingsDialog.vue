@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { t, locale, setLocale } from "../services/i18n";
-import { BellRing, ClipboardCopy, FolderOpen, HardDrive, Info, Keyboard, Monitor, RefreshCw, RotateCcw, Settings2, Trash2, Undo2, X } from "@lucide/vue";
+import { BellRing, ClipboardCopy, FolderOpen, HardDrive, Info, Keyboard, Monitor, Palette, RefreshCw, RotateCcw, Settings2, Trash2, Undo2, X } from "@lucide/vue";
 import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { appSettings, defaultAppSettings, saveAppSettings, type AppSettings, type CloseBehavior, type UpdateChannel } from "../services/settings";
+import { emptySettingsChanges, settingsChanges, type SettingsChanges } from "../services/settingsChanges";
 import { deviceRepository, type DeviceIdentity } from "../services/devices";
-import { applyAppearance, type ColorMode, type ColorTheme } from "../services/appearance";
+
 import { archiveRepository } from "../services/repository";
 import { createBackdropDismissal } from "../services/dialogDismissal";
 import { diagnosticsRepository, type DiagnosticEntry } from "../services/diagnostics";
@@ -14,32 +15,33 @@ import type { ArchiveRecord, RecycleItem } from "../domain";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import ShortcutRecorder from "./ShortcutRecorder.vue";
 import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
-import appIcon from "../assets/icon.png";
+
+import { currentAppIcon as appIcon } from "../services/localIcon";
 import DeviceSettings from "./DeviceSettings.vue";
 import SnapshotRecovery from "./SnapshotRecovery.vue";
 import { appMetadata } from "../services/appMetadata";
-import { applyWallpaper, currentWallpaper, previewLocalWallpaper, saveLocalWallpaper, wallpaperWarningLabel, type WallpaperSaveRequest, type WallpaperState } from "../services/wallpaper";
+import { stopSoundPreview } from "../services/themeSounds";
+import PersonalizationSettings from "./PersonalizationSettings.vue";
+import { applyPersonalizationRuntime, createPersonalizationDraft, savedPersonalization, savePersonalization, selectedTheme, validatePersonalizationDraft } from "../services/personalization";
 
 const props = withDefaults(defineProps<{ updateChecking?: boolean; initialSection?: "software" | "device" }>(), { updateChecking: false, initialSection: "software" });
-const emit = defineEmits<{ close: []; saved: []; changed: []; "restart-tutorial": []; "check-update": [channel: UpdateChannel]; "backup-health": []; "wallpaper-preview": [active: boolean] }>();
-const activeSection = ref<"software" | "device" | "notifications" | "backup" | "recycle" | "hotkeys" | "about">(props.initialSection);
+const emit = defineEmits<{ close: []; saved: [changes?: SettingsChanges]; changed: [changes?: SettingsChanges]; "restart-tutorial": []; "check-update": [channel: UpdateChannel]; "backup-health": []; "wallpaper-preview": [active: boolean] }>();
+const activeSection = ref<"software" | "personalization" | "device" | "notifications" | "backup" | "recycle" | "hotkeys" | "about">(props.initialSection);
+const visitedSections = reactive(new Set<string>());
 const closeButton = ref<HTMLButtonElement>();
 const draft = reactive<AppSettings>({ ...appSettings });
 const saving = ref(false);
 const saveError = ref("");
 const savedDraft = ref<AppSettings>({ ...appSettings });
-const savedWallpaper = ref<WallpaperState>({ ...currentWallpaper.value });
-const wallpaperDraft = reactive<WallpaperSaveRequest>({
-  mode: savedWallpaper.value.mode,
-  transparency: savedWallpaper.value.transparency,
-  blurPx: savedWallpaper.value.blurPx,
-  removeImage: false,
-});
-const wallpaperPreviewUrl = ref(savedWallpaper.value.imageDataUrl ?? "");
-const wallpaperError = ref("");
+const personalizationDraft = ref(createPersonalizationDraft());
+const savedPersonalizationDraft = ref(JSON.stringify(personalizationDraft.value));
+const personalizationEditor = ref<InstanceType<typeof PersonalizationSettings>>();
+const previewTheme = computed(() => personalizationDraft.value.mode === "custom" ? selectedTheme(personalizationDraft.value) : undefined);
 const wallpaperPreviewOpen = ref(false);
-const wallpaperPreviewButton = ref<HTMLButtonElement>();
 const wallpaperReturnButton = ref<HTMLButtonElement>();
+const themeBusy = ref(false);
+const personalizationWarnings = ref<string[]>([]);
+let dialogDismissed = false;
 const localDevice = ref<DeviceIdentity>();
 const deviceName = ref("");
 const closeConfirmOpen = ref(false);
@@ -73,22 +75,9 @@ const updateChannelOptions = computed<ThemedSelectOption[]>(() => [
   { value: "stable", label: t('正式版') },
   { value: "beta", label: t('测试版（含正式版）') },
 ]);
-const colorThemeOptions = computed<ThemedSelectOption[]>(() => [
-  { value: "teal", label: t('青绿') },
-  { value: "indigo", label: t('靛蓝') },
-  { value: "violet", label: t('紫罗兰') },
-  { value: "amber", label: t('琥珀') },
-  { value: "rose", label: t('玫红') },
-  { value: "gray", label: t('灰色') },
-]);
-const colorModeOptions = computed<ThemedSelectOption[]>(() => [
-  { value: "light", label: t('日间模式') },
-  { value: "dark", label: t('夜间模式') },
-  { value: "system", label: t('跟随系统') },
-]);
-
 const sections = computed(() => [
   { id: "software" as const, label: t('软件'), icon: Settings2 },
+  { id: "personalization" as const, label: t('个性化'), icon: Palette },
   { id: "device" as const, label: t('设备'), icon: Monitor },
   { id: "notifications" as const, label: t('通知与错误'), icon: BellRing },
   { id: "backup" as const, label: t('存储与备份'), icon: HardDrive },
@@ -104,11 +93,11 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 }
 
-async function loadDiagnostics(): Promise<void> {
+async function loadDiagnostics(): Promise<boolean> {
   diagnosticsBusy.value = true;
   diagnosticsError.value = "";
-  try { diagnostics.value = await diagnosticsRepository.list(); }
-  catch (error) { diagnosticsError.value = error instanceof Error ? error.message : String(error); }
+  try { diagnostics.value = await diagnosticsRepository.list(); return true; }
+  catch (error) { diagnosticsError.value = error instanceof Error ? error.message : String(error); return false; }
   finally { diagnosticsBusy.value = false; }
 }
 
@@ -128,11 +117,11 @@ async function clearDiagnostics(): Promise<void> {
   finally { diagnosticsBusy.value = false; }
 }
 
-async function loadRecycleItems(): Promise<void> {
+async function loadRecycleItems(): Promise<boolean> {
   recycleBusy.value = true;
   recycleError.value = "";
-  try { recycleItems.value = await archiveRepository.listRecycleItems(); }
-  catch (error) { recycleError.value = error instanceof Error ? error.message : String(error); }
+  try { recycleItems.value = await archiveRepository.listRecycleItems(); return true; }
+  catch (error) { recycleError.value = error instanceof Error ? error.message : String(error); return false; }
   finally { recycleBusy.value = false; }
 }
 
@@ -159,21 +148,19 @@ function emptyRecycleBin(): void {
 }
 
 const hasChanges = computed(() => JSON.stringify(draft) !== JSON.stringify(savedDraft.value)
-  || wallpaperDraft.mode !== savedWallpaper.value.mode
-  || wallpaperDraft.transparency !== savedWallpaper.value.transparency
-  || wallpaperDraft.blurPx !== savedWallpaper.value.blurPx
-  || !!wallpaperDraft.sourcePath || wallpaperDraft.removeImage
+  || JSON.stringify(personalizationDraft.value) !== savedPersonalizationDraft.value
   || (localDevice.value !== undefined && deviceName.value.trim() !== localDevice.value.name)
   || automationArchives.value.some((archive) => {
     const saved = savedAutomation.value.get(archive.id);
     return saved && (archive.autoBackupEnabled !== saved.backup || archive.automaticUploadEnabled !== saved.upload);
   }));
 
-async function loadDevice(): Promise<void> {
+async function loadDevice(): Promise<boolean> {
   try {
     localDevice.value = await deviceRepository.read();
     deviceName.value = localDevice.value.name;
-  } catch (error) { saveError.value = error instanceof Error ? error.message : String(error); }
+    return true;
+  } catch (error) { saveError.value = error instanceof Error ? error.message : String(error); return false; }
 }
 
 function identityReset(device: DeviceIdentity): void {
@@ -182,61 +169,35 @@ function identityReset(device: DeviceIdentity): void {
 }
 
 function finishClose(): void {
+  dialogDismissed = true;
+  stopSoundPreview();
   setLocale(appSettings.language);
   if (pendingClose.value === "restart-tutorial") emit("restart-tutorial");
   else emit("close");
 }
 
 function requestClose(action: "close" | "restart-tutorial" = "close"): void {
-  if (saving.value) return;
+  if (saving.value || themeBusy.value) return;
   pendingClose.value = action;
   if (hasChanges.value) closeConfirmOpen.value = true;
   else finishClose();
 }
 
 function discardClose(): void {
-  if (!saving.value) { applyWallpaper(savedWallpaper.value); finishClose(); }
-}
-
-function previewWallpaperDraft(): void {
-  applyWallpaper({
-    ...savedWallpaper.value,
-    mode: wallpaperDraft.mode,
-    transparency: wallpaperDraft.transparency,
-    blurPx: wallpaperDraft.blurPx,
-    imageDataUrl: wallpaperDraft.removeImage ? null : wallpaperPreviewUrl.value,
-  });
+  if (!saving.value && !themeBusy.value) { void applyPersonalizationRuntime(savedPersonalization.value.draft); finishClose(); }
 }
 
 function showWallpaperPreview(active: boolean): void {
   wallpaperPreviewOpen.value = active;
-  applyAppearance(active ? draft : appSettings);
   emit("wallpaper-preview", active);
-  void nextTick(() => (active ? wallpaperReturnButton.value : wallpaperPreviewButton.value)?.focus());
+  void nextTick(() => active ? wallpaperReturnButton.value?.focus() : document.querySelector<HTMLButtonElement>(".personalization-preview button")?.focus());
 }
 
-async function chooseWallpaper(): Promise<void> {
-  if (!isTauri()) { wallpaperError.value = t("请在桌面版选择壁纸图片"); return; }
-  const selected = await open({ multiple: false, filters: [{ name: t("图片"), extensions: ["png", "jpg", "jpeg", "webp"] }] });
-  if (typeof selected !== "string") return;
-  try {
-    const url = await previewLocalWallpaper(selected);
-    wallpaperDraft.sourcePath = selected;
-    wallpaperDraft.removeImage = false;
-    wallpaperDraft.mode = "image";
-    wallpaperPreviewUrl.value = url;
-    wallpaperError.value = "";
-    previewWallpaperDraft();
-  } catch (error) { wallpaperError.value = error instanceof Error ? error.message : String(error); }
+async function acceptFileDrop(paths: string[], position: {x: number; y: number}): Promise<boolean> {
+  if (activeSection.value !== "personalization" || wallpaperPreviewOpen.value || saving.value || closeConfirmOpen.value || confirmAction.value) return false;
+  return await personalizationEditor.value?.acceptFileDrop(paths, position) ?? false;
 }
-
-function removeWallpaper(): void {
-  wallpaperDraft.removeImage = true;
-  wallpaperDraft.sourcePath = undefined;
-  wallpaperDraft.mode = "color";
-  wallpaperPreviewUrl.value = "";
-  previewWallpaperDraft();
-}
+defineExpose({ acceptFileDrop });
 
 function continueEditing(): void {
   closeConfirmOpen.value = false;
@@ -251,14 +212,10 @@ function onEscape(event: KeyboardEvent): void {
 }
 
 async function save(): Promise<void> {
-  if (saving.value) return;
+  if (saving.value || themeBusy.value) return;
   saveError.value = "";
-  wallpaperError.value = "";
-  if (wallpaperDraft.mode === "image" && !wallpaperPreviewUrl.value) {
-    wallpaperError.value = t("请先选择有效的壁纸图片");
-    saveError.value = wallpaperError.value;
-    return;
-  }
+  const errors = validatePersonalizationDraft(personalizationDraft.value);
+  if (errors.length) { saveError.value = errors[0]; return; }
   if (localDevice.value && (!deviceName.value.trim() || [...deviceName.value.trim()].length > 64)) {
     saveError.value = t('设备名称须为 1–64 个字符');
     return;
@@ -269,36 +226,45 @@ async function save(): Promise<void> {
   draft.autoBackupDelaySeconds = Math.max(1, Math.min(300, Number(draft.autoBackupDelaySeconds) || 5));
   saving.value = true;
   let committed = false;
+  const changes = emptySettingsChanges();
   try {
-    await saveAppSettings({ ...draft });
-    committed = true;
-    savedDraft.value = { ...appSettings };
-    if (wallpaperDraft.mode !== savedWallpaper.value.mode
-      || wallpaperDraft.transparency !== savedWallpaper.value.transparency
-      || wallpaperDraft.blurPx !== savedWallpaper.value.blurPx
-      || wallpaperDraft.sourcePath || wallpaperDraft.removeImage) {
-      await saveLocalWallpaper({ ...wallpaperDraft });
-      savedWallpaper.value = { ...currentWallpaper.value };
-      wallpaperDraft.sourcePath = undefined;
-      wallpaperDraft.removeImage = false;
+    if (JSON.stringify(draft) !== JSON.stringify(savedDraft.value)) {
+      const appChanges = settingsChanges(savedDraft.value, draft);
+      await saveAppSettings({ ...draft });
+      Object.assign(changes, appChanges);
+      committed = true;
+      savedDraft.value = { ...appSettings };
     }
+    if (JSON.stringify(personalizationDraft.value) !== savedPersonalizationDraft.value) {
+      await savePersonalization(personalizationDraft.value);
+      changes.appearance = true;
+      committed = true;
+      personalizationDraft.value = createPersonalizationDraft();
+      savedPersonalizationDraft.value = JSON.stringify(personalizationDraft.value);
+    }
+    await applyPersonalizationRuntime(savedPersonalization.value.draft);
     if (localDevice.value && deviceName.value.trim() !== localDevice.value.name) {
       localDevice.value = await deviceRepository.rename(deviceName.value);
       deviceName.value = localDevice.value.name;
+      changes.device = true;
+      committed = true;
     }
     for (const archive of automationArchives.value) {
       const saved = savedAutomation.value.get(archive.id);
       if (!saved || (archive.autoBackupEnabled === saved.backup && archive.automaticUploadEnabled === saved.upload)) continue;
       await archiveRepository.setArchiveAutomation(archive.id, archive.autoBackupEnabled, archive.automaticUploadEnabled);
       savedAutomation.value.set(archive.id, { backup: archive.autoBackupEnabled, upload: archive.automaticUploadEnabled });
+      changes.automation = true;
+      changes.library = true;
+      committed = true;
     }
-    emit("saved");
+    emit("saved", changes);
     finishClose();
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     saveError.value = committed ? `${t('部分设置已保存，剩余更改尚未保存，可重试。')} ${reason}` : reason;
     setLocale(draft.language);
-    if (committed) emit("changed");
+    if (committed) emit("changed", changes);
   } finally {
     saving.value = false;
   }
@@ -317,14 +283,6 @@ function updateUpdateChannel(value: string | null): void {
   if (value === "stable" || value === "beta") draft.updateChannel = value;
 }
 
-function updateColorTheme(value: string | null): void {
-  if (value) draft.colorTheme = value as ColorTheme;
-}
-
-function updateColorMode(value: string | null): void {
-  if (value) draft.colorMode = value as ColorMode;
-}
-
 function updateLanguage(value: string | null): void {
   if ((value !== "zh-CN" && value !== "en") || saving.value) return;
   draft.language = value;
@@ -334,8 +292,9 @@ function updateLanguage(value: string | null): void {
 function reset(): void {
   Object.assign(draft, defaultAppSettings);
   setLocale(draft.language);
-  Object.assign(wallpaperDraft, { mode: "color", transparency: 28, blurPx: 12, sourcePath: undefined, removeImage: false });
-  previewWallpaperDraft();
+  personalizationDraft.value.mode = "solid";
+  personalizationDraft.value.solid = { colorTheme: defaultAppSettings.colorTheme, customAccent: defaultAppSettings.customAccent, colorMode: defaultAppSettings.colorMode };
+  stopSoundPreview();
 }
 
 async function chooseRecycleBinPath(): Promise<void> {
@@ -362,28 +321,35 @@ async function toggleAllAutomation(kind: "backup" | "upload"): Promise<void> {
   }
 }
 
-async function loadAutomation(): Promise<void> {
+async function loadAutomation(): Promise<boolean> {
   automationBusy.value = true;
   try {
     automationArchives.value = await archiveRepository.listArchives();
     savedAutomation.value = new Map(automationArchives.value.map((archive) => [archive.id, { backup: archive.autoBackupEnabled, upload: archive.automaticUploadEnabled }]));
-  } catch (error) { saveError.value = error instanceof Error ? error.message : String(error); }
+    return true;
+  } catch (error) { saveError.value = error instanceof Error ? error.message : String(error); return false; }
   finally { automationBusy.value = false; }
 }
 
-onMounted(() => {
-  closeButton.value?.focus();
-  void loadRecycleItems();
-  void loadDiagnostics();
-  void loadDevice();
-  void loadAutomation();
-  void archiveRepository.getRepositoryInfo().then((info) => { repositoryPath.value = info.path; });
-});
-onBeforeUnmount(() => { setLocale(appSettings.language); applyAppearance(appSettings); emit("wallpaper-preview", false); });
+async function loadSection(section: string): Promise<void> {
+  if (visitedSections.has(section)) return;
+  visitedSections.add(section);
+  let loaded = true;
+  if (section === "device") loaded = await loadDevice();
+  else if (section === "notifications") loaded = await loadDiagnostics();
+  else if (section === "backup") loaded = await loadAutomation();
+  else if (section === "recycle") {
+    const results = await Promise.all([loadRecycleItems(), archiveRepository.getRepositoryInfo().then(info => {repositoryPath.value = info.path; return true;}).catch(error => {recycleLocationError.value = String(error); return false;})]);
+    loaded = results.every(Boolean);
+  }
+  if (!loaded) visitedSections.delete(section);
+}
+onMounted(() => { closeButton.value?.focus(); void loadSection(activeSection.value); });
+onBeforeUnmount(() => { dialogDismissed = true; stopSoundPreview(); setLocale(appSettings.language); void applyPersonalizationRuntime(savedPersonalization.value.draft); emit("wallpaper-preview", false); });
 
-watch(activeSection, (section) => { if (section === "notifications") void loadDiagnostics(); });
+watch(activeSection, (section) => { stopSoundPreview(); void loadSection(section); });
 watch(closeConfirmOpen, (open) => { if (!open) void nextTick(() => closeButton.value?.focus()); });
-watch(() => [wallpaperDraft.mode, wallpaperDraft.transparency, wallpaperDraft.blurPx], previewWallpaperDraft);
+watch(personalizationDraft, (value) => { if (!dialogDismissed) void applyPersonalizationRuntime(value, true); }, {deep: true});
 </script>
 
 <template>
@@ -403,28 +369,23 @@ watch(() => [wallpaperDraft.mode, wallpaperDraft.transparency, wallpaperDraft.bl
 
         <main :inert="saving">
           <p v-if="saveError" class="recycle-error" role="alert">{{ saveError }}</p>
+          <div v-if="activeSection === 'personalization' || visitedSections.has('personalization')" v-show="activeSection === 'personalization'">
+            <p v-for="(warning,index) in personalizationWarnings" :key="index" class="recycle-error" role="alert">{{ warning }}</p>
+            <PersonalizationSettings ref="personalizationEditor" v-model="personalizationDraft" :busy="saving" @busy="themeBusy = $event" @warning="personalizationWarnings.push($event)" @preview="showWallpaperPreview(true)" />
+          </div>
           <section v-if="activeSection === 'software'" aria-labelledby="software-title">
             <div class="section-heading"><h3 id="software-title">{{ t('软件') }}</h3><p>{{ t('控制 Chronicle 的启动、关闭和通知行为。') }}</p></div>
-            <div class="setting-group">
+            <section class="setting-group software-card" aria-labelledby="application-card-title">
+              <h4 id="application-card-title" class="setting-card-title">{{ t('应用') }}</h4>
               <label class="setting-row select-row"><span><b>{{ t('界面语言') }}</b><small>{{ t('选择后立即预览，点击保存设置后生效。') }}</small></span><ThemedSelect :model-value="draft.language" :options="languageOptions" :disabled="saving" :label="t('界面语言')" @update:model-value="updateLanguage" /></label>
-              <div class="setting-row wallpaper-setting"><span><b>{{ t('背景类型') }}</b><small>{{ t('壁纸仅保存在本机，不会同步到云端。') }}</small></span><div class="wallpaper-options"><label><input v-model="wallpaperDraft.mode" type="radio" value="color" />{{ t('主题纯色') }}</label><label><input v-model="wallpaperDraft.mode" type="radio" value="image" />{{ t('自定义图片') }}</label></div></div>
-              <p v-if="savedWallpaper.warning" class="recycle-error" role="alert">{{ wallpaperWarningLabel(savedWallpaper.warning) }}</p>
-              <div v-if="wallpaperDraft.mode === 'image' || wallpaperPreviewUrl" class="wallpaper-controls">
-                <div class="wallpaper-buttons"><button type="button" @click="chooseWallpaper">{{ t('选择图片') }}</button><button ref="wallpaperPreviewButton" type="button" :disabled="!wallpaperPreviewUrl" @click="showWallpaperPreview(true)"><Monitor :size="14" />{{ t('预览软件界面') }}</button><button v-if="wallpaperPreviewUrl" type="button" @click="removeWallpaper">{{ t('移除图片') }}</button></div>
-                <small>{{ t('在实际软件界面中预览并调整背景效果。') }}</small>
-                <p v-if="wallpaperError" class="recycle-error" role="alert">{{ wallpaperError }}</p>
-              </div>
-              <div v-if="wallpaperDraft.mode === 'image'" class="wallpaper-sliders">
-                <label>{{ t('面板透明度') }} <output>{{ wallpaperDraft.transparency }}%</output><input v-model.number="wallpaperDraft.transparency" type="range" min="0" max="45" :aria-label="t('面板透明度')" /></label>
-                <label>{{ t('磨砂强度') }} <output>{{ wallpaperDraft.blurPx }} px</output><input v-model.number="wallpaperDraft.blurPx" type="range" min="0" max="24" :aria-label="t('磨砂强度')" /></label>
-              </div>
-              <label class="setting-row select-row"><span><b>{{ t('配色主题') }}</b><small>{{ t('为 Chronicle 选择一组强调色。') }}</small></span><ThemedSelect :model-value="draft.colorTheme" :options="colorThemeOptions" :label="t('配色主题')" @update:model-value="updateColorTheme" /></label>
-              <label class="setting-row select-row"><span><b>{{ t('显示模式') }}</b><small>{{ t('跟随系统会自动切换明暗；右下角按钮可切换为固定模式。') }}</small></span><ThemedSelect :model-value="draft.colorMode" :options="colorModeOptions" :label="t('显示模式')" @update:model-value="updateColorMode" /></label>
+            </section>
+            <section class="setting-group software-card" aria-labelledby="behavior-card-title">
+              <h4 id="behavior-card-title" class="setting-card-title">{{ t('启动与行为') }}</h4>
               <label class="setting-row"><span><b>{{ t('随系统启动') }}</b><small>{{ t('登录 Windows 后自动启动 Chronicle') }}</small></span><input v-model="draft.launchAtStartup" type="checkbox" role="switch" /></label>
               <label class="setting-row"><span><b>{{ t('启动时检测云端') }}</b><small>{{ t('后台验证全部同步源的读写、列举与清理能力') }}</small></span><input v-model="draft.checkCloudOnLaunch" type="checkbox" role="switch" /></label>
               <label class="setting-row"><span><b>{{ t('桌面通知') }}</b><small>{{ t('备份、同步和恢复完成后显示通知') }}</small></span><input v-model="draft.notifications" type="checkbox" role="switch" /></label>
               <label class="setting-row select-row"><span><b>{{ t('关闭主窗口时') }}</b><small>{{ t('决定关闭按钮的默认行为') }}</small></span><ThemedSelect :model-value="draft.closeBehavior" :options="closeBehaviorOptions" :label="t('关闭主窗口时')" @update:model-value="updateCloseBehavior" /></label>
-            </div>
+            </section>
           </section>
 
           <DeviceSettings v-else-if="activeSection === 'device'" :device="localDevice" v-model:name="deviceName" :saving="saving" @identity-reset="identityReset" />
@@ -475,7 +436,7 @@ watch(() => [wallpaperDraft.mode, wallpaperDraft.transparency, wallpaperDraft.bl
             </div>
           </section>
 
-          <section v-else aria-labelledby="about-title">
+          <section v-else-if="activeSection === 'about'" aria-labelledby="about-title">
             <div class="section-heading"><h3 id="about-title">{{ t('关于') }}</h3><p>{{ t('本地云端通用文件快照管理器。') }}</p></div>
             <div class="about-card"><img class="about-logo" :src="appIcon" :alt="t('Chronicle 图标')" /><div><h4>{{ appMetadata.name }}</h4><p>{{ t('版本') }} {{ appMetadata.version }}</p><p>{{ t('作者') }} {{ appMetadata.author }}</p><a class="about-repository-link" href="https://github.com/ThermalEX/Chronicle" target="_blank" rel="noreferrer">{{ t('查看 GitHub 仓库') }}</a></div><button class="about-tutorial-button" type="button" @click="requestClose('restart-tutorial')"><RotateCcw :size="15" />{{ t('重新开始教程') }}</button></div>
             <dl class="about-list"><div><dt>{{ t('存储引擎') }}</dt><dd>Rust · 7z · SHA-256</dd></div><div><dt>{{ t('桌面框架') }}</dt><dd>Tauri 2 · Vue 3</dd></div><div><dt>{{ t('许可证') }}</dt><dd>GPL-3.0</dd></div></dl>
@@ -488,7 +449,7 @@ watch(() => [wallpaperDraft.mode, wallpaperDraft.transparency, wallpaperDraft.bl
         </main>
       </div>
 
-      <footer><button class="reset-button" :disabled="saving" @click="reset"><RotateCcw :size="15" />{{ t('恢复默认设置') }}</button><div><button class="cancel-button" :disabled="saving" @click="requestClose()">{{ t('取消') }}</button><button class="save-button" :disabled="saving" @click="save">{{ saving ? t('保存中') : t('保存设置') }}</button></div></footer>
+      <footer><button class="reset-button" :disabled="saving || themeBusy" @click="reset"><RotateCcw :size="15" />{{ t('恢复默认设置') }}</button><div><button class="cancel-button" :disabled="saving" @click="requestClose()">{{ t('取消') }}</button><button class="save-button" :disabled="saving || themeBusy" @click="save">{{ saving ? t('保存中') : t('保存设置') }}</button></div></footer>
     </section>
     <ConfirmDialog v-if="confirmAction" :title="confirmAction.title" :message="confirmAction.message" :confirm-label="t('确定')" danger @cancel="confirmAction = undefined" @confirm="runRecycleAction" />
     <ConfirmDialog v-if="closeConfirmOpen" :title="t('保存设置？')" :message="t('设置已更改，是否保存后关闭？')" :confirm-label="t('保存并关闭')" :cancel-label="t('继续编辑')" :busy="saving" @cancel="continueEditing" @confirm="save">
@@ -497,11 +458,11 @@ watch(() => [wallpaperDraft.mode, wallpaperDraft.transparency, wallpaperDraft.bl
     </ConfirmDialog>
   </div>
   <Teleport to="body">
-    <div v-if="wallpaperPreviewOpen" class="wallpaper-live-preview" role="dialog" aria-modal="true" :aria-label="t('壁纸预览')" @keydown.esc.stop.prevent="showWallpaperPreview(false)">
+    <div v-if="wallpaperPreviewOpen && previewTheme" class="wallpaper-live-preview" role="dialog" aria-modal="true" :aria-label="t('壁纸预览')" @keydown.esc.stop.prevent="showWallpaperPreview(false)">
       <div class="wallpaper-preview-toolbar">
         <span>{{ t('壁纸预览') }}</span>
-        <label>{{ t('面板透明度') }} <output>{{ wallpaperDraft.transparency }}%</output><input v-model.number="wallpaperDraft.transparency" type="range" min="0" max="45" :aria-label="t('面板透明度')" /></label>
-        <label>{{ t('磨砂强度') }} <output>{{ wallpaperDraft.blurPx }} px</output><input v-model.number="wallpaperDraft.blurPx" type="range" min="0" max="24" :aria-label="t('磨砂强度')" /></label>
+        <label>{{ t('面板透明度') }} <output>{{ previewTheme!.transparency }}%</output><input v-model.number="previewTheme!.transparency" type="range" min="0" max="45" :aria-label="t('面板透明度')" /></label>
+        <label>{{ t('磨砂强度') }} <output>{{ previewTheme!.blurPx }} px</output><input v-model.number="previewTheme!.blurPx" type="range" min="0" max="24" :aria-label="t('磨砂强度')" /></label>
         <button ref="wallpaperReturnButton" type="button" @click="showWallpaperPreview(false)"><Undo2 :size="15" />{{ t('返回设置') }}</button>
       </div>
     </div>
@@ -509,6 +470,7 @@ watch(() => [wallpaperDraft.mode, wallpaperDraft.transparency, wallpaperDraft.bl
 </template>
 
 <style scoped>
+.custom-accent > div { display: flex; gap: 8px; align-items: center; }.custom-accent input[type="color"] { width: 40px; height: 34px; padding: 3px; background: var(--field); border: 1px solid var(--border-2); border-radius: 6px; cursor: pointer; }.custom-accent input[type="text"] { width: 95px; min-height: 34px; padding: 6px 8px; color: var(--text); background: var(--field); border: 1px solid var(--border-2); border-radius: 6px; }.app-icon-setting img { width: 38px; height: 38px; object-fit: contain; }.app-icon-setting .wallpaper-buttons { align-items: center; }
 .dialog-backdrop { position: fixed; z-index: 40; inset: 0; display: grid; place-items: center; padding: 32px; background: #18181b99; backdrop-filter: blur(3px); }
 .settings-dialog { display: grid; grid-template-rows: 70px minmax(0, 1fr) 66px; width: min(860px, calc(100vw - 64px)); height: min(650px, calc(100vh - 64px)); overflow: hidden; background: var(--surface); border: 1px solid var(--border-2); border-radius: 13px; box-shadow: 0 24px 80px var(--shadow-color); }
 header, footer { display: flex; align-items: center; justify-content: space-between; padding: 0 22px; }
@@ -527,10 +489,20 @@ main { min-width: 0; overflow-y: auto; padding: 28px 32px 36px; }
 .section-heading h3 { font-size: 18px; }
 .section-heading p { margin: 6px 0 0; color: var(--text-3); font-size: 11px; }
 .setting-group { overflow: hidden; border: 1px solid var(--border); border-radius: 10px; }
+.software-card + .software-card { margin-top: 18px; }
+.setting-card-title { margin: 0; padding: 12px 16px; color: var(--text-2); background: var(--subtle); border-bottom: 1px solid var(--border); font-size: 12px; font-weight: 700; }
+.theme-pack-setting > .wallpaper-buttons { flex: 0 0 auto; }
+.theme-feedback { display: flex; align-items: center; gap: 7px; margin: 0; padding: 10px 16px; color: var(--text-2); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.wallpaper-buttons button:disabled { color: var(--text-3); cursor: default; opacity: .65; }
 .setting-row { display: flex; align-items: center; justify-content: space-between; min-height: 70px; gap: 28px; padding: 12px 16px; background: var(--surface); }
 .about-update-group { margin-top: 16px; }.about-update-action button, .about-tutorial-button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; min-height: 34px; padding: 0 12px; color: var(--primary-dark); background: var(--primary-soft); border: 1px solid var(--border-2); border-radius: 7px; font-size: 11px; font-weight: 650; }.about-update-action button:hover:not(:disabled), .about-tutorial-button:hover { background: var(--hover); }.about-update-action button:disabled { cursor: default; opacity: .62; }.spinning { animation: spin .85s linear infinite; }@keyframes spin { to { transform: rotate(360deg); } }
 .setting-row + .setting-row { border-top: 1px solid var(--border); }
 .setting-row > span { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
+.sound-setting { flex-wrap: wrap; gap: 12px; }
+.sound-setting > span { flex: 1 1 180px; }
+.sound-setting > .wallpaper-buttons { flex: 0 1 auto; }
+.sound-filename { overflow-wrap: anywhere; }
+.sound-volume + .sound-setting { border-top: 1px solid var(--border); }
 .setting-row b { font-size: 12px; font-weight: 650; }
 .setting-row small { color: var(--text-3); font-size: 10px; line-height: 1.4; }
 .select-row :deep(.themed-select), .setting-row input[type="text"] { min-width: 152px; }

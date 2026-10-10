@@ -6,6 +6,15 @@ vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => false }));
 afterEach(() => { resetAppSettings(); vi.unstubAllGlobals(); });
 
 describe("saved application language", () => {
+  it("restores a custom accent after restart and preserves it on a mode toggle", async () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal("localStorage", { getItem: (k: string) => values.get(k) ?? null, setItem: (k: string, v: string) => values.set(k, v) });
+    await saveAppSettings({ ...appSettings, colorTheme: "custom", customAccent: "#b83e49", colorMode: "dark" });
+    resetAppSettings();
+    await initializeSettings();
+    expect(appSettings.colorTheme).toBe("custom");
+    expect(appSettings.customAccent).toBe("#b83e49");
+  });
   it("keeps old settings Chinese and rejects unsupported locale values", () => {
     expect(normalizeAppSettings({}).language).toBe("zh-CN");
     expect(normalizeAppSettings({ language: "en" }).language).toBe("en");

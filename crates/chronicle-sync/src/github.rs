@@ -84,6 +84,10 @@ pub struct GitHubClient {
 }
 
 impl GitHubClient {
+    pub(crate) fn metadata_request_policy(&self) -> RequestPolicy {
+        self.policy
+    }
+
     /// Creates an initialized private repository for the authenticated GitHub account.
     ///
     /// An initial commit makes the returned default branch immediately usable by the Git Data API.

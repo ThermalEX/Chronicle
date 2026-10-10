@@ -7,7 +7,7 @@ use std::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use image::{ImageFormat, ImageReader};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use uuid::Uuid;
 
 const MAX_IMAGE_BYTES: u64 = 15 * 1024 * 1024;
@@ -18,11 +18,11 @@ const PREFERENCES_BACKUP: &str = "preferences.json.backup";
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WallpaperSaveRequest {
-    mode: String,
-    transparency: u8,
-    blur_px: u8,
-    source_path: Option<String>,
-    remove_image: bool,
+    pub(crate) mode: String,
+    pub(crate) transparency: u8,
+    pub(crate) blur_px: u8,
+    pub(crate) source_path: Option<String>,
+    pub(crate) remove_image: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -48,11 +48,11 @@ impl Default for WallpaperPreferences {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WallpaperView {
-    mode: String,
-    transparency: u8,
-    blur_px: u8,
-    image_data_url: Option<String>,
-    warning: Option<String>,
+    pub(crate) mode: String,
+    pub(crate) transparency: u8,
+    pub(crate) blur_px: u8,
+    pub(crate) image_data_url: Option<String>,
+    pub(crate) warning: Option<String>,
 }
 
 fn wallpaper_dir(root: &Path) -> PathBuf {
@@ -85,6 +85,20 @@ fn image_bytes(path: &Path) -> Result<(Vec<u8>, &'static str, &'static str), Str
         return Err("图片必须是小于或等于 15 MiB 的文件".into());
     }
     let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    let (mime, ext) = validate_image_bytes(&bytes)?;
+    Ok((bytes, mime, ext))
+}
+
+pub(crate) fn validate_image_bytes(bytes: &[u8]) -> Result<(&'static str, &'static str), String> {
+    decode_image_bytes(bytes).map(|(_, mime, ext)| (mime, ext))
+}
+
+fn decode_image_bytes(
+    bytes: &[u8],
+) -> Result<(image::DynamicImage, &'static str, &'static str), String> {
+    if bytes.len() as u64 > MAX_IMAGE_BYTES {
+        return Err("图片必须是小于或等于 15 MiB 的文件".into());
+    }
     let reader = ImageReader::new(Cursor::new(&bytes))
         .with_guessed_format()
         .map_err(|error| error.to_string())?;
@@ -101,20 +115,88 @@ fn image_bytes(path: &Path) -> Result<(Vec<u8>, &'static str, &'static str), Str
     {
         return Err("不支持动画 WebP 图片".into());
     }
-    reader.decode().map_err(|error| error.to_string())?;
-    Ok((bytes, mime, ext))
+    let image = reader.decode().map_err(|error| error.to_string())?;
+    Ok((image, mime, ext))
+}
+
+pub(crate) fn decode_image_file(path: &Path) -> Result<image::DynamicImage, String> {
+    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() > MAX_IMAGE_BYTES {
+        return Err("图片必须是小于或等于 15 MiB 的文件".into());
+    }
+    decode_image_bytes(&fs::read(path).map_err(|error| error.to_string())?)
+        .map(|(image, _, _)| image)
 }
 
 fn data_url(bytes: &[u8], mime: &str) -> String {
     format!("data:{mime};base64,{}", STANDARD.encode(bytes))
 }
 
-fn preview_from_path(path: &Path) -> Result<String, String> {
+pub(crate) fn export_image(
+    root: &Path,
+    source: Option<&str>,
+) -> Result<(Vec<u8>, &'static str), String> {
+    let path = if let Some(source) = source {
+        PathBuf::from(source)
+    } else {
+        let name = read_preferences(root)?
+            .image_filename
+            .filter(|name| valid_filename(name))
+            .ok_or("主题图片无法读取，请重新选择图片")?;
+        wallpaper_dir(root).join(name)
+    };
+    let (bytes, _, ext) = image_bytes(&path)?;
+    Ok((bytes, ext))
+}
+
+pub(crate) fn preview_from_path(path: &Path) -> Result<String, String> {
     let (bytes, mime, _) = image_bytes(path)?;
     Ok(data_url(&bytes, mime))
 }
 
-fn load_from(root: &Path) -> Result<WallpaperView, String> {
+pub(crate) fn read_wallpaper_image(root: &Path, path: &Path) -> Result<Vec<u8>, String> {
+    let path = path.canonicalize().map_err(|error| error.to_string())?;
+    let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() > MAX_IMAGE_BYTES {
+        return Err("图片必须是小于或等于 15 MiB 的文件".into());
+    }
+    // Registered assets were validated when copied. The browser decodes them at display time.
+    // External draft images still undergo the complete import validation, never a wildcard scope.
+    let saved = root.join("personalization/preferences.json").is_file()
+        && crate::theme_library::load_from(root, &crate::theme_pack::AppearanceFields::default())
+            .is_ok_and(|state| {
+                state.draft.themes.iter().any(|theme| {
+                    theme.wallpaper_source_paths.iter().any(|source| {
+                        Path::new(source)
+                            .canonicalize()
+                            .is_ok_and(|source| source == path)
+                    })
+                })
+            });
+    let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+    if saved {
+        if !matches!(
+            image::guess_format(&bytes),
+            Ok(ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP)
+        ) {
+            return Err("仅支持 PNG、JPEG 和 WebP 图片".into());
+        }
+    } else {
+        validate_image_bytes(&bytes)?;
+    }
+    Ok(bytes)
+}
+
+#[tauri::command(async)]
+pub fn load_wallpaper_image(app: AppHandle, path: String) -> Result<tauri::ipc::Response, String> {
+    read_wallpaper_image(
+        &crate::storage_root::local_assets_root(&app)?,
+        Path::new(&path),
+    )
+    .map(tauri::ipc::Response::new)
+}
+
+pub(crate) fn load_from(root: &Path) -> Result<WallpaperView, String> {
     let (preferences, mut warning) = match read_preferences(root) {
         Ok(value) => (value, None),
         Err(_) => (
@@ -152,7 +234,7 @@ fn load_from(root: &Path) -> Result<WallpaperView, String> {
     })
 }
 
-fn write_preferences(path: &Path, preferences: &WallpaperPreferences) -> Result<(), String> {
+pub(crate) fn write_preferences<T: Serialize>(path: &Path, preferences: &T) -> Result<(), String> {
     let folder = path.parent().ok_or("设置路径缺少父目录")?;
     let temporary = folder.join(format!(".{}.tmp", Uuid::new_v4()));
     let bytes = serde_json::to_vec(preferences).map_err(|error| error.to_string())?;
@@ -179,7 +261,7 @@ fn write_preferences(path: &Path, preferences: &WallpaperPreferences) -> Result<
     Ok(())
 }
 
-fn save_to(root: &Path, request: WallpaperSaveRequest) -> Result<WallpaperView, String> {
+pub(crate) fn save_to(root: &Path, request: WallpaperSaveRequest) -> Result<WallpaperView, String> {
     if !matches!(request.mode.as_str(), "color" | "image")
         || request.transparency > 45
         || request.blur_px > 24
@@ -240,15 +322,9 @@ fn save_to(root: &Path, request: WallpaperSaveRequest) -> Result<WallpaperView, 
     load_from(root)
 }
 
-fn local_root(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_local_data_dir()
-        .map_err(|error| error.to_string())
-}
-
 #[tauri::command(async)]
 pub fn load_local_wallpaper(app: AppHandle) -> Result<WallpaperView, String> {
-    load_from(&local_root(&app)?)
+    load_from(&crate::storage_root::local_assets_root(&app)?)
 }
 
 #[tauri::command(async)]
@@ -261,7 +337,7 @@ pub fn save_local_wallpaper(
     app: AppHandle,
     request: WallpaperSaveRequest,
 ) -> Result<WallpaperView, String> {
-    save_to(&local_root(&app)?, request)
+    save_to(&crate::storage_root::local_assets_root(&app)?, request)
 }
 
 #[cfg(test)]

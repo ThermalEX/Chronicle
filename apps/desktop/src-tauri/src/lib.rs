@@ -7,13 +7,19 @@ mod dropped_paths;
 mod galgame_scan;
 mod game_exit;
 mod language;
+mod local_icon;
+mod local_sound;
 mod onboarding;
 mod process_monitor;
+mod runtime_settings;
 mod snapshot_sync;
 mod steam_scan;
 mod storage_root;
 #[cfg(test)]
 mod storage_root_tests;
+mod theme_library;
+mod theme_pack;
+mod theme_zip;
 mod update;
 mod wallpaper;
 
@@ -30,9 +36,18 @@ use tauri::{
 };
 use tauri_plugin_window_state::StateFlags;
 
+/// Packages an explicitly selected local theme or sounds.json without changing settings.
+pub fn package_local_configuration(
+    config: &std::path::Path,
+    output: &std::path::Path,
+) -> Result<(), String> {
+    theme_library::package_local_configuration(config, output)
+}
+
 pub(crate) struct AppState {
     pub repository: Arc<Mutex<LocalRepository>>,
     pub auto_backup: auto_backup::AutoBackupManager,
+    pub close_behavior: runtime_settings::CloseBehavior,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -41,6 +56,11 @@ pub(crate) struct AppState {
 /// # Panics
 /// Panics when the Tauri runtime cannot be started.
 pub fn run() {
+    let mut context = tauri::generate_context!();
+    let executable = std::env::current_exe().expect("failed to locate Chronicle executable");
+    let portable_windows =
+        storage_root::isolate_portable_webviews(&executable, context.config_mut())
+            .expect("failed to isolate portable browser profile");
     tauri::Builder::default()
         .manage(galgame_scan::ScanTasks::default())
         .manage(backup_health::HealthTasks::default())
@@ -54,7 +74,7 @@ pub fn run() {
                 .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
                 .build(),
         )
-        .setup(|app| {
+        .setup(move |app| {
             let executable = std::env::current_exe()?;
             let repository_root = storage_root::resolve_repository_root(
                 &executable,
@@ -68,12 +88,23 @@ pub fn run() {
             let saved_settings = repository.load_settings().unwrap_or_default();
             let repository = Arc::new(Mutex::new(repository));
             app.manage(AppState {
+                close_behavior: runtime_settings::CloseBehavior::new(&saved_settings),
                 auto_backup: auto_backup::AutoBackupManager::new(
                     repository.clone(),
                     app.handle().clone(),
                 ),
                 repository,
             });
+            for config in &portable_windows {
+                tauri::WebviewWindowBuilder::from_config(app, config)?
+                    .data_directory(
+                        config
+                            .data_directory
+                            .clone()
+                            .expect("portable browser profile"),
+                    )
+                    .build()?;
+            }
             let (show_label, exit_label) = language::tray_labels(&saved_settings);
             let show = MenuItem::with_id(app, "show", show_label, true, None::<&str>)?;
             let exit = MenuItem::with_id(app, "exit", exit_label, true, None::<&str>)?;
@@ -101,20 +132,8 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                let behavior = window
-                    .state::<AppState>()
-                    .repository
-                    .lock()
-                    .ok()
-                    .and_then(|repository| repository.load_settings().ok())
-                    .and_then(|settings| {
-                        settings
-                            .pointer("/app/closeBehavior")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .unwrap_or_else(|| "ask".into());
-                match behavior.as_str() {
+                let behavior = window.state::<AppState>().close_behavior.get();
+                match behavior {
                     "tray" => {
                         api.prevent_close();
                         if window.hide().is_ok() {
@@ -192,6 +211,22 @@ pub fn run() {
             wallpaper::load_local_wallpaper,
             wallpaper::preview_local_wallpaper,
             wallpaper::save_local_wallpaper,
+            local_icon::load_local_icon,
+            local_icon::save_local_icon,
+            local_icon::preview_local_theme,
+            local_icon::export_local_theme,
+            local_sound::load_local_sounds,
+            local_sound::save_local_sounds,
+            local_sound::preview_local_sound,
+            theme_library::load_personalization,
+            theme_library::apply_personalization_icon,
+            theme_library::save_personalization,
+            wallpaper::load_wallpaper_image,
+            theme_library::preview_theme_package,
+            theme_library::preview_theme_sound_package,
+            theme_library::export_theme_package,
+            theme_library::discard_theme_imports,
+            theme_library::preview_theme_thumbnail,
             dropped_paths::describe_dropped_paths,
             commands::append_diagnostic,
             commands::list_diagnostics,
@@ -219,6 +254,6 @@ pub fn run() {
             cloud::cloud_delete_configurations,
             cloud::cloud_set_entry_sync_mode,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("failed to run Chronicle");
 }

@@ -15,12 +15,16 @@ describe("sync selection", () => {
     const plan = { id: "plan", sources: [source([op("upload")], { error: "403" }), source([op("download")], { upgradeRequired: true }), source([op("uploadRevision")])] };
     expect(quickSyncPlan(plan, false)).toEqual({ requiresReview: true, operationIds: ["uploadRevision"] });
   });
-  it("selects only safe transfers by default, leaving deletes and conflicts unselected", () => {
-    expect(defaultSelection([op("upload"), op("download"), op("recycleLocal"), op("recycleRemote"), op("conflict"), op("unchanged")])).toEqual(["upload", "download"]);
+  it("selects transfers and recycling by default, but never conflicts or unchanged nodes", () => {
+    expect(defaultSelection([op("upload"), op("download"), op("recycleLocal"), op("recycleRemote"), op("conflict"), op("unchanged")])).toEqual(["upload", "download", "recycleLocal", "recycleRemote"]);
   });
   it("does not allow conflicts or no-op entries to execute", () => {
     expect(executable(op("conflict"))).toBe(false);
     expect(executable(op("unchanged"))).toBe(false);
     expect(executable(op("recycleRemote"))).toBe(true);
+  });
+  it("includes an explicitly previewed index repair, but skips empty and unavailable sources", () => {
+    const plan = { id: "plan", sources: [source([]), source([], { sourceId: "repair", indexRepairId: "repair-index", deviceRecordId: "device-name" }), source([], { sourceId: "failed", error: "403", indexRepairId: "blocked-index" })] };
+    expect(quickSyncPlan(plan, false).operationIds).toEqual(["repair-index", "device-name"]);
   });
 });

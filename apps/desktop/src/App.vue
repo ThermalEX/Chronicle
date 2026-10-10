@@ -9,6 +9,7 @@ import {
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import CloudCenterDialog from "./components/CloudCenterDialog.vue";
 import AppToast from "./components/AppToast.vue";
@@ -21,6 +22,7 @@ import { notifyTrayBackground } from "./services/trayNotification";
 import CreateCategoryDialog from "./components/CreateCategoryDialog.vue";
 import CreateArchiveDialog from "./components/CreateArchiveDialog.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
+import WallpaperLayers from "./components/WallpaperLayers.vue";
 import SnapshotSyncDialog from "./components/SnapshotSyncDialog.vue";
 import { snapshotSync, quickSyncPlan, type OperationResult } from "./services/snapshotSync";
 import BackupHealthDialog from "./components/BackupHealthDialog.vue";
@@ -41,16 +43,22 @@ import { selectArchivePanelCategory, selectCategoryPanel } from "./services/arch
 import { animateAppearance, applyAppearance, normalizeAppearance, resolvedColorMode, watchSystemAppearance, type Appearance } from "./services/appearance";
 import { floatingMenuStyle, positionFloatingMenu } from "./services/floatingMenu";
 import { filterTimeline, type TimelineSort } from "./services/snapshotTimeline";
-import { deviceRepository, deviceLabel, readKnownDevices, type DeviceIdentity, type KnownSourceDevices } from "./services/devices";
+import { deviceRepository, deviceLabel, deviceNameIndex, readKnownDevices, type DeviceIdentity, type KnownSourceDevices } from "./services/devices";
 import { appSettings, cloudLibraryIndicator, cloudSettings, enabledCloudSources, initializeSettings, saveAppSettings, shortcutMatches, type CloudHealth } from "./services/settings";
 import { runAcrossEnabledSources, type SourceSyncOutcome } from "./services/multiSourceSync";
 import { categoryBreadcrumb } from "./services/categoryBreadcrumb";
 import { formatCurrentTime, millisecondsUntilNextMinute } from "./services/currentTime";
 import { appMetadata } from "./services/appMetadata";
 import { checkForUpdate, type ReleaseUpdate } from "./services/updateService";
-import { currentWallpaper, loadLocalWallpaper, wallpaperWarningLabel } from "./services/wallpaper";
+import { applyWallpaper, currentWallpaper, loadWallpaperImageUrl, releaseWallpaperImageUrl } from "./services/wallpaper";
+import { activeAppearance, activeRuntimeTheme, applyPersonalizationRuntime, createPersonalizationDraft, loadPersonalization, savedPersonalization, savePersonalization, selectedTheme, type ThemeDraft } from "./services/personalization";
+import { createWallpaperPlayer, type WallpaperFrame } from "./services/wallpaperPlayer";
+import { playThemeSound, stopThemeSounds, type SoundEvent } from "./services/themeSounds";
 import { createTreePointerDrag, type TreeDragItem } from "./services/treePointerDrag";
 import { canAcceptExternalDrop, normalizeDroppedSources, type DroppedPathDto, type SkippedDroppedPath } from "./services/droppedSources";
+import type { SettingsChanges } from "./services/settingsChanges";
+import { buildLibraryIndex } from "./services/libraryIndex";
+import { createTimelineLabels } from "./services/timelineLabels";
 
 type CategoryTreeNode = CategoryRecord & {
   nodeType: "category";
@@ -82,7 +90,7 @@ const snapshotSort = ref<TimelineSort>("newest");
 const snapshotDevice = ref("");
 const localDevice = ref<DeviceIdentity>();
 const knownDeviceSources = ref<KnownSourceDevices[]>([]);
-const knownDeviceNames = computed(() => [...(localDevice.value ? [localDevice.value] : []), ...knownDeviceSources.value.flatMap((source) => source.devices).sort((left, right) => right.revision - left.revision)]);
+const knownDeviceNames = computed(() => deviceNameIndex([...(localDevice.value ? [localDevice.value] : []), ...knownDeviceSources.value.flatMap((source) => source.devices).sort((left, right) => right.revision - left.revision)]));
 const settingsInitialSection = ref<"software" | "device">("software");
 const timelineDeviceOptions = computed(() => [
   { value: "", label: t("所有设备") },
@@ -99,6 +107,7 @@ const timelineSortOptions = computed<ThemedSelectOption[]>(() => [
 const searchTerm = ref("");
 const searchInput = ref<HTMLInputElement>();
 const loading = ref(true);
+const appearanceReady = ref(false);
 const refreshingLibrary = ref(false);
 const createDialogOpen = ref(false);
 const pendingSources = ref<ArchiveSource[]>([]);
@@ -120,6 +129,46 @@ const creatingCategory = ref(false);
 const createCategoryError = ref<string>();
 const settingsOpen = ref(false);
 const wallpaperPreviewActive = ref(false);
+const settingsDialog = ref<InstanceType<typeof SettingsDialog>>();
+const savedWallpaperFrame = ref<WallpaperFrame>({transitionMs: 0});
+const previewWallpaperFrame = ref<WallpaperFrame>({transitionMs: 0});
+const visibleWallpaperFrame = computed(() => settingsOpen.value ? previewWallpaperFrame.value : savedWallpaperFrame.value);
+const wallpaperHidden = ref(false);
+function useWallpaperFrame(frame: WallpaperFrame, theme?: ThemeDraft): void {
+  applyWallpaper({mode: frame.current ? "image" : "color", imageDataUrl: frame.current,
+    transparency: theme?.transparency ?? 28, blurPx: theme?.blurPx ?? 12});
+}
+async function loadWallpaperImage(path: string): Promise<string> {
+  const url = await loadWallpaperImageUrl(path);
+  const image = new Image();
+  image.src = url;
+  try { await image.decode(); }
+  catch (error) { releaseWallpaperImageUrl(url);throw error; }
+  return url;
+}
+const savedWallpaperPlayer = createWallpaperPlayer({load: loadWallpaperImage, release: releaseWallpaperImageUrl, random: Math.random,
+  onFrame(frame) { savedWallpaperFrame.value = frame; if (!settingsOpen.value) useWallpaperFrame(frame, savedPersonalization.value.draft.mode === "custom" ? selectedTheme(savedPersonalization.value.draft) : undefined); },
+  onWarning(message) { showNotice(message, "error"); }});
+const previewWallpaperPlayer = createWallpaperPlayer({load: loadWallpaperImage, release: releaseWallpaperImageUrl, random: Math.random,
+  onFrame(frame) { previewWallpaperFrame.value = frame; if (settingsOpen.value) useWallpaperFrame(frame, activeRuntimeTheme.value); },
+  onWarning(message) { if (settingsOpen.value) showNotice(message, "error"); }});
+function updateWallpaperPause(): void {
+  savedWallpaperPlayer.setPaused(settingsOpen.value || wallpaperHidden.value);
+  previewWallpaperPlayer.setPaused(!settingsOpen.value || !wallpaperPreviewActive.value || wallpaperHidden.value);
+}
+function onWallpaperVisibility(): void { wallpaperHidden.value = document.hidden; updateWallpaperPause(); }
+watch(() => savedPersonalization.value.draft, (draft) => {
+  savedWallpaperPlayer.configure(draft.mode === "custom" ? selectedTheme(draft) : undefined);
+}, {deep: true});
+watch(activeRuntimeTheme, (theme) => {
+  if (settingsOpen.value) previewWallpaperPlayer.configure(theme);
+}, {deep: true});
+watch([settingsOpen, wallpaperPreviewActive], ([open]) => {
+  updateWallpaperPause();
+  if (open) { previewWallpaperPlayer.configure(activeRuntimeTheme.value); useWallpaperFrame(previewWallpaperFrame.value, activeRuntimeTheme.value); }
+  else { previewWallpaperPlayer.configure(undefined); useWallpaperFrame(savedWallpaperFrame.value, savedPersonalization.value.draft.mode === "custom" ? selectedTheme(savedPersonalization.value.draft) : undefined); }
+});
+
 const syncPreview = ref<{ archives: ArchiveRecord[]; sourceIds: string[]; snapshotId?: string; allArchives?: boolean }>();
 const changingColorMode = ref(false);
 let stopSystemAppearance: (() => void) | undefined;
@@ -180,11 +229,11 @@ async function changeTutorialLanguage(language: Locale) {
 }
 async function changeTutorialAppearance(appearance: Appearance) {
   if (tutorialAppearanceSaving.value) return;
-  const previous = normalizeAppearance(appSettings);
+  const previous = normalizeAppearance(activeAppearance());
   tutorialAppearanceSaving.value = true;
   try {
     await animateAppearance(appearance);
-    await saveAppSettings({ ...appSettings, ...appearance });
+    await persistActiveAppearance(appearance);
   }
   catch (error) {
     Object.assign(appSettings, previous);
@@ -283,10 +332,12 @@ async function checkCloudSources(showDialog = false): Promise<void> {
   if (showDialog) cloudHealthDialogOpen.value = true;
   cloudHealth.value = { status: "checking" };
   cloudHealthCheckRunning.value = true;
+  const sourceIds = cloudSettings.sources.map((source) => source.id).join(",");
   const items = await runCloudHealthCheck(cloudSettings.sources, (source) => cloudRepository.test(source, ""), (next) => { cloudHealthCheckItems.value = next; });
   cloudHealthCheckRunning.value = false;
   const failed = items.find((item) => item.status === "failed");
   cloudHealth.value = failed ? { status: "unavailable", sourceName: failed.name, reason: failed.reason } : { status: "available" };
+  if (cloudSettings.enabled && cloudSettings.sources.map((source) => source.id).join(",") === sourceIds) void playThemeSound(failed ? "connectionFailed" : "connected");
 }
 
 function openCloudHealthDialog(): void {
@@ -294,32 +345,22 @@ function openCloudHealthDialog(): void {
   else cloudHealthDialogOpen.value = true;
 }
 
-const descendantIds = (categoryId: string): Set<string> => {
-  const result = new Set([categoryId]);
-  for (const category of categoryRecords.value) {
-    if (category.parentId && result.has(category.parentId)) result.add(category.id);
-  }
-  return result;
-};
+const libraryIndex = computed(() => buildLibraryIndex(categoryRecords.value, archives.value));
+const descendantIds = (categoryId: string): Set<string> => libraryIndex.value.descendants(categoryId);
 const categoryTreeNodes = computed<Array<CategoryTreeNode | ArchiveTreeNode>>(() => {
   const rows: Array<CategoryTreeNode | ArchiveTreeNode> = [];
   const append = (parentId: string | null, depth: number) => {
-    const childCategories = categoryRecords.value
-      .filter((category) => (category.parentId ?? null) === parentId)
-      .sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+    const childCategories = libraryIndex.value.children.get(parentId) ?? [];
 
     childCategories.forEach((category) => {
-      const ids = descendantIds(category.id);
-      const directArchives = archives.value
-        .filter((archive) => archive.categoryId === category.id)
-        .sort((left, right) => compareArchiveNames(left.name, right.name));
+      const directArchives = libraryIndex.value.directArchives.get(category.id) ?? [];
       rows.push({
         ...category,
         nodeType: "category",
         depth,
-        count: archives.value.filter((archive) => archive.categoryId && ids.has(archive.categoryId)).length,
+        count: libraryIndex.value.counts.get(category.id) ?? 0,
         icon: Folder,
-        hasChildren: categoryRecords.value.some((item) => item.parentId === category.id) || directArchives.length > 0,
+        hasChildren: Boolean(libraryIndex.value.children.get(category.id)?.length) || directArchives.length > 0,
       });
       if (!expandedCategoryIds.value.has(category.id)) return;
       append(category.id, depth + 1);
@@ -352,10 +393,11 @@ const currentSyncProgressFraction = computed(() => syncProgressTarget.value === 
 const allSyncProgressFraction = computed(() => syncProgressTarget.value === "all" ? syncProgressFraction.value : 0);
 const syncProgressText = computed(() => syncProgress.value ? `${syncProgress.value.current} / ${syncProgress.value.total}` : "");
 
-function showNotice(message: string, type: "success" | "error" | "info" = "success") {
+function showNotice(message: string, type: "success" | "error" | "info" = "success", sound: SoundEvent = "default") {
   notice.value = { message, type };
   window.clearTimeout(noticeTimer);
   noticeTimer = window.setTimeout(() => { notice.value = undefined; }, 3200);
+  void playThemeSound(sound);
 }
 
 async function checkForApplicationUpdate(manual = false, channel = appSettings.updateChannel): Promise<void> {
@@ -395,15 +437,13 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 ** unit).toFixed(unit > 1 ? 1 : 0)} ${units[unit]}`;
 }
 
-function formatTime(timestamp?: number): string {
-  if (!timestamp) return t("尚未备份");
-  const date = new Date(timestamp);
-  const today = new Date();
-  if (date.toDateString() === today.toDateString()) {
-    return t("今天 {time}", { time: date.toLocaleTimeString(locale.value, { hour: "2-digit", minute: "2-digit", hour12: false }) });
-  }
-  return date.toLocaleString(locale.value, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
-}
+const timelineLabel = createTimelineLabels();
+function formatTime(timestamp?: number): string { return timelineLabel(timestamp, locale.value, new Date()); }
+const labeledSnapshots = computed(() => {
+  // The minute clock invalidates labels across midnight even without other UI changes.
+  currentTime.value;
+  return visibleSnapshots.value.map(snapshot => ({ ...snapshot, timeLabel: formatTime(snapshot.createdAt) }));
+});
 
 function displaySourcePath(path: string): string {
   return path.split(" · ").map((part) => part.startsWith("\\\\?\\") ? part.slice(4) : part).join(" · ");
@@ -419,9 +459,14 @@ function snapshotDetail(snapshot: SnapshotRecord): string {
   return [added ? t("新增 {added}", { added }) : "", modified ? t("修改 {modified}", { modified }) : "", deleted ? t("删除 {deleted}", { deleted }) : ""].filter(Boolean).join(" · ");
 }
 
+let archiveRequestGeneration = 0;
 async function refreshArchives(preferredId?: string) {
-  archives.value = await archiveRepository.listArchives();
-  if (preferredId) selectedArchiveId.value = preferredId;
+  const generation = ++archiveRequestGeneration;
+  const previousSelection = selectedArchiveId.value;
+  const updated = await archiveRepository.listArchives();
+  if (generation !== archiveRequestGeneration) return;
+  archives.value = updated;
+  if (preferredId && selectedArchiveId.value === previousSelection) selectedArchiveId.value = preferredId;
   if (!selectedArchive.value) selectedArchiveId.value = filteredArchives.value[0]?.id ?? archives.value[0]?.id;
 }
 
@@ -429,8 +474,27 @@ async function refreshCategories() {
   categoryRecords.value = await archiveRepository.listCategories();
 }
 
+let repositoryInfoRequest: Promise<void> | undefined;
+let repositoryInfoGeneration = 0;
 async function refreshRepositoryInfo() {
-  repositoryInfo.value = await archiveRepository.getRepositoryInfo();
+  repositoryInfoGeneration++;
+  if (!repositoryInfoRequest) {
+    repositoryInfoRequest = (async () => {
+      try {
+        let generation: number;
+        do {
+          generation = repositoryInfoGeneration;
+          try {
+            const info = await archiveRepository.getRepositoryInfo();
+            if (generation === repositoryInfoGeneration) repositoryInfo.value = info;
+          } catch (error) {
+            if (generation === repositoryInfoGeneration) throw error;
+          }
+        } while (generation !== repositoryInfoGeneration);
+      } finally { repositoryInfoRequest = undefined; }
+    })();
+  }
+  await repositoryInfoRequest;
 }
 
 async function refreshLibrary(): Promise<void> {
@@ -441,12 +505,15 @@ async function refreshLibrary(): Promise<void> {
   finally { refreshingLibrary.value = false; }
 }
 
-async function handleSettingsChanged(notify = true) {
-  localDevice.value = await deviceRepository.read();
-  knownDeviceSources.value = await readKnownDevices();
-  await animateAppearance(appSettings);
-  if (isTauriRuntime) await archiveRepository.refreshAutoBackup();
-  await Promise.all([refreshArchives(), refreshCategories(), refreshRepositoryInfo()]);
+async function handleSettingsChanged(changes?: SettingsChanges | boolean, notify = true) {
+  if (typeof changes === "boolean") notify = changes;
+  const scopes = typeof changes === "object" ? changes : { automation: true, device: true, library: true, storage: true, appearance: true };
+  if (scopes.device) {
+    [localDevice.value, knownDeviceSources.value] = await Promise.all([deviceRepository.read(), readKnownDevices()]);
+  }
+  if (scopes.appearance && !settingsOpen.value) await animateAppearance(activeAppearance());
+  if (scopes.automation && isTauriRuntime) await archiveRepository.refreshAutoBackup();
+  await Promise.all([...(scopes.library ? [refreshArchives(), refreshCategories()] : []), ...(scopes.storage ? [refreshRepositoryInfo()] : [])]);
   if (notify) showNotice(t("设置已保存"));
 }
 
@@ -463,12 +530,12 @@ function handleCloudSettingsChanged(connectionVerified = false): void {
 async function handleCloudDownload(): Promise<void> {
   await Promise.all([refreshArchives(selectedArchiveId.value), refreshCategories(), refreshRepositoryInfo()]);
   if (selectedArchive.value) await refreshSnapshots(selectedArchive.value.id);
-  showNotice(t("云端存档已下载，资料库已刷新"));
+  showNotice(t("云端存档已下载，资料库已刷新"), "success", "notification");
 }
 
 async function handleCloudSettingsDownload(): Promise<void> {
   await initializeSettings();
-  applyAppearance(appSettings);
+  applyAppearance(activeAppearance());
   await handleCloudDownload();
   showNotice(t("云端应用设置已应用"));
 }
@@ -501,9 +568,73 @@ async function openSelectedArchiveSources(): Promise<void> {
   }
 }
 
+let snapshotRequestGeneration = 0;
+let snapshotOwnerId: string | undefined;
+const snapshotRequests = new Map<string, Promise<SnapshotRecord[]>>();
+function invalidateSnapshotRead(archiveId?: string): void {
+  if (!archiveId) return;
+  snapshotRequests.delete(archiveId);
+  if (selectedArchiveId.value === archiveId) snapshotRequestGeneration++;
+}
 async function refreshSnapshots(archiveId?: string) {
-  snapshots.value = archiveId ? await archiveRepository.listSnapshots(archiveId) : [];
-  selectedSnapshotId.value = snapshots.value[0]?.id;
+  if (archiveId !== selectedArchiveId.value) return;
+  const generation = ++snapshotRequestGeneration;
+  if (archiveId !== snapshotOwnerId) {
+    snapshotOwnerId = archiveId;
+    snapshots.value = []; selectedSnapshotId.value = undefined;
+  }
+  if (!archiveId) { snapshots.value = []; selectedSnapshotId.value = undefined; return; }
+  let pending = snapshotRequests.get(archiveId);
+  if (!pending) {
+    pending = archiveRepository.listSnapshots(archiveId);
+    snapshotRequests.set(archiveId, pending);
+    void pending.finally(() => { if (snapshotRequests.get(archiveId) === pending) snapshotRequests.delete(archiveId); }).catch(() => undefined);
+  }
+  let updated: SnapshotRecord[];
+  try { updated = await pending; }
+  catch (error) {
+    if (generation === snapshotRequestGeneration && selectedArchiveId.value === archiveId) throw error;
+    return;
+  }
+  if (generation !== snapshotRequestGeneration || selectedArchiveId.value !== archiveId) return;
+  snapshots.value = updated;
+  if (!updated.some(snapshot => snapshot.id === selectedSnapshotId.value)) selectedSnapshotId.value = updated[0]?.id;
+}
+
+const pendingBackupArchiveIds = new Set<string>();
+let backgroundBackupRefresh: Promise<void> | undefined;
+function refreshAfterAutomaticBackup(archiveId: string): Promise<void> {
+  pendingBackupArchiveIds.add(archiveId);
+  if (!backgroundBackupRefresh) {
+    backgroundBackupRefresh = (async () => {
+      // Combine events delivered in the same turn, and repeat if more arrive during reads.
+      await Promise.resolve();
+      while (pendingBackupArchiveIds.size) {
+        const affected = new Set(pendingBackupArchiveIds);
+        pendingBackupArchiveIds.clear();
+        const selectedId = selectedArchiveId.value;
+        for (const archiveId of affected) invalidateSnapshotRead(archiveId);
+        await Promise.all([refreshArchives(), refreshRepositoryInfo(),
+          ...(selectedId && affected.has(selectedId) ? [refreshSnapshots(selectedId)] : [])]);
+      }
+    })().finally(() => { backgroundBackupRefresh = undefined; });
+  }
+  return backgroundBackupRefresh;
+}
+
+async function initializeStartupAppearance(): Promise<void> {
+  try {
+    await initializeSettings();
+    await loadPersonalization(appSettings);
+    applyAppearance(activeAppearance());
+    appearanceReady.value = true;
+    void applyPersonalizationRuntime(savedPersonalization.value.draft).catch(error => showNotice(readableError(error), "error"));
+    for (const warning of savedPersonalization.value.warnings) showNotice(t(warning), "error");
+  } catch (error) {
+    applyAppearance(appSettings);
+    appearanceReady.value = true;
+    showNotice(readableError(error), "error");
+  }
 }
 
 function openCreateArchive() {
@@ -633,7 +764,7 @@ async function createArchive(input: CreateArchiveInput) {
     await refreshRepositoryInfo();
     if (input.createInitialSnapshot) {
       tutorialEvent({ type: "archive-created", archiveId: archive.id });
-      await createSnapshot(t("初始版本"));
+      await createSnapshot(t("初始版本"), archives.value.find(item => item.id === archive.id) ?? archive);
     } else {
       tutorialEvent({ type: "archive-created", archiveId: archive.id });
       showNotice(t("已创建存档“{name}”", { name: archive.name }));
@@ -764,20 +895,21 @@ async function moveCategoryFromMenu(categoryId: string, value: string | null) {
   } catch (error) { showNotice(readableError(error), "error"); }
 }
 
-async function createSnapshot(title = t("手动备份")) {
-  if (!selectedArchive.value || busyAction.value) return;
+async function createSnapshot(title = t("手动备份"), archive = selectedArchive.value) {
+  if (!archive || busyAction.value) return;
   busyAction.value = "snapshot";
   try {
-    const snapshot = await archiveRepository.createSnapshot(toRaw(selectedArchive.value), title, false);
-    await refreshArchives(selectedArchive.value.id);
-    await refreshSnapshots(selectedArchive.value.id);
+    const snapshot = await archiveRepository.createSnapshot(toRaw(archive), title, false);
+    invalidateSnapshotRead(snapshot.archiveId);
+    await refreshArchives();
+    if (selectedArchiveId.value === archive.id) await refreshSnapshots(archive.id);
     await refreshRepositoryInfo();
-    selectedSnapshotId.value = snapshot.id;
-    tutorialEvent({ type: "snapshot-created", archiveId: selectedArchive.value.id });
-    await uploadNewSnapshot(selectedArchive.value);
-    showNotice(t("时间节点已创建，保存 {length} 个文件", { length: snapshot.files.length }));
+    if (selectedArchiveId.value === archive.id) selectedSnapshotId.value = snapshot.id;
+    tutorialEvent({ type: "snapshot-created", archiveId: archive.id });
+    await uploadNewSnapshot(archive);
+    showNotice(t("时间节点已创建，保存 {length} 个文件", { length: snapshot.files.length }), "success", "notification");
   } catch (error) {
-    reportError(error, { operation: t("创建备份"), archiveId: selectedArchive.value?.id });
+    reportError(error, { operation: t("创建备份"), archiveId: archive.id });
   } finally {
     busyAction.value = undefined;
   }
@@ -845,16 +977,21 @@ async function startSnapshotSync(target: NonNullable<typeof syncPreview.value>):
   const requestId = crypto.randomUUID();
   let dispose: (() => void) | undefined;
   let operationIds: string[] = [];
+  let selectedIds: Set<string> | undefined;
+  const completedIds = new Set<string>();
   try {
     dispose = await listen<{ requestId: string; results?: OperationResult[]; sourcesChecked?: number }>("snapshot-sync-progress", ({ payload }) => {
       if (payload.requestId !== requestId || !syncProgress.value) return;
-      if (payload.results) syncProgress.value.current = payload.results.filter((result) => operationIds.includes(result.operationId)).length;
-      else if (payload.sourcesChecked !== undefined) syncProgress.value.current = payload.sourcesChecked;
+      if (selectedIds && payload.results) {
+        for (const result of payload.results) if (selectedIds.has(result.operationId)) completedIds.add(result.operationId);
+        syncProgress.value.current = completedIds.size;
+      } else if (!selectedIds && payload.sourcesChecked !== undefined) syncProgress.value.current = payload.sourcesChecked;
     });
     const plan = await snapshotSync.preview(requestId, target.sourceIds, target.allArchives ? [] : target.archives.map((archive) => archive.id), target.snapshotId);
     const decision = quickSyncPlan(plan, false);
     if (decision.requiresReview) { syncPreview.value = target; return; }
     operationIds = decision.operationIds;
+    selectedIds = new Set(operationIds);
     syncProgress.value = { current: 0, total: Math.max(1, operationIds.length) };
     const results = plan.sources.some((source) => !source.error && !source.upgradeRequired)
       ? await snapshotSync.apply(plan.id, decision.operationIds) : [];
@@ -862,7 +999,7 @@ async function startSnapshotSync(target: NonNullable<typeof syncPreview.value>):
     const failures = [...plan.sources.filter((source) => source.error).map((source) => `${source.sourceName}: ${t(source.error!)}`),
       ...results.filter((result) => result.status !== "success").map((result) => t(result.error || result.status))];
     if (failures.length) reportError(new Error(failures.join("\n")), { operation: t("同步存档") });
-    else showNotice(t("同步完成"));
+    else showNotice(t("同步完成"), "success", "notification");
   } catch (error) { reportError(error, { operation: t("同步存档") }); }
   finally {
     dispose?.();
@@ -874,6 +1011,7 @@ async function startSnapshotSync(target: NonNullable<typeof syncPreview.value>):
 }
 
 async function refreshAfterSync(): Promise<void> {
+  for (const archiveId of new Set([...snapshotRequests.keys(), selectedArchiveId.value])) invalidateSnapshotRead(archiveId);
   knownDeviceSources.value = await readKnownDevices();
   await refreshArchives(selectedArchiveId.value);
   if (selectedArchive.value) await refreshSnapshots(selectedArchive.value.id);
@@ -903,9 +1041,10 @@ async function executeRestore(archive: ArchiveRecord, snapshot: SnapshotRecord, 
   busyAction.value = "restore";
   try {
     await archiveRepository.restoreSnapshot(archive, snapshot, mode);
+    invalidateSnapshotRead(archive.id);
     await refreshArchives(archive.id);
     await refreshSnapshots(archive.id);
-    showNotice(t("恢复完成，原状态已保存为安全快照"));
+    showNotice(t("恢复完成，原状态已保存为安全快照"), "success", "notification");
   } catch (error) {
     showNotice(readableError(error), "error");
   } finally {
@@ -920,6 +1059,7 @@ async function saveSnapshotNote(): Promise<void> {
   savingSnapshotNote.value = true;
   try {
     const updated = await archiveRepository.updateSnapshotNote(archive.id, snapshot.id, snapshotNote.value);
+    invalidateSnapshotRead(archive.id);
     snapshots.value = snapshots.value.map((item) => item.id === updated.id ? updated : item);
     showNotice(t("快照备注已保存"));
   } catch (error) {
@@ -941,6 +1081,7 @@ async function deleteSnapshot(snapshot: SnapshotRecord): Promise<void> {
   if (!confirmed) return;
   try {
     await archiveRepository.deleteSnapshot(archive.id, snapshot.id);
+    invalidateSnapshotRead(archive.id);
     await refreshArchives(archive.id);
     await refreshSnapshots(archive.id);
     await refreshRepositoryInfo();
@@ -956,6 +1097,7 @@ async function toggleSnapshotLock(snapshot: SnapshotRecord): Promise<void> {
   lockingSnapshotId.value = snapshot.id;
   try {
     const updated = await archiveRepository.setSnapshotLocked(archive.id, snapshot.id, !snapshot.locked);
+    invalidateSnapshotRead(archive.id);
     snapshots.value = snapshots.value.map((item) => item.id === updated.id ? updated : item);
     tutorialEvent({ type: "locked" });
     showNotice(updated.locked ? t("已标记为重要快照，不会自动清理；删除前需先解锁") : t("快照已解锁"));
@@ -970,16 +1112,23 @@ function addRegistrySource(path: string): void {
   createArchiveError.value = undefined;
 }
 
+async function persistActiveAppearance(appearance: Appearance): Promise<void> {
+  const draft = createPersonalizationDraft();
+  if (draft.mode === "custom") Object.assign(selectedTheme(draft)!, appearance);
+  else Object.assign(draft.solid, appearance);
+  await savePersonalization(draft);
+  await applyPersonalizationRuntime(savedPersonalization.value.draft);
+}
 async function toggleColorMode(event: MouseEvent): Promise<void> {
   if (changingColorMode.value) return;
-  const appearance = normalizeAppearance(appSettings, true);
+  const appearance = normalizeAppearance(activeAppearance(), true);
   const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
   changingColorMode.value = true;
   try {
     await animateAppearance(appearance, { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-    await saveAppSettings({ ...appSettings, ...appearance });
+    await persistActiveAppearance(appearance);
   } catch (error) {
-    applyAppearance(appSettings);
+    applyAppearance(activeAppearance());
     showNotice(readableError(error), "error");
   } finally {
     changingColorMode.value = false;
@@ -1234,12 +1383,19 @@ function handleShortcut(event: KeyboardEvent) {
 }
 
 watch(selectedArchiveId, (archiveId) => { activityPanelOpen.value = false; void refreshSnapshots(archiveId); });
+watch(() => cloudSettings.enabled ? cloudSettings.sources.filter((source) => source.syncEnabled).map((source) => source.id) : [], (active, previous) => {
+  if (previous.some((id) => !active.includes(id))) void playThemeSound("disconnected");
+});
 watch(selectedSnapshot, (snapshot) => {
   snapshotNote.value = snapshot?.note ?? "";
   if (!snapshot) activityPanelOpen.value = false;
 });
 onMounted(async () => {
+  await initializeStartupAppearance();
   window.addEventListener("keydown", handleShortcut);
+  document.addEventListener("visibilitychange", onWallpaperVisibility);
+  onWallpaperVisibility();
+  updateWallpaperPause();
   window.addEventListener("keydown", cancelTreePointerOnEscape, true);
   window.addEventListener("pointermove", moveTreePointer);
   window.addEventListener("pointerup", endTreePointer);
@@ -1252,7 +1408,11 @@ onMounted(async () => {
         else if (payload.type === "enter" || payload.type === "over") externalDropActive.value = externalDropAllowed();
         else if (payload.type === "drop") {
           externalDropActive.value = false;
-          void acceptExternalPaths(payload.paths);
+          if (settingsOpen.value) void (async () => {
+            const scale = await getCurrentWindow().scaleFactor();
+            await settingsDialog.value?.acceptFileDrop(payload.paths, {x: payload.position.x / scale, y: payload.position.y / scale});
+          })().catch(error => showNotice(readableError(error), "error"));
+          else void acceptExternalPaths(payload.paths);
         }
       });
     } catch (error) { showNotice(readableError(error), "error"); }
@@ -1261,18 +1421,14 @@ onMounted(async () => {
   try {
     localDevice.value = await deviceRepository.read();
     knownDeviceSources.value = await readKnownDevices();
-    await initializeSettings();
-    applyAppearance(appSettings);
-    try { await loadLocalWallpaper(); if (currentWallpaper.value.warning) showNotice(wallpaperWarningLabel(currentWallpaper.value.warning), "error"); }
-    catch (error) { showNotice(readableError(error), "error"); }
-    stopSystemAppearance = watchSystemAppearance(() => appSettings);
+    stopSystemAppearance = watchSystemAppearance(() => activeAppearance());
     startupUpdatePending = appSettings.checkForUpdates;
     if (isTauriRuntime) {
       await listen<{ archiveId: string; error?: string }>("auto-backup-created", async ({ payload }) => {
-        await Promise.all([refreshArchives(payload.archiveId), refreshSnapshots(payload.archiveId), refreshRepositoryInfo()]);
+        await refreshAfterAutomaticBackup(payload.archiveId);
         const archive = archives.value.find((item) => item.id === payload.archiveId);
         if (archive) await uploadNewSnapshot(archive);
-        showNotice(archive ? t("“{name}”已自动备份", { name: archive.name }) : t("已自动备份"));
+        showNotice(archive ? t("“{name}”已自动备份", { name: archive.name }) : t("已自动备份"), "success", "notification");
       });
       await listen<{ archiveId: string; error?: string }>("auto-backup-failed", ({ payload }) => reportError(payload.error ?? t("自动备份失败"), { operation: t("自动备份"), archiveId: payload.archiveId }));
       await listen<{generation:number}>("backup-automation-reset", ({payload}) => { if (payload.generation >= backupRuntimeGeneration) { backupRuntimeGeneration = payload.generation; backupRuntime.value = {}; } });
@@ -1298,6 +1454,10 @@ onMounted(async () => {
   finally { loading.value = false; }
 });
 onBeforeUnmount(() => {
+  savedWallpaperPlayer.dispose();
+  previewWallpaperPlayer.dispose();
+  document.removeEventListener("visibilitychange", onWallpaperVisibility);
+  stopThemeSounds();
   stopExternalDrop?.();
   cancelTreePointer();
   stopSystemAppearance?.();
@@ -1316,8 +1476,8 @@ watch([settingsOpen, createDialogOpen, categoryDialogOpen, cloudSettingsOpen, tu
 </script>
 
 <template>
-  <div class="app-shell" :inert="wallpaperPreviewActive">
-    <img v-if="currentWallpaper.mode === 'image' && currentWallpaper.imageDataUrl" class="app-wallpaper" :src="currentWallpaper.imageDataUrl" alt="" aria-hidden="true" :draggable="false" />
+  <div v-if="appearanceReady" class="app-shell" :inert="wallpaperPreviewActive">
+    <WallpaperLayers v-if="currentWallpaper.mode === 'image' && visibleWallpaperFrame.current" :frame="visibleWallpaperFrame" />
     <div v-if="externalDropActive" class="external-drop-overlay" aria-hidden="true"><FolderOpen :size="28" /><b>{{ t("松开以添加文件或文件夹") }}</b><span>{{ t("拖入后先核对来源，再创建存档。") }}</span></div>
     <header class="titlebar">
       <div class="brand"><time :datetime="currentTime">{{ currentTime }}</time></div>
@@ -1385,7 +1545,7 @@ watch([settingsOpen, createDialogOpen, categoryDialogOpen, cloudSettingsOpen, tu
             <div class="section-title"><div><p class="label">{{ t("版本历史") }}</p><h3>{{ t("时间节点") }}</h3></div></div>
             <div class="snapshot-create"><input v-model="snapshotDescription" maxlength="160" :placeholder="t('输入新存档描述信息（可留空）')" @keydown.enter.prevent="createSnapshotFromDetail" /><button data-tour="snapshot" class="accent" :disabled="busyAction !== undefined" @click="createSnapshotFromDetail"><Plus :size="16" />{{ busyAction === 'snapshot' ? t("创建中") : t("创建新快照") }}</button></div>
             <div class="timeline-toolbar"><label><Search :size="15" /><input v-model="snapshotSearch" type="search" :placeholder="t('搜索快照描述')" /></label><ThemedSelect :model-value="snapshotDevice" :options="timelineDeviceOptions" :label="t('设备来源')" @update:model-value="snapshotDevice = $event || ''" /><ThemedSelect :model-value="snapshotSort" :options="timelineSortOptions" :label="t('时间线排序')" @update:model-value="updateTimelineSort" /></div>
-            <div v-if="visibleSnapshots.length" data-tour="timeline" class="timeline-table"><div class="timeline-table-head"><span>{{ t("备份时间") }}</span><span>{{ t("描述") }}</span><span>{{ t("位置 / 大小") }}</span><span>{{ t("操作") }}</span></div><article v-for="snapshot in visibleSnapshots" :key="snapshot.id" :class="{ selected: selectedSnapshotId === snapshot.id }" tabindex="0" @click="selectedSnapshotId = snapshot.id" @keydown.enter="selectedSnapshotId = snapshot.id"><time>{{ formatTime(snapshot.createdAt) }}</time><span><b>{{ snapshot.title }}</b><small>{{ snapshot.note || snapshotDetail(snapshot) }}</small></span><span>{{ formatBytes(snapshot.totalBytes) }}<small>{{ deviceLabel(snapshot.deviceId, snapshot.deviceName, knownDeviceNames) }}</small></span><div class="timeline-actions"><button data-tour="lock" class="snapshot-star" :class="{ locked: snapshot.locked }" :disabled="Boolean(lockingSnapshotId) || busyAction !== undefined" :aria-label="snapshot.locked ? t('解锁重要快照') : t('标记为重要快照')" :title="snapshot.locked ? t('重要快照：不会自动清理，点击解锁') : t('标记为重要快照，防止自动清理')" :aria-pressed="Boolean(snapshot.locked)" @click.stop="toggleSnapshotLock(snapshot)"><Star :size="16" :fill="snapshot.locked ? 'currentColor' : 'none'" /></button><button class="info" :class="{ active: activityPanelOpen && selectedSnapshotId === snapshot.id }" :aria-label="t('查看 {time} 的时间节点详情', { time: formatTime(snapshot.createdAt) })" :title="t('查看 {time} 的时间节点详情', { time: formatTime(snapshot.createdAt) })" :aria-pressed="activityPanelOpen && selectedSnapshotId === snapshot.id" @click.stop="selectedSnapshotId = snapshot.id; activityPanelOpen = true"><Info :size="16" /></button><button data-tour="restore" :disabled="busyAction !== undefined" :aria-label="t('恢复 {time} 的时间节点', { time: formatTime(snapshot.createdAt) })" :title="t('恢复 {time} 的时间节点', { time: formatTime(snapshot.createdAt) })" @click.stop="selectedSnapshotId = snapshot.id; restoreSnapshot()"><RotateCcw :size="16" /><span>{{ t("恢复") }}</span></button><button :disabled="syncingArchive || syncingAllArchives" :aria-label="t('同步 {time} 的时间节点', { time: formatTime(snapshot.createdAt) })" :title="t('同步 {time} 的时间节点', { time: formatTime(snapshot.createdAt) })" @click.stop="selectedSnapshotId = snapshot.id; syncSelectedArchive(snapshot.id)"><UploadCloud :size="16" /><span>{{ t("同步") }}</span></button><button class="danger" :disabled="busyAction !== undefined || snapshot.locked || Boolean(lockingSnapshotId)" :aria-label="t('删除 {time} 的时间节点', { time: formatTime(snapshot.createdAt) })" :title="snapshot.locked ? t('请先解锁重要快照再删除') : t('删除 {time} 的时间节点', { time: formatTime(snapshot.createdAt) })" @click.stop="deleteSnapshot(snapshot)"><Trash2 :size="16" /></button></div></article></div>
+            <div v-if="visibleSnapshots.length" data-tour="timeline" class="timeline-table"><div class="timeline-table-head"><span>{{ t("备份时间") }}</span><span>{{ t("描述") }}</span><span>{{ t("位置 / 大小") }}</span><span>{{ t("操作") }}</span></div><article v-for="snapshot in labeledSnapshots" :key="snapshot.id" :class="{ selected: selectedSnapshotId === snapshot.id }" tabindex="0" @click="selectedSnapshotId = snapshot.id" @keydown.enter="selectedSnapshotId = snapshot.id"><time>{{ snapshot.timeLabel }}</time><span><b>{{ snapshot.title }}</b><small>{{ snapshot.note || snapshotDetail(snapshot) }}</small></span><span>{{ formatBytes(snapshot.totalBytes) }}<small>{{ deviceLabel(snapshot.deviceId, snapshot.deviceName, knownDeviceNames) }}</small></span><div class="timeline-actions"><button data-tour="lock" class="snapshot-star" :class="{ locked: snapshot.locked }" :disabled="Boolean(lockingSnapshotId) || busyAction !== undefined" :aria-label="snapshot.locked ? t('解锁重要快照') : t('标记为重要快照')" :title="snapshot.locked ? t('重要快照：不会自动清理，点击解锁') : t('标记为重要快照，防止自动清理')" :aria-pressed="Boolean(snapshot.locked)" @click.stop="toggleSnapshotLock(snapshot)"><Star :size="16" :fill="snapshot.locked ? 'currentColor' : 'none'" /></button><button class="info" :class="{ active: activityPanelOpen && selectedSnapshotId === snapshot.id }" :aria-label="t('查看 {time} 的时间节点详情', { time: snapshot.timeLabel })" :title="t('查看 {time} 的时间节点详情', { time: snapshot.timeLabel })" :aria-pressed="activityPanelOpen && selectedSnapshotId === snapshot.id" @click.stop="selectedSnapshotId = snapshot.id; activityPanelOpen = true"><Info :size="16" /></button><button data-tour="restore" :disabled="busyAction !== undefined" :aria-label="t('恢复 {time} 的时间节点', { time: snapshot.timeLabel })" :title="t('恢复 {time} 的时间节点', { time: snapshot.timeLabel })" @click.stop="selectedSnapshotId = snapshot.id; restoreSnapshot()"><RotateCcw :size="16" /><span>{{ t("恢复") }}</span></button><button :disabled="syncingArchive || syncingAllArchives" :aria-label="t('同步 {time} 的时间节点', { time: snapshot.timeLabel })" :title="t('同步 {time} 的时间节点', { time: snapshot.timeLabel })" @click.stop="selectedSnapshotId = snapshot.id; syncSelectedArchive(snapshot.id)"><UploadCloud :size="16" /><span>{{ t("同步") }}</span></button><button class="danger" :disabled="busyAction !== undefined || snapshot.locked || Boolean(lockingSnapshotId)" :aria-label="t('删除 {time} 的时间节点', { time: snapshot.timeLabel })" :title="snapshot.locked ? t('请先解锁重要快照再删除') : t('删除 {time} 的时间节点', { time: snapshot.timeLabel })" @click.stop="deleteSnapshot(snapshot)"><Trash2 :size="16" /></button></div></article></div>
             <div v-else class="timeline-empty"><Clock3 :size="25" /><b>{{ t("还没有时间节点") }}</b><p>{{ t("创建首个备份后，可以从这里查看和恢复历史版本。") }}</p><button :disabled="busyAction !== undefined" @click="createSnapshot('初始版本')">{{ t("创建首个备份") }}</button></div>
           </section>
 
@@ -1409,7 +1569,7 @@ watch([settingsOpen, createDialogOpen, categoryDialogOpen, cloudSettingsOpen, tu
     <AppToast v-if="notice" :message="notice.message" :type="notice.type" @close="notice = undefined" />
     <div v-if="draggedArchiveId || draggedCategoryId" class="tree-drag-ghost" :style="{ left: `${treeDragPosition.x + 14}px`, top: `${treeDragPosition.y + 14}px` }" aria-hidden="true"><Folder v-if="draggedCategoryId" :size="15" /><File v-else :size="15" />{{ treeDragLabel }}</div>
     <SnapshotSyncDialog v-if="syncPreview" :archives="syncPreview.archives" :source-ids="syncPreview.sourceIds" :snapshot-id="syncPreview.snapshotId" :all-archives="syncPreview.allArchives" @close="syncPreview = undefined" @changed="refreshAfterSync" />
-    <SettingsDialog v-if="settingsOpen" :initial-section="settingsInitialSection" @wallpaper-preview="wallpaperPreviewActive = $event" @backup-health="backupHealthOpen = true" @restart-tutorial="restartTutorial" :update-checking="updateChecking" @close="settingsOpen = false; settingsInitialSection = 'software'" @saved="handleSettingsChanged" @changed="handleSettingsChanged(false)" @check-update="checkForApplicationUpdate(true, $event)" />
+    <SettingsDialog ref="settingsDialog" v-if="settingsOpen" :initial-section="settingsInitialSection" @wallpaper-preview="wallpaperPreviewActive = $event" @backup-health="backupHealthOpen = true" @restart-tutorial="restartTutorial" :update-checking="updateChecking" @close="settingsOpen = false; settingsInitialSection = 'software'" @saved="handleSettingsChanged" @changed="handleSettingsChanged($event, false)" @check-update="checkForApplicationUpdate(true, $event)" />
     <BackupHealthDialog v-if="backupHealthOpen" @close="backupHealthOpen = false" @open-archive="handleHealthAction($event, 'open')" @edit-sources="handleHealthAction($event, 'edit')" @backup-now="handleHealthAction($event, 'backup')" />
     <SteamScanDialog v-if="steamScanOpen" @close="steamScanOpen = false" @saved="handleSettingsChanged" />
     <button class="floating-theme-toggle" :class="{ 'is-dark': resolvedColorMode === 'dark' }" :disabled="changingColorMode" :aria-label="resolvedColorMode === 'dark' ? t('切换到日间模式') : t('切换到夜间模式')" :title="resolvedColorMode === 'dark' ? t('切换到日间模式') : t('切换到夜间模式')" :aria-pressed="resolvedColorMode === 'dark'" @click="toggleColorMode"><Sun v-if="resolvedColorMode === 'dark'" :size="17" /><Moon v-else :size="17" /></button>

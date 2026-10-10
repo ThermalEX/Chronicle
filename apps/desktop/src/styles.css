@@ -108,6 +108,31 @@
 :root[data-color-mode="dark"][data-color-theme="rose"] { --primary: #d89ca9; --primary-dark: #f2d5dc; --primary-soft: #49333a; --accent: #d89ca9; --focus-ring: #e6b9c3; --app-background: #21191b; --surface: #2b2225; --surface-raised: #34292d; --subtle: #34292d; --hover: #46373b; --field: #21191b; --sidebar: #282023; --titlebar: #744b56; --titlebar-hover: #8f6170; --titlebar-text: #f8eaee; --text: #fcf7f8; --text-2: #ead7dc; --text-3: #c5aeb5; --border: #513f44; --border-2: #6d565e; --shadow-color: #0000005a; --icon: #f8e6ea; --icon-muted: #ead0d7; }
 :root[data-color-mode="dark"][data-color-theme="gray"] { --primary: #a9b5c4; --primary-dark: #e0e7ef; --primary-soft: #34404c; --accent: #a9b5c4; --focus-ring: #c5d0dc; --app-background: #171a1e; --surface: #20252b; --surface-raised: #282e35; --subtle: #282e35; --hover: #38414a; --field: #171a1e; --sidebar: #1d2228; --titlebar: #3d4855; --titlebar-hover: #556270; --titlebar-text: #edf1f5; --text: #f5f7f9; --text-2: #d8dfe6; --text-3: #aeb8c2; --border: #3d464f; --border-2: #56616c; --shadow-color: #0000005a; --icon: #edf2f6; --icon-muted: #d4dce4; }
 
+:root[data-color-theme="custom"] {
+  --primary: var(--custom-accent, #b83e49); --on-primary: var(--custom-on-primary, #fff);
+  --primary-dark: var(--custom-primary-dark); --accent: var(--primary);
+  --primary-soft: color-mix(in srgb, var(--primary) 9%, #fff); --focus-ring: var(--primary-dark);
+  --app-background: color-mix(in srgb, var(--primary) 3%, #f8fafc); --surface: #fff;
+  --surface-raised: color-mix(in srgb, var(--primary) 2%, #fff); --subtle: color-mix(in srgb, var(--primary) 4%, #fff);
+  --hover: color-mix(in srgb, var(--primary) 10%, #fff); --field: #fff; --sidebar: var(--subtle);
+  --titlebar: color-mix(in srgb, var(--primary) 45%, #222); --titlebar-hover: color-mix(in srgb, var(--primary) 60%, #333); --titlebar-text: #fff;
+  --text: #202329; --text-2: #525761; --text-3: #6b7079;
+  --border: color-mix(in srgb, var(--primary) 12%, #e5e7eb); --border-2: color-mix(in srgb, var(--primary) 18%, #cdd0d5);
+  --shadow-color: #20232924; --icon: var(--text-2); --icon-muted: var(--text-3);
+}
+:root[data-color-mode="dark"][data-color-theme="custom"] {
+  --focus-ring: var(--primary-dark);
+  --primary-soft: color-mix(in srgb, var(--primary) 18%, #25282e);
+  --app-background: color-mix(in srgb, var(--primary) 4%, #171a1e); --surface: color-mix(in srgb, var(--primary) 5%, #20252b);
+  --surface-raised: color-mix(in srgb, var(--primary) 7%, #282e35); --subtle: var(--surface-raised);
+  --hover: color-mix(in srgb, var(--primary) 15%, #38414a); --field: var(--app-background); --sidebar: var(--surface);
+  --text: #f5f7f9; --text-2: #d8dfe6; --text-3: #b1bac4;
+  --border: color-mix(in srgb, var(--primary) 15%, #3d464f); --border-2: color-mix(in srgb, var(--primary) 20%, #56616c); --shadow-color: #0000005a;
+}
+/* Filled controls also use a contrasting foreground for arbitrary accent colors. */
+:root[data-color-theme="custom"] :is(button.primary, .snapshot-control.primary, .add-button, .save-button, .install, .submit, .confirm:not(.destructive), .snapshot-note button, .restore, .wallpaper-preview-toolbar button, .empty-state button, .timeline-empty button, .health-start, .tutorial-primary) { color: var(--on-primary); }
+:root[data-color-theme="custom"] :is(.snapshot-control.primary, .add-button, .save-button, .install, .submit, .wallpaper-preview-toolbar button, .health-start, .tutorial-primary):hover:not(:disabled) { color: var(--custom-on-hover); background: var(--primary-dark); }
+
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 720px; min-height: 560px; overflow: hidden; background: var(--app-background); }
 button, input, select { font: inherit; }

@@ -760,20 +760,36 @@ pub async fn create_github_repository(
 pub async fn cloud_preview(
     state: State<'_, AppState>,
     source_id: String,
+    request_id: Option<String>,
 ) -> Result<CloudPreviewDto, String> {
-    let (source, _, _) = configured_source(&state, &source_id)?;
-    if source.provider == "legacy_github" {
-        let (client, source, root) = configured_github_client(&state, &source_id)?;
-        return github_preview(&client, source, &root).await;
-    }
-    let (client, source, root) = configured_client(&state, &source_id)?;
-    let library = ensure_remote_library(&client, &root).await?;
+    let request_id = request_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    crate::snapshot_sync::begin(&request_id)?;
+    let result = crate::snapshot_sync::cancellable_read(&request_id, async {
+        let (source, _, _) = configured_source(&state, &source_id)?;
+        if source.provider == "legacy_github" {
+            let (client, source, _) = configured_github_client(&state, &source_id)?;
+            return github_preview(&client, source).await;
+        }
+        let (client, source, _) = configured_client(&state, &source_id)?;
+        preview_store(&client, source.name).await
+    })
+    .await;
+    crate::snapshot_sync::end(&request_id);
+    result
+}
+
+async fn preview_store(client: &RemoteStore, name: String) -> Result<CloudPreviewDto, String> {
+    let library = match client.get_json("library.json").await {
+        Ok(value) => value,
+        Err(WebDavError::NotFound(_)) => Value::Null,
+        Err(error) => return Err(error.to_string()),
+    };
     let catalog: Option<Catalog> = match client.get_json("catalog.json").await {
         Ok(value) => Some(value),
         Err(WebDavError::NotFound(_)) => None,
         Err(error) => return Err(error.to_string()),
     };
-    Ok(preview_from_catalog(source.name, &library, catalog))
+    Ok(preview_from_catalog(name, &library, catalog))
 }
 
 fn preview_from_catalog(
@@ -938,7 +954,11 @@ fn merge_entry_category_branches(
     Ok(())
 }
 
-fn apply_cloud_configuration(root: &Path, settings: &Value) -> Result<(), String> {
+fn apply_cloud_configuration(
+    root: &Path,
+    settings: &Value,
+    close_behavior: &crate::runtime_settings::CloseBehavior,
+) -> Result<(), String> {
     let settings_path = root.join("config").join("settings.json");
     let mut local_settings: Value = read_json(&settings_path)?;
     local_settings["app"] = settings
@@ -946,6 +966,7 @@ fn apply_cloud_configuration(root: &Path, settings: &Value) -> Result<(), String
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
     write_json_atomic(&settings_path, &local_settings)?;
+    close_behavior.update(&local_settings);
     Ok(())
 }
 
@@ -990,68 +1011,15 @@ fn merge_entry_categories_from_catalog(
     Ok(())
 }
 
-async fn ensure_remote_library(client: &RemoteStore, root: &Path) -> Result<Value, String> {
-    match client.get_json("library.json").await {
-        Ok(value) => Ok(value),
-        Err(WebDavError::NotFound(_)) => {
-            ensure_remote_layout(client).await?;
-            let library = updated_library(root)?;
-            client
-                .put_json("library.json", &library)
-                .await
-                .map_err(|error| error.to_string())?;
-
-            match client.get_json::<Value>("catalog.json").await {
-                Ok(_) => {}
-                Err(WebDavError::NotFound(_)) => {
-                    client
-                        .put_json(
-                            "catalog.json",
-                            &serde_json::json!({
-                                "format_version": 4,
-                                "updated_at_ms": unix_millis(),
-                                "categories": [],
-                                "entries": []
-                            }),
-                        )
-                        .await
-                        .map_err(|error| error.to_string())?;
-                }
-                Err(error) => return Err(error.to_string()),
-            }
-            Ok(library)
-        }
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-async fn ensure_github_library(client: &GitHubClient, root: &Path) -> Result<Value, String> {
-    match client.get_json("library.json").await {
-        Ok(value) => Ok(value),
-        Err(GitHubError::NotFound(_)) => {
-            let library = updated_library(root)?;
-            client
-                .commit_changes(
-                    "Initialize Chronicle repository",
-                    vec![
-                        GitHubChange { path: "library.json".into(), contents: Some(serde_json::to_vec_pretty(&library).map_err(|error| error.to_string())?) },
-                        GitHubChange { path: "catalog.json".into(), contents: Some(serde_json::to_vec_pretty(&serde_json::json!({ "format_version": 4, "updated_at_ms": unix_millis(), "categories": [], "entries": [] })).map_err(|error| error.to_string())?) },
-                    ],
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-            Ok(library)
-        }
-        Err(error) => Err(error.to_string()),
-    }
-}
-
 async fn github_preview(
     client: &GitHubClient,
     source: CloudSourceInput,
-    root: &Path,
 ) -> Result<CloudPreviewDto, String> {
-    let library = ensure_github_library(client, root).await?;
+    let library = match client.get_json("library.json").await {
+        Ok(value) => value,
+        Err(GitHubError::NotFound(_)) => Value::Null,
+        Err(error) => return Err(error.to_string()),
+    };
     let catalog: Option<Catalog> = match client.get_json("catalog.json").await {
         Ok(value) => Some(value),
         Err(GitHubError::NotFound(_)) => None,
@@ -2164,7 +2132,8 @@ pub async fn cloud_download_application_settings(
             .map_err(|error| error.to_string())?
     };
     if apply {
-        apply_cloud_configuration(&root, &settings)?;
+        let _repository = state.repository.lock().map_err(|_| "资料库状态不可用")?;
+        apply_cloud_configuration(&root, &settings, &state.close_behavior)?;
     }
     Ok(settings)
 }
@@ -2837,6 +2806,92 @@ mod tests {
         missing_snapshot_archives, preview_from_catalog,
     };
 
+    #[tokio::test]
+    async fn preview_of_empty_store_does_not_initialize_remote_objects() {
+        let operator = opendal::Operator::new(opendal::services::Memory::default()).unwrap();
+        let store = chronicle_sync::RemoteStore::OpenDal(
+            operator.clone(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now())),
+            std::time::Duration::ZERO,
+        );
+        let result = super::preview_store(&store, "empty".into()).await.unwrap();
+        assert!(
+            result.library_id.is_none(),
+            "preview must not initialize a library"
+        );
+        assert!(operator.list("").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelling_preview_interrupts_http_retry_wait_and_stops_further_reads() {
+        use std::{
+            io::{Read, Write},
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+            },
+            time::Duration,
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = stop.clone();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let server = std::thread::spawn(move || {
+            let mut started = Some(started);
+            let mut requests = 0;
+            while !server_stop.load(Ordering::Relaxed) {
+                let Ok((mut socket, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(2));
+                    continue;
+                };
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut bytes = [0; 4096];
+                socket.read(&mut bytes).unwrap();
+                requests += 1;
+                write!(socket, "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                if let Some(started) = started.take() {
+                    started.send(()).unwrap();
+                }
+            }
+            requests
+        });
+        let client = chronicle_sync::WebDavClient::new(
+            chronicle_sync::WebDavSource {
+                endpoint: format!("http://{address}"),
+                username: String::new(),
+                password: String::new(),
+                remote_path: "Chronicle".into(),
+            },
+            chronicle_sync::RequestPolicy {
+                request_delay_ms: 0,
+                max_retry_delay_ms: 60_000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let id = "legacy-preview-retry-cancel";
+        crate::snapshot_sync::begin(id).unwrap();
+        let worker = tokio::spawn(async move {
+            let store = chronicle_sync::RemoteStore::LegacyWebDav(client);
+            crate::snapshot_sync::cancellable_read(id, super::preview_store(&store, "test".into()))
+                .await
+        });
+        ready.await.unwrap();
+        crate::snapshot_sync::cancel_snapshot_sync(id.into()).unwrap();
+        let result = tokio::time::timeout(Duration::from_millis(250), worker).await;
+        stop.store(true, Ordering::Relaxed);
+        let requests = server.join().unwrap();
+        crate::snapshot_sync::end(id);
+        assert!(result.is_ok(), "preview kept waiting after cancellation");
+        assert!(result.unwrap().unwrap().is_err());
+        assert_eq!(requests, 1);
+    }
+
     #[test]
     fn unchanged_sync_metadata_ignores_only_the_root_upload_timestamp() {
         let previous = json!({"formatVersion":1,"updatedAtMs":1,"app":{"theme":"dark"}});
@@ -3011,6 +3066,39 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(names.contains(&"app-settings.json".into()));
         assert!(names.contains(&"category-tree.json".into()));
+    }
+
+    #[test]
+    fn downloaded_settings_update_native_close_policy_only_after_persistence() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("config")).unwrap();
+        let initial = json!({"app":{"closeBehavior":"tray"},"device":{"id":"local-device"}});
+        std::fs::write(
+            temp.path().join("config/settings.json"),
+            serde_json::to_vec(&initial).unwrap(),
+        )
+        .unwrap();
+        let policy = crate::runtime_settings::CloseBehavior::new(&initial);
+        super::apply_cloud_configuration(
+            temp.path(),
+            &json!({"app":{"closeBehavior":"exit"}}),
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(policy.get(), "exit");
+        let persisted: serde_json::Value =
+            super::read_json(&temp.path().join("config/settings.json")).unwrap();
+        assert_eq!(persisted["device"]["id"], "local-device");
+        assert_eq!(persisted["app"]["closeBehavior"], "exit");
+        assert!(
+            super::apply_cloud_configuration(
+                &temp.path().join("missing"),
+                &json!({"app":{"closeBehavior":"ask"}}),
+                &policy
+            )
+            .is_err()
+        );
+        assert_eq!(policy.get(), "exit");
     }
 
     #[test]

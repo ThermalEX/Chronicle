@@ -32,12 +32,13 @@ describe("sync progress feedback", () => {
     expect(html).not.toContain('indeterminate');
   });
 
-  it("counts selected operations, not ancillary results, during transfers", async () => {
+  it("counts the confirmed selection, not later draft changes or ancillary results, during transfers", async () => {
     const html = await render((state) => {
       state.busy.value = true;
       state.phase.value = "apply";
       state.plan.value = { id: "plan", sources: [] };
-      state.selected.value = ["upload", "download"];
+      state.appliedSelection.value = ["upload", "download"];
+      state.selected.value = ["changed-draft"];
       state.results.value = [{ operationId: "upload", sourceId: "a", status: "success", error: null }, { operationId: "catalog", sourceId: "a", status: "success", error: null }];
     });
     expect(html).toContain('aria-valuenow="50"');

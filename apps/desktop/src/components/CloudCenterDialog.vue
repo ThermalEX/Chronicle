@@ -36,7 +36,10 @@ const newRepositoryNames = reactive<Record<string, string>>({});
 const closeButton = ref<HTMLButtonElement>();
 const preview = ref<CloudPreview>();
 const busy = ref("");
-const backdrop = createBackdropDismissal(() => requestClose(), () => !busy.value);
+const writeBusy = computed(() => Boolean(busy.value) && busy.value !== "preview");
+const backdrop = createBackdropDismissal(() => requestClose(), () => !writeBusy.value);
+let previewRequestId = 0;
+let cancelPreview: (() => void) | undefined;
 const toast = ref<{ type: "success" | "error"; message: string }>();
 const expandedSourceIds = ref(initialExpandedSourceIds());
 let toastTimer: number | undefined;
@@ -134,11 +137,44 @@ async function loadSourceStatuses(): Promise<void> {
 }
 
 async function loadPreview(): Promise<void> {
-  if (!repositorySource.value) return;
+  if (writeBusy.value) return;
+  const source = repositorySource.value;
+  if (!source) return;
+  stopPreview();
+  const requestId = ++previewRequestId;
+  const backendRequestId = `cloud-preview-${crypto.randomUUID()}`;
   busy.value = "preview";
-  try { preview.value = await cloudRepository.preview(repositorySource.value.id); }
-  catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
-  finally { busy.value = ""; }
+  let timeout: number | undefined;
+  const interrupted = new Promise<CloudPreview | undefined>((resolve) => {
+    const cancelRead = () => {
+      void cloudRepository.cancelPreview(backendRequestId).catch(() => {});
+      resolve(undefined);
+    };
+    cancelPreview = cancelRead;
+    timeout = window.setTimeout(() => {
+      if (requestId === previewRequestId) showToast("error", t('读取远端清单超时，请检查网络后重试。'));
+      cancelRead();
+    }, 45_000);
+  });
+  try {
+    const result = await Promise.race([cloudRepository.preview(source.id, backendRequestId), interrupted]);
+    if (requestId === previewRequestId && result) preview.value = result;
+  } catch (reason) {
+    if (requestId === previewRequestId) showToast("error", reason instanceof Error ? reason.message : String(reason));
+  } finally {
+    window.clearTimeout(timeout);
+    if (requestId === previewRequestId) {
+      cancelPreview = undefined;
+      if (busy.value === "preview") busy.value = "";
+    }
+  }
+}
+
+function stopPreview(): void {
+  previewRequestId++;
+  cancelPreview?.();
+  cancelPreview = undefined;
+  if (busy.value === "preview") busy.value = "";
 }
 
 async function testSource(source: CloudSource): Promise<void> {
@@ -197,6 +233,7 @@ async function runItemAction(item: RemoteItem, action: "sync" | "upload" | "down
     if (action === "sync") showToast("success", (await cloudRepository.sync(repositorySource.value.id, item.id)).message);
     if (action === "upload") { await uploadArchiveWithCategoryTree(repositorySource.value.id, item.id); showToast("success", t('已用本地存档覆盖远端')); }
     if (action === "download") { await cloudRepository.download(repositorySource.value.id, item.id, useCloudCategoryTree.value); emit("downloaded"); showToast("success", t('已下载远端存档')); }
+    busy.value = "";
     await loadPreview();
   } catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
   finally { busy.value = ""; }
@@ -215,7 +252,7 @@ function confirmOverwrite(item: RemoteItem, direction: "upload" | "download"): v
 async function uploadApplicationSettings(): Promise<void> {
   if (!repositorySource.value) return;
   busy.value = "app-settings-upload";
-  try { await cloudRepository.uploadApplicationSettings(repositorySource.value.id); showToast("success", t('本机应用设置已上传')); await loadPreview(); }
+  try { await cloudRepository.uploadApplicationSettings(repositorySource.value.id); showToast("success", t('本机应用设置已上传')); busy.value = ""; await loadPreview(); }
   catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
   finally { busy.value = ""; }
 }
@@ -250,6 +287,7 @@ function confirmDelete(ids: string[]): void {
     if (archives.length) await cloudRepository.delete(repositorySource.value!.id, archives);
     if (configurations.length) await cloudRepository.deleteConfigurations(repositorySource.value!.id, configurations);
     selected.value = [];
+    busy.value = "";
     await loadPreview();
   } };
 }
@@ -263,6 +301,7 @@ async function changeSyncMode(item: RemoteItem, mode: string | null): Promise<vo
 }
 
 function selectRepositorySource(sourceId: string | null): void {
+  stopPreview();
   repositorySourceId.value = sourceId;
   expandedSourceIds.value = initialExpandedSourceIds();
   selected.value = [];
@@ -292,6 +331,7 @@ async function runConfirmed(): Promise<void> {
 }
 
 async function saveAndClose(): Promise<void> {
+  stopPreview();
   busy.value = "save";
   try { await persist(); emit("close"); }
   catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
@@ -299,7 +339,8 @@ async function saveAndClose(): Promise<void> {
 }
 
 function requestClose(): void {
-  if (busy.value) return;
+  if (writeBusy.value) return;
+  stopPreview();
   if (hasUnsavedConfiguration()) {
     closeConfirmationOpen.value = true;
     return;
@@ -308,18 +349,19 @@ function requestClose(): void {
 }
 
 function discardAndClose(): void {
+  stopPreview();
   closeConfirmationOpen.value = false;
   emit("close");
 }
 
 onMounted(() => { closeButton.value?.focus(); void loadSourceStatuses(); if (repositorySource.value) void loadPreview(); });
-onBeforeUnmount(() => window.clearTimeout(toastTimer));
+onBeforeUnmount(() => { stopPreview(); window.clearTimeout(toastTimer); });
 </script>
 
 <template>
   <div class="dialog-backdrop" @pointerdown="backdrop.pointerDown" @pointerup="backdrop.pointerUp" @pointercancel="backdrop.pointerCancel">
-    <section data-tour="cloud-form" class="cloud-center" role="dialog" aria-modal="true" aria-labelledby="cloud-title">
-      <header><div class="heading-icon"><CloudCog :size="21" /></div><div><p>{{ t('同步服务') }}</p><h2 id="cloud-title">{{ t('云端设置') }}</h2></div><button ref="closeButton" :aria-label="t('关闭云端设置')" :title="t('关闭云端设置')" @click="requestClose"><X :size="18" /></button></header>
+    <section data-tour="cloud-form" class="cloud-center" role="dialog" aria-modal="true" aria-labelledby="cloud-title" @keydown.esc.stop="requestClose">
+      <header><div class="heading-icon"><CloudCog :size="21" /></div><div><p>{{ t('同步服务') }}</p><h2 id="cloud-title">{{ t('云端设置') }}</h2></div><button ref="closeButton" :disabled="writeBusy" :aria-label="t('关闭云端设置')" :title="t('关闭云端设置')" @click="requestClose"><X :size="18" /></button></header>
       <nav :aria-label="t('云端设置页面')"><button :class="{ active: tab === 'repository' }" @click="tab = 'repository'; repositorySource && loadPreview()">{{ t('云端仓库') }}</button><button :class="{ active: tab === 'sources' }" @click="tab = 'sources'">{{ t('同步源') }}</button></nav>
       <main>
         <section v-if="tab === 'repository'" class="repository-page">
@@ -365,7 +407,7 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer));
           <fieldset><legend>{{ t('请求控制') }}</legend><label><span>{{ t('元数据并发') }}</span><input v-model.number="draft.maxConcurrentMetadataReads" type="number" min="1" max="4" /></label><label><span>{{ t('传输并发') }}</span><input v-model.number="draft.maxConcurrentTransfers" type="number" min="1" max="4" /></label><label><span>{{ t('请求间隔（毫秒）') }}</span><input v-model.number="draft.requestDelayMs" type="number" min="0" max="5000" step="50" /></label><label><span>{{ t('重试次数') }}</span><input v-model.number="draft.retryLimit" type="number" min="1" max="10" /></label></fieldset>
         </section>
       </main>
-      <footer><button class="cancel" :disabled="Boolean(busy)" @click="requestClose">{{ t('取消') }}</button><button class="save" :disabled="Boolean(busy)" @click="saveAndClose">{{ busy === 'save' ? t('保存中…') : t('保存云端设置') }}</button></footer>
+      <footer><button class="cancel" :disabled="writeBusy" @click="requestClose">{{ t('取消') }}</button><button class="save" :disabled="Boolean(busy)" @click="saveAndClose">{{ busy === 'save' ? t('保存中…') : t('保存云端设置') }}</button></footer>
     </section>
     <AppToast v-if="toast" :message="toast.message" :type="toast.type" @close="toast = undefined" />
     <ConfirmDialog v-if="confirmAction" :title="confirmAction.title" :message="confirmAction.message" :confirm-label="t('确定')" :destructive="!confirmingDownload" @cancel="confirmAction = undefined; confirmingDownload = false" @confirm="runConfirmed"><template #body-extra><label v-if="confirmingDownload" class="download-tree-option"><input v-model="useCloudCategoryTree" type="checkbox" />{{ t('使用云端资料库分类层级') }}</label></template></ConfirmDialog>

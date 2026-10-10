@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "dialog:allow-open",
+    "dialog:allow-save",
     "notification:default",
     "opener:allow-open-url",
     "opener:allow-default-urls"

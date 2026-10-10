@@ -6,7 +6,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { FolderOpen, Search, RefreshCw } from "@lucide/vue";
 import { archiveRepository } from "../services/repository";
 import { appSettings } from "../services/settings";
-import { alreadyManaged, sourceKey, steamSourceGroups, type SteamGame, type SteamScanResult, type SteamSource } from "../services/steamScan";
+import { sourceKey, steamSourceGroups, type SteamGame, type SteamScanResult, type SteamSource } from "../services/steamScan";
+import { createManagedSourceIndex } from "../services/managedSourceIndex";
 import type { ArchiveRecord } from "../domain";
 
 const emit = defineEmits<{ saved: []; busy: [value: boolean] }>();
@@ -34,11 +35,16 @@ onMounted(async () => {
   finally { loading.value = false; emit("busy", false); }
 });
 const key = (game: SteamGame, source: SteamSource) => `${game.appId}:${sourceKey(source)}`;
-const managed = (source: SteamSource) => alreadyManaged(source, archives.value);
+const managedIndex = computed(() => createManagedSourceIndex(archives.value));
+const managed = (source: SteamSource) => managedIndex.value.has(source);
+const selectedSet = computed(() => new Set(selected.value));
+const sourceGroups = computed(() => new Map(result.value?.games.map(game => [game.appId, steamSourceGroups(game)])));
 const visibleGames = computed(() => result.value?.games.filter(game => `${game.name} ${game.appId} ${game.sources.map(s => `${s.user?.displayName || ''} ${s.user?.accountId || ''}`).join(' ')}`.toLowerCase().includes(search.value.toLowerCase())) ?? []);
 const available = computed(() => visibleGames.value.flatMap(game => game.sources.filter(source => !managed(source)).map(source => key(game, source))));
-const selectedArchives = computed(() => result.value?.games.reduce((count, game) => count + steamSourceGroups(game).filter(group => group.sources.some(source => selected.value.includes(key(game, source)) && !managed(source))).length, 0) ?? 0);
-function selectAll() { selected.value = available.value.every(id => selected.value.includes(id)) ? selected.value.filter(id => !available.value.includes(id)) : [...new Set([...selected.value, ...available.value])]; }
+const availableSet = computed(() => new Set(available.value));
+const allSelected = computed(() => available.value.length > 0 && available.value.every(id => selectedSet.value.has(id)));
+const selectedArchives = computed(() => result.value?.games.reduce((count, game) => count + (sourceGroups.value.get(game.appId) ?? []).filter(group => group.sources.some(source => selectedSet.value.has(key(game, source)) && !managed(source))).length, 0) ?? 0);
+function selectAll() { selected.value = allSelected.value ? selected.value.filter(id => !availableSet.value.has(id)) : [...new Set([...selected.value, ...available.value])]; }
 async function chooseSteam() {
   const path = await open({ directory: true, multiple: false, title: t("选择 Steam 安装目录（包含 steamapps）") });
   if (typeof path === "string") steamPath.value = path;
@@ -59,8 +65,8 @@ async function importSelected() {
   try {
     archives.value = await archiveRepository.listArchives();
     for (const game of result.value?.games ?? []) {
-      for (const group of steamSourceGroups(game)) {
-      const sources = group.sources.filter(source => selected.value.includes(key(game, source)) && !managed(source));
+      for (const group of sourceGroups.value.get(game.appId) ?? []) {
+      const sources = group.sources.filter(source => selectedSet.value.has(key(game, source)) && !managed(source));
       if (!sources.length) continue;
       let created: ArchiveRecord | undefined;
       try {
@@ -95,12 +101,12 @@ async function importSelected() {
       <p class="summary">{{ t('上次扫描：{time}。结果已保存在本机；安装新游戏或存档位置变化后，可手动刷新。', { time: new Date(result.scannedAt * 1000).toLocaleString(locale) }) }}</p>
       <p class="summary">{{ t('发现 {games} 个已安装游戏，{saves} 个找到存档位置。路径库更新于 {time}。', { games: result.games.length, saves: result.games.filter(g => g.sources.length).length, time: new Date(result.databaseUpdatedAt * 1000).toLocaleString(locale) }) }}</p>
       <details v-if="result.warnings.length"><summary>{{ t('扫描提示（{count}）', { count: result.warnings.length }) }}</summary><p v-for="warning in result.warnings" :key="warning">{{ warning }}</p></details>
-      <div class="selection-bar"><input v-model="search" type="search" :aria-label="t('搜索已扫描的游戏')" :placeholder="t('搜索游戏名称或 Steam AppID')" /><button :disabled="busy || !available.length" @click="selectAll">{{ available.length && available.every(id => selected.includes(id)) ? t('取消全选') : t('全选可添加项') }}</button></div>
+      <div class="selection-bar"><input v-model="search" type="search" :aria-label="t('搜索已扫描的游戏')" :placeholder="t('搜索游戏名称或 Steam AppID')" /><button :disabled="busy || !available.length" @click="selectAll">{{ allSelected ? t('取消全选') : t('全选可添加项') }}</button></div>
       <div class="game-list">
         <article v-for="game in visibleGames" :key="game.appId">
           <h4>{{ game.name }} <small>{{ game.appId }}</small></h4>
           <p v-if="!game.sources.length" class="empty">{{ game.hasRules ? t('未找到实际存档，可能需要先运行游戏并保存一次。') : t('路径库暂未收录，且未发现 Steam 云存档，可手动添加。') }}</p>
-          <section v-for="group in steamSourceGroups(game)" :key="group.id" class="account-group">
+          <section v-for="group in sourceGroups.get(game.appId)" :key="group.id" class="account-group">
             <div class="account-heading"><b>{{ group.label }}</b><small v-if="group.user">{{ t('用户 ID：{id}', { id: group.user.accountId }) }}</small><small v-else>{{ t('无法确定所属 Steam 账号') }}</small></div>
             <label v-for="source in group.sources" :key="key(game, source)" class="source"><input v-model="selected" type="checkbox" :value="key(game, source)" :disabled="busy || managed(source)" /><span><span class="kind">{{ source.kind === 'registry' ? t('注册表') : source.kind === 'folder' ? t('文件夹') : t('文件') }}{{ managed(source) ? t(' · 已添加') : '' }}</span><code>{{ source.path }}</code></span></label>
           </section>

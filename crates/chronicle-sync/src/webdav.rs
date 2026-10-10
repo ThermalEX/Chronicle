@@ -43,6 +43,7 @@ mod tests {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                     continue;
                 };
+                socket.set_nonblocking(false).unwrap();
                 socket
                     .set_read_timeout(Some(std::time::Duration::from_secs(1)))
                     .unwrap();
@@ -106,9 +107,6 @@ mod tests {
         assert_eq!(
             paths,
             [
-                "/Chronicle",
-                "/Chronicle/sync-v2",
-                "/Chronicle/sync-v2/operations",
                 "/Chronicle",
                 "/Chronicle/sync-v2",
                 "/Chronicle/sync-v2/operations"
@@ -238,14 +236,20 @@ pub struct WebDavClient {
     client: Client,
     source: WebDavSource,
     policy: RequestPolicy,
+    ensured_collections: std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl WebDavClient {
+    pub(crate) fn metadata_request_policy(&self) -> RequestPolicy {
+        self.policy
+    }
+
     pub fn new(source: WebDavSource, policy: RequestPolicy) -> Result<Self> {
         Ok(Self {
             client: Client::builder().timeout(Duration::from_mins(1)).build()?,
             source,
             policy,
+            ensured_collections: std::sync::Arc::default(),
         })
     }
 
@@ -327,14 +331,23 @@ impl WebDavClient {
     pub async fn ensure_collection(&self, relative: &str) -> Result<()> {
         let method = Method::from_bytes(b"MKCOL")
             .map_err(|error| WebDavError::InvalidMethod(error.to_string()))?;
-        self.request(method.clone(), "", None, None).await?;
+        // Clients live for one task. Cache only successful MKCOL results; this
+        // never caches object contents or bypasses protocol safety revalidation.
+        let mut ensured = self.ensured_collections.lock().await;
+        if !ensured.contains("") {
+            self.request(method.clone(), "", None, None).await?;
+            ensured.insert(String::new());
+        }
         let mut prefix = String::new();
         for part in relative.split('/').filter(|part| !part.is_empty()) {
             if !prefix.is_empty() {
                 prefix.push('/');
             }
             prefix.push_str(part);
-            self.request(method.clone(), &prefix, None, None).await?;
+            if !ensured.contains(&prefix) {
+                self.request(method.clone(), &prefix, None, None).await?;
+                ensured.insert(prefix.clone());
+            }
         }
         Ok(())
     }
@@ -404,6 +417,10 @@ impl WebDavClient {
     }
 
     pub async fn delete(&self, relative: &str) -> Result<()> {
+        let prefix = relative.trim_end_matches('/');
+        self.ensured_collections.lock().await.retain(|path| {
+            !prefix.is_empty() && path != prefix && !path.starts_with(&format!("{prefix}/"))
+        });
         match self.request(Method::DELETE, relative, None, None).await {
             Ok(_) | Err(WebDavError::NotFound(_)) => Ok(()),
             Err(error) => Err(error),

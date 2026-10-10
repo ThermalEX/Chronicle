@@ -11,3 +11,11 @@
 *.db-shm
 *.db-wal
 /apps/desktop/src-tauri/gen/
+# User-specific artwork is local, not a default distributable theme.
+/themes/steins-gate/icon.png
+/themes/steins-gate/background.jpg
+/themes/steins-gate/sounds/
+/themes/pink-blue/background.png
+/themes/rayburst/sounds/
+/themes/packages/
+/themes/*.zip

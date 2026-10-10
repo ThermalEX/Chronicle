@@ -193,6 +193,34 @@ pub struct LocalRepository {
     root: PathBuf,
 }
 
+/// Entries and their latest snapshots from one catalog/bindings read.
+pub struct EntryListing {
+    pub categories: Vec<Category>,
+    pub entries: Vec<(Entry, Option<Snapshot>)>,
+}
+
+/// Immutable capture inputs; staging only writes unique temporary files.
+pub struct SnapshotCapture {
+    root: PathBuf,
+    entry: Entry,
+    entry_version: Value,
+    entry_dir: PathBuf,
+    timeline: Vec<Snapshot>,
+    title: String,
+    device_id: String,
+    device_name: String,
+    safety: bool,
+    snapshot_id: String,
+    created_at_ms: u64,
+    cleanup: CaptureCleanup,
+}
+
+/// Staged capture awaiting validation and publication under the repository lock.
+pub struct StagedSnapshotCapture {
+    capture: SnapshotCapture,
+    outcome: crate::AutomaticSnapshotOutcome,
+}
+
 impl LocalRepository {
     /// Opens or initializes a repository at `root`.
     ///
@@ -213,12 +241,22 @@ impl LocalRepository {
     /// # Errors
     /// Returns an error if the library or snapshot metadata cannot be read or serialized.
     pub fn health_inputs(&self) -> Result<Vec<crate::health::HealthEntryInput>> {
+        self.health_inputs_for(None)
+    }
+
+    fn health_inputs_for(
+        &self,
+        entry_id: Option<&str>,
+    ) -> Result<Vec<crate::health::HealthEntryInput>> {
         let catalog = self.read_catalog()?;
         let bindings = self.read_bindings()?;
         catalog
             .entries
             .into_iter()
+            .filter(|item| entry_id.is_none_or(|id| item.id == id))
             .map(|item| {
+                #[cfg(test)]
+                tests::HEALTH_INPUTS_BUILT.with(|count| count.set(count.get() + 1));
                 let mut sources = item.sources;
                 for source in &mut sources {
                     source.path = bindings
@@ -255,6 +293,13 @@ impl LocalRepository {
             .collect()
     }
 
+    /// Captures one entry's health inputs for progress-time revision validation.
+    /// # Errors
+    /// Returns an error if metadata cannot be read or serialized.
+    pub fn health_input(&self, entry_id: &str) -> Result<Option<crate::health::HealthEntryInput>> {
+        Ok(self.health_inputs_for(Some(entry_id))?.into_iter().next())
+    }
+
     /// Returns the total number of bytes currently stored in the repository.
     ///
     /// # Errors
@@ -275,9 +320,16 @@ impl LocalRepository {
     /// # Errors
     /// Returns an error when either directory cannot be inspected.
     pub fn total_stored_bytes_with_recycle(&self, recycle_root: Option<&Path>) -> Result<u64> {
-        let total = self.total_stored_bytes()?;
+        Self::stored_bytes_at(&self.root, recycle_root)
+    }
+
+    /// Scans copied paths without requiring a live repository handle or metadata writes.
+    /// # Errors
+    /// Returns an error when either directory cannot be inspected.
+    pub fn stored_bytes_at(root: &Path, recycle_root: Option<&Path>) -> Result<u64> {
+        let total = directory_size(root)?;
         match recycle_root {
-            Some(path) if !path.starts_with(&self.root) && path.exists() => {
+            Some(path) if !path.starts_with(root) && path.exists() => {
                 Ok(total.saturating_add(directory_size(path)?))
             }
             _ => Ok(total),
@@ -832,13 +884,56 @@ impl LocalRepository {
     /// # Errors
     /// Returns an error when catalog metadata cannot be read.
     pub fn list_entries(&self) -> Result<Vec<Entry>> {
+        Ok(self
+            .list_entries_with_latest()?
+            .entries
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect())
+    }
+
+    /// Reads the list, category labels and latest snapshots consistently in one pass.
+    /// # Errors
+    /// Returns an error when catalog or binding metadata cannot be read.
+    pub fn list_entries_with_latest(&self) -> Result<EntryListing> {
         let catalog = self.read_catalog()?;
+        let bindings = self.read_bindings()?;
         let mut entries = catalog
             .entries
-            .iter()
-            .map(|item| self.get_entry(&item.id))
-            .collect::<Result<Vec<Entry>>>()?;
-        entries.sort_by(|left, right| left.name.cmp(&right.name));
+            .into_iter()
+            .map(|item| {
+                // min_by_key keeps the first item for equal timestamps, like list_snapshots.
+                let latest = item
+                    .snapshots
+                    .iter()
+                    .min_by_key(|snapshot| Reverse(snapshot.created_at_ms))
+                    .cloned();
+                (bound_entry(item, &bindings), latest)
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.0.name.cmp(&right.0.name));
+        Ok(EntryListing {
+            categories: catalog.categories,
+            entries,
+        })
+    }
+
+    /// Reads bound entries and their complete timelines from one catalog/bindings read.
+    /// # Errors
+    /// Returns an error when catalog or binding metadata cannot be read.
+    pub fn list_entries_with_snapshots(&self) -> Result<Vec<(Entry, Vec<Snapshot>)>> {
+        let catalog = self.read_catalog()?;
+        let bindings = self.read_bindings()?;
+        let mut entries = catalog
+            .entries
+            .into_iter()
+            .map(|mut item| {
+                let mut snapshots = std::mem::take(&mut item.snapshots);
+                snapshots.sort_by_key(|snapshot| Reverse(snapshot.created_at_ms));
+                (bound_entry(item, &bindings), snapshots)
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.0.name.cmp(&right.0.name));
         Ok(entries)
     }
 
@@ -853,28 +948,8 @@ impl LocalRepository {
             .into_iter()
             .find(|item| item.id == entry_id)
             .ok_or_else(|| StorageError::EntryNotFound(entry_id.into()))?;
-        let mut entry = Entry {
-            id: summary.id,
-            name: summary.name,
-            sources: summary.sources,
-            category_id: summary.category_id,
-            tags: summary.tags,
-            storage_policy: summary.storage_policy,
-            sync_mode: summary.sync_mode,
-            auto_backup_enabled: summary.auto_backup_enabled,
-            automatic_upload_enabled: summary.automatic_upload_enabled,
-            exclude_patterns: summary.exclude_patterns,
-            created_at_ms: summary.created_at_ms,
-        };
         let bindings = self.read_bindings()?;
-        if let Some(bound) = bindings.entries.get(entry_id) {
-            for source in &mut entry.sources {
-                if let Some(binding) = bound.iter().find(|binding| binding.id == source.id) {
-                    source.path.clone_from(&binding.path);
-                }
-            }
-        }
-        Ok(entry)
+        Ok(bound_entry(summary, &bindings))
     }
 
     /// Returns the directory containing this entry's immutable snapshot archives.
@@ -1035,6 +1110,18 @@ impl LocalRepository {
         Ok(snapshots)
     }
 
+    /// Reads all manifests in catalog order without resolving this device's sources.
+    /// # Errors
+    /// Returns an error when catalog metadata cannot be read.
+    pub fn list_snapshot_manifests(&self) -> Result<Vec<Snapshot>> {
+        Ok(self
+            .read_catalog()?
+            .entries
+            .into_iter()
+            .flat_map(|entry| entry.snapshots)
+            .collect())
+    }
+
     /// Loads one snapshot manifest.
     ///
     /// # Errors
@@ -1065,7 +1152,9 @@ impl LocalRepository {
     ) -> Result<Snapshot> {
         match self.capture_snapshot(entry_id, title.into(), device_id.into(), safety, None)? {
             crate::AutomaticSnapshotOutcome::Created(snapshot) => Ok(snapshot),
-            _ => unreachable!("manual snapshots are never skipped"),
+            _ => Err(StorageError::InvalidBackupOption(
+                "快照创建期间存档发生变化，请重试".into(),
+            )),
         }
     }
 
@@ -1095,99 +1184,96 @@ impl LocalRepository {
         safety: bool,
         guard: Option<&dyn Fn() -> bool>,
     ) -> Result<crate::AutomaticSnapshotOutcome> {
-        use crate::AutomaticSnapshotOutcome::{Created, Superseded, Unchanged};
-        if guard.is_some_and(|check| !check()) {
-            return Ok(Superseded);
-        }
-        let entry = self.get_entry(entry_id)?;
-        let created_at_ms = unix_millis(SystemTime::now());
+        let capture = self.prepare_snapshot_capture(entry_id, title, device_id, safety)?;
+        self.commit_snapshot_capture(capture.stage(guard)?, guard)
+    }
+
+    /// Captures metadata under the caller's repository mutex for staging outside that mutex.
+    /// # Errors
+    /// Returns an error if metadata is missing or invalid.
+    pub fn prepare_snapshot_capture(
+        &self,
+        entry_id: &str,
+        title: String,
+        device_id: String,
+        safety: bool,
+    ) -> Result<SnapshotCapture> {
+        let summary = self
+            .read_catalog()?
+            .entries
+            .into_iter()
+            .find(|item| item.id == entry_id)
+            .ok_or_else(|| StorageError::EntryNotFound(entry_id.into()))?;
+        let entry = bound_entry(summary.clone(), &self.read_bindings()?);
+        let entry_version = serde_json::to_value((&summary, &entry.sources))?;
+        let entry_dir = self.entries_dir().join(&summary.folder);
+        let mut timeline = summary.snapshots;
+        timeline.sort_by_key(|snapshot| Reverse(snapshot.created_at_ms));
         let snapshot_id = Uuid::new_v4().to_string();
-        let archive_name = snapshot_archive_name(created_at_ms, &snapshot_id);
-        let working = self.temp_dir().join(format!("capture-{snapshot_id}"));
-        let temporary_archive = self.temp_dir().join(format!("{snapshot_id}.7z"));
-        let _cleanup = CaptureCleanup {
-            working: working.clone(),
-            archive: temporary_archive.clone(),
-        };
-        let content = working.join("content");
-        fs::create_dir_all(&content)?;
-        let patterns = entry.exclude_patterns.clone();
-        let rules = ExclusionRules::new(&patterns).map_err(StorageError::InvalidBackupOption)?;
-        let files = stage_sources(&entry.sources, &content, &rules)?;
-        if guard.is_some_and(|check| !check()) {
-            return Ok(Superseded);
-        }
-        if guard.is_some() && !capture_matches_sources(&entry, &files, &content, &rules)? {
-            return Ok(Superseded);
-        }
-        let mut timeline = self.list_snapshots(entry_id)?;
-        let parent_id = timeline.first().map(|snapshot| snapshot.id.clone());
-        let changes = compare_manifests(
-            timeline.first().map(|snapshot| snapshot.files.as_slice()),
-            &files,
-        );
-        let entry_dir = self.entry_dir(entry_id)?;
-        let context_path = self
-            .root
-            .join("config")
-            .join(format!("capture-context-{}.json", entry.id));
-        let source_identity = serde_json::to_value((&entry.sources, &patterns))?;
-        let previous_context = read_json::<serde_json::Value>(&context_path).ok();
-        if guard.is_some()
-            && let Some(latest) = timeline.first()
-            && latest.exclude_patterns == patterns
-            && changes.added == 0
-            && changes.modified == 0
-            && changes.deleted == 0
-            && previous_context.as_ref()
-                == Some(&serde_json::json!({"snapshotId":latest.id,"sources":source_identity}))
-            && self.verify_snapshot(&latest.id).unwrap_or(false)
-        {
-            return Ok(if guard.is_some_and(|check| !check()) {
-                Superseded
-            } else {
-                Unchanged
-            });
-        }
-        compress_to_path(&content, &temporary_archive)?;
-        let object_hash = hash_file(&temporary_archive)?;
-        let final_archive = entry_dir.join(&archive_name);
-        if guard.is_some() && !capture_matches_sources(&entry, &files, &content, &rules)? {
-            return Ok(Superseded);
-        }
-        if guard.is_some_and(|check| !check()) {
-            return Ok(Superseded);
-        }
-        fs::rename(&temporary_archive, &final_archive)?;
-        if working.exists() {
-            fs::remove_dir_all(&working)?;
-        }
-        let snapshot = Snapshot {
-            id: snapshot_id,
-            entry_id: entry.id,
-            parent_id,
+        Ok(SnapshotCapture {
+            root: self.root.clone(),
+            entry,
+            entry_version,
+            entry_dir,
+            timeline,
+            title,
             device_id,
             device_name: self.device_identity()?.1,
-            title,
-            note: String::new(),
-            created_at_ms,
-            archive_name,
-            object_hash,
-            size_bytes: final_archive.metadata()?.len(),
-            files,
-            changes,
             safety,
-            locked: false,
-            metadata_updated_at_ms: 0,
-            exclude_patterns: patterns,
+            created_at_ms: unix_millis(SystemTime::now()),
+            cleanup: CaptureCleanup {
+                working: self.temp_dir().join(format!("capture-{snapshot_id}")),
+                archive: self.temp_dir().join(format!("{snapshot_id}.7z")),
+            },
+            snapshot_id,
+        })
+    }
+
+    /// Revalidates and merges into a fresh catalog under the caller's repository mutex.
+    /// # Errors
+    /// Returns an error when the staged archive or metadata cannot be published.
+    pub fn commit_snapshot_capture(
+        &self,
+        staged: StagedSnapshotCapture,
+        guard: Option<&dyn Fn() -> bool>,
+    ) -> Result<crate::AutomaticSnapshotOutcome> {
+        use crate::AutomaticSnapshotOutcome::{Created, Superseded};
+        if guard.is_some_and(|check| !check()) {
+            return Ok(Superseded);
+        }
+        let StagedSnapshotCapture { capture, outcome } = staged;
+        if matches!(outcome, Superseded) || self.root != capture.root {
+            return Ok(Superseded);
+        }
+        let mut catalog = self.read_catalog()?;
+        let Some(summary) = catalog
+            .entries
+            .iter_mut()
+            .find(|item| item.id == capture.entry.id)
+        else {
+            return Ok(Superseded);
         };
-        timeline.push(snapshot.clone());
-        timeline.sort_by_key(|item| item.created_at_ms);
-        self.refresh_catalog_entry(entry_id, &timeline)?;
+        let current = bound_entry(summary.clone(), &self.read_bindings()?);
+        if serde_json::to_value((&*summary, &current.sources))? != capture.entry_version {
+            return Ok(Superseded);
+        }
+        let Created(snapshot) = outcome else {
+            return Ok(outcome);
+        };
+        let final_archive = capture.entry_dir.join(&snapshot.archive_name);
+        fs::rename(&capture.cleanup.archive, &final_archive)?;
+        summary.snapshots.push(snapshot.clone());
+        summary.snapshots.sort_by_key(|item| item.created_at_ms);
+        summary.snapshot_count = summary.snapshots.len();
+        summary.stored_bytes = summary.snapshots.iter().map(|item| item.size_bytes).sum();
+        summary.last_snapshot_at_ms = summary.snapshots.last().map(|item| item.created_at_ms);
+        // An error may follow a successful metadata replacement (backup cleanup).
+        // Preserve the archive; deleting it here could invalidate the published catalog.
+        self.write_catalog(&mut catalog)?;
         // Context is local-only. A failed cache write merely disables deduplication.
         let _ = write_json_atomic(
-            &context_path,
-            &serde_json::json!({"snapshotId":snapshot.id,"sources":source_identity}),
+            &capture.context_path(),
+            &serde_json::json!({"snapshotId":snapshot.id,"sources":capture.source_identity()?}),
             &self.temp_dir(),
         );
         Ok(Created(snapshot))
@@ -2012,6 +2098,8 @@ impl LocalRepository {
         self.root.join(".tmp")
     }
     fn read_catalog(&self) -> Result<Catalog> {
+        #[cfg(test)]
+        tests::CATALOG_READS.with(|count| count.set(count.get() + 1));
         read_json(&self.catalog_path())
     }
     fn write_catalog(&self, catalog: &mut Catalog) -> Result<()> {
@@ -2097,6 +2185,8 @@ impl LocalRepository {
     }
 
     fn read_bindings(&self) -> Result<BindingsDocument> {
+        #[cfg(test)]
+        tests::BINDINGS_READS.with(|count| count.set(count.get() + 1));
         read_json(&self.bindings_path())
     }
 
@@ -2316,6 +2406,131 @@ fn copy_directory_verified(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+impl SnapshotCapture {
+    fn context_path(&self) -> PathBuf {
+        self.root
+            .join("config")
+            .join(format!("capture-context-{}.json", self.entry.id))
+    }
+
+    fn source_identity(&self) -> Result<Value> {
+        Ok(serde_json::to_value((
+            &self.entry.sources,
+            &self.entry.exclude_patterns,
+        ))?)
+    }
+
+    /// Copies, hashes and compresses using only the prepared inputs and unique staging paths.
+    /// # Errors
+    /// Returns an error when source or temporary file IO fails.
+    pub fn stage(self, guard: Option<&dyn Fn() -> bool>) -> Result<StagedSnapshotCapture> {
+        let outcome = self.stage_content(guard)?;
+        // Staged source cleanup can traverse many files; finish it before reacquiring the lock.
+        if self.cleanup.working.exists() {
+            fs::remove_dir_all(&self.cleanup.working)?;
+        }
+        Ok(StagedSnapshotCapture {
+            capture: self,
+            outcome,
+        })
+    }
+
+    fn stage_content(
+        &self,
+        guard: Option<&dyn Fn() -> bool>,
+    ) -> Result<crate::AutomaticSnapshotOutcome> {
+        use crate::AutomaticSnapshotOutcome::{Created, Superseded, Unchanged};
+        if guard.is_some_and(|check| !check()) {
+            return Ok(Superseded);
+        }
+        let entry = &self.entry;
+        let patterns = &entry.exclude_patterns;
+        let rules = ExclusionRules::new(patterns).map_err(StorageError::InvalidBackupOption)?;
+        if guard.is_some()
+            && let Some(latest) = self.timeline.first()
+            && latest.exclude_patterns == *patterns
+            && read_json::<Value>(&self.context_path()).ok().as_ref()
+                == Some(
+                    &serde_json::json!({"snapshotId":latest.id,"sources":self.source_identity()?}),
+                )
+            && sources_match_manifest(entry, &latest.files, &rules)?
+            && hash_file(&self.entry_dir.join(&latest.archive_name))
+                .is_ok_and(|hash| hash == latest.object_hash)
+            && sources_match_manifest(entry, &latest.files, &rules)?
+        {
+            return Ok(if guard.is_some_and(|check| !check()) {
+                Superseded
+            } else {
+                Unchanged
+            });
+        }
+        let content = self.cleanup.working.join("content");
+        fs::create_dir_all(&content)?;
+        let files = stage_sources(&entry.sources, &content, &rules)?;
+        if guard.is_some_and(|check| !check())
+            || !capture_matches_sources(entry, &files, &content, &rules)?
+        {
+            return Ok(Superseded);
+        }
+        compress_to_path(&content, &self.cleanup.archive)?;
+        let object_hash = hash_file(&self.cleanup.archive)?;
+        if !capture_matches_sources(entry, &files, &content, &rules)?
+            || guard.is_some_and(|check| !check())
+        {
+            return Ok(Superseded);
+        }
+        let changes = compare_manifests(
+            self.timeline
+                .first()
+                .map(|snapshot| snapshot.files.as_slice()),
+            &files,
+        );
+        Ok(Created(Snapshot {
+            id: self.snapshot_id.clone(),
+            entry_id: entry.id.clone(),
+            parent_id: self.timeline.first().map(|snapshot| snapshot.id.clone()),
+            device_id: self.device_id.clone(),
+            device_name: self.device_name.clone(),
+            title: self.title.clone(),
+            note: String::new(),
+            created_at_ms: self.created_at_ms,
+            archive_name: snapshot_archive_name(self.created_at_ms, &self.snapshot_id),
+            object_hash,
+            size_bytes: self.cleanup.archive.metadata()?.len(),
+            files,
+            changes,
+            safety: self.safety,
+            locked: false,
+            metadata_updated_at_ms: 0,
+            exclude_patterns: patterns.clone(),
+        }))
+    }
+}
+
+fn bound_entry(summary: CatalogEntry, bindings: &BindingsDocument) -> Entry {
+    let mut entry = Entry {
+        id: summary.id,
+        name: summary.name,
+        sources: summary.sources,
+        category_id: summary.category_id,
+        tags: summary.tags,
+        storage_policy: summary.storage_policy,
+        sync_mode: summary.sync_mode,
+        auto_backup_enabled: summary.auto_backup_enabled,
+        automatic_upload_enabled: summary.automatic_upload_enabled,
+        exclude_patterns: summary.exclude_patterns,
+        created_at_ms: summary.created_at_ms,
+    };
+    if let Some(bound) = bindings.entries.get(&entry.id) {
+        for source in &mut entry.sources {
+            if let Some(binding) = bound.iter().find(|binding| binding.id == source.id) {
+                source.path.clone_from(&binding.path);
+            }
+        }
+    }
+    entry
+}
+
 fn directory_size(path: &Path) -> Result<u64> {
     let mut total = 0_u64;
     for item in WalkDir::new(path) {
@@ -2342,6 +2557,22 @@ fn capture_matches_sources(
     entry: &Entry,
     files: &[SnapshotFile],
     content: &Path,
+    rules: &ExclusionRules,
+) -> Result<bool> {
+    if !sources_match_manifest(entry, files, rules)? {
+        return Ok(false);
+    }
+    for file in files {
+        if hash_file(&content.join(&file.relative_path))? != file.content_hash {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn sources_match_manifest(
+    entry: &Entry,
+    files: &[SnapshotFile],
     rules: &ExclusionRules,
 ) -> Result<bool> {
     let mut current = std::collections::BTreeMap::new();
@@ -2377,9 +2608,7 @@ fn capture_matches_sources(
         return Ok(false);
     }
     for file in files {
-        if current.get(&file.relative_path) != Some(&file.content_hash)
-            || hash_file(&content.join(&file.relative_path))? != file.content_hash
-        {
+        if current.get(&file.relative_path) != Some(&file.content_hash) {
             return Ok(false);
         }
     }
@@ -2391,6 +2620,8 @@ fn stage_sources(
     destination: &Path,
     rules: &ExclusionRules,
 ) -> Result<Vec<SnapshotFile>> {
+    #[cfg(test)]
+    tests::SOURCE_STAGES.with(|count| count.set(count.get() + 1));
     let mut files = Vec::new();
     for source in sources {
         let path = Path::new(&source.path);
@@ -2811,6 +3042,12 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T, temp_dir: &Path) -> R
         return Err(error.into());
     }
     if backup.exists() {
+        #[cfg(test)]
+        if path.file_name().is_some_and(|name| name == "catalog.json")
+            && tests::FAIL_CATALOG_CLEANUP.with(|fail| fail.replace(false))
+        {
+            return Err(io::Error::other("injected catalog backup cleanup failure").into());
+        }
         fs::remove_file(backup)?;
     }
     Ok(())
@@ -2845,6 +3082,422 @@ fn unix_millis(time: SystemTime) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    std::thread_local! {
+        pub(super) static CATALOG_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        pub(super) static BINDINGS_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        pub(super) static SOURCE_STAGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        pub(super) static HEALTH_INPUTS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        pub(super) static FAIL_CATALOG_CLEANUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    #[test]
+    fn health_revalidation_builds_only_the_requested_entry_fingerprint() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("save.dat");
+        fs::write(&source, b"save").unwrap();
+        let repository = LocalRepository::open(workspace.path().join("repo")).unwrap();
+        let selected = repository
+            .add_entry(&source, Some("selected"), None)
+            .unwrap();
+        for index in 0..9 {
+            repository
+                .add_entry(&source, Some(&index.to_string()), None)
+                .unwrap();
+        }
+        HEALTH_INPUTS_BUILT.with(|count| count.set(0));
+        let input = repository.health_input(&selected.id).unwrap().unwrap();
+        assert_eq!(input.entry.id, selected.id);
+        assert_eq!(HEALTH_INPUTS_BUILT.with(std::cell::Cell::get), 1);
+        assert!(repository.health_input("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn listing_reads_catalog_and_bindings_once_at_all_library_sizes() {
+        for size in [10, 50, 100] {
+            let workspace = tempdir().unwrap();
+            let source = workspace.path().join("save.dat");
+            fs::write(&source, b"save").unwrap();
+            let repository = LocalRepository::open(workspace.path().join("repo")).unwrap();
+            let category = repository.create_category("Games", None).unwrap();
+            for index in 0..size {
+                repository
+                    .add_entry(
+                        &source,
+                        Some(&format!("{index:03}")),
+                        Some(category.id.clone()),
+                    )
+                    .unwrap();
+            }
+            let first_id = repository.list_entries().unwrap()[0].id.clone();
+            let seed = repository
+                .create_snapshot(&first_id, "seed", "test", false)
+                .unwrap();
+            let mut catalog = repository.read_catalog().unwrap();
+            for item in &mut catalog.entries {
+                let mut old = seed.clone();
+                old.entry_id = item.id.clone();
+                old.created_at_ms = 10;
+                old.files[0].relative_path = format!("{}/save.dat", item.sources[0].id);
+                let mut latest = old.clone();
+                latest.id = format!("latest-{}", item.id);
+                latest.title = "latest".into();
+                latest.created_at_ms = 20;
+                let mut tied = latest.clone();
+                tied.title = "later equal timestamp".into();
+                item.snapshots = vec![old, latest, tied];
+            }
+            repository.write_catalog(&mut catalog).unwrap();
+            CATALOG_READS.with(|count| count.set(0));
+            BINDINGS_READS.with(|count| count.set(0));
+            let listing = repository.list_entries_with_latest().unwrap();
+            assert_eq!(listing.entries.len(), size);
+            assert_eq!(listing.categories[0].name, "Games");
+            assert_eq!(listing.entries[0].0.name, "000");
+            for (entry, latest) in &listing.entries {
+                assert_eq!(entry.category_id, Some(category.id.clone()));
+                assert_eq!(
+                    Path::new(&entry.sources[0].path).canonicalize().unwrap(),
+                    source.canonicalize().unwrap()
+                );
+                assert_eq!(latest.as_ref().unwrap().id, format!("latest-{}", entry.id));
+                assert_eq!(latest.as_ref().unwrap().title, "latest");
+            }
+            assert_eq!(CATALOG_READS.with(std::cell::Cell::get), 1, "size={size}");
+            assert_eq!(BINDINGS_READS.with(std::cell::Cell::get), 1, "size={size}");
+        }
+    }
+
+    #[test]
+    fn timeline_listing_reads_once_and_preserves_bindings_and_stable_order() {
+        for size in [10, 50, 100] {
+            let workspace = tempdir().unwrap();
+            let source = workspace.path().join("save.dat");
+            fs::write(&source, b"save").unwrap();
+            let repository = LocalRepository::open(workspace.path().join("repo")).unwrap();
+            for index in 0..size {
+                repository
+                    .add_entry(&source, Some(&format!("{index:03}")), None)
+                    .unwrap();
+            }
+            let first = repository.list_entries().unwrap()[0].id.clone();
+            let seed = repository
+                .create_snapshot(&first, "seed", "test", false)
+                .unwrap();
+            let mut catalog = repository.read_catalog().unwrap();
+            for entry in &mut catalog.entries {
+                entry.snapshots = [10, 20, 20]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, time)| {
+                        let mut node = seed.clone();
+                        node.id = format!("{}-{i}", entry.id);
+                        node.entry_id = entry.id.clone();
+                        node.title = i.to_string();
+                        node.created_at_ms = time;
+                        node
+                    })
+                    .collect();
+            }
+            repository.write_catalog(&mut catalog).unwrap();
+            CATALOG_READS.with(|count| count.set(0));
+            BINDINGS_READS.with(|count| count.set(0));
+            let listing = repository.list_entries_with_snapshots().unwrap();
+            assert_eq!(listing.len(), size);
+            assert_eq!(listing[0].0.name, "000");
+            for (entry, snapshots) in listing {
+                assert_eq!(
+                    Path::new(&entry.sources[0].path).canonicalize().unwrap(),
+                    source.canonicalize().unwrap()
+                );
+                assert_eq!(
+                    snapshots
+                        .iter()
+                        .map(|node| node.title.as_str())
+                        .collect::<Vec<_>>(),
+                    ["1", "2", "0"]
+                );
+                assert!(snapshots.iter().all(|node| node.entry_id == entry.id));
+            }
+            assert_eq!(CATALOG_READS.with(std::cell::Cell::get), 1, "size={size}");
+            assert_eq!(BINDINGS_READS.with(std::cell::Cell::get), 1, "size={size}");
+        }
+    }
+
+    #[test]
+    fn manifest_listing_uses_one_catalog_read_without_source_bindings() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("save.dat");
+        fs::write(&source, b"save").unwrap();
+        let repository = LocalRepository::open(workspace.path().join("repo")).unwrap();
+        let entry = repository.add_entry(&source, None, None).unwrap();
+        let first = repository
+            .create_snapshot(&entry.id, "first", "pc", false)
+            .unwrap();
+        let second = repository
+            .create_snapshot(&entry.id, "second", "pc", false)
+            .unwrap();
+        fs::write(repository.bindings_path(), b"broken bindings").unwrap();
+        CATALOG_READS.with(|count| count.set(0));
+        BINDINGS_READS.with(|count| count.set(0));
+        assert_eq!(
+            repository.list_snapshot_manifests().unwrap(),
+            [first, second]
+        );
+        assert_eq!(CATALOG_READS.with(std::cell::Cell::get), 1);
+        assert_eq!(BINDINGS_READS.with(std::cell::Cell::get), 0);
+    }
+
+    #[test]
+    fn unchanged_automatic_snapshot_does_not_stage_sources() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("save.dat");
+        fs::write(&source, b"save").unwrap();
+        let repository = LocalRepository::open(workspace.path().join("repo")).unwrap();
+        let entry = repository.add_entry(&source, None, None).unwrap();
+        repository
+            .create_snapshot(&entry.id, "first", "test", false)
+            .unwrap();
+        SOURCE_STAGES.with(|count| count.set(0));
+        let outcome = repository
+            .create_automatic_snapshot(&entry.id, "auto", "test", &|| true)
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::AutomaticSnapshotOutcome::Unchanged
+        ));
+        assert_eq!(SOURCE_STAGES.with(std::cell::Cell::get), 0);
+    }
+
+    #[test]
+    fn capture_rejects_snapshot_mutation_before_commit() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("save.dat");
+        fs::write(&source, b"first").unwrap();
+        let repository = LocalRepository::open(workspace.path().join("repo")).unwrap();
+        let entry = repository.add_entry(&source, None, None).unwrap();
+        let snapshot = repository
+            .create_snapshot(&entry.id, "first", "test", false)
+            .unwrap();
+        fs::write(&source, b"second").unwrap();
+        let checks = std::cell::Cell::new(0);
+        let outcome = repository
+            .create_automatic_snapshot(&entry.id, "auto", "test", &|| {
+                checks.set(checks.get() + 1);
+                if checks.get() == 3 {
+                    repository
+                        .set_snapshot_locked(&entry.id, &snapshot.id, true)
+                        .unwrap();
+                }
+                true
+            })
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::AutomaticSnapshotOutcome::Superseded
+        ));
+        assert!(repository.get_snapshot(&snapshot.id).unwrap().locked);
+        assert_eq!(repository.list_snapshots(&entry.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn staged_capture_rejects_deleted_rebound_or_modified_entry_and_cleans_temp() {
+        for mutation in ["delete", "rebind", "lock", "note", "exclusions", "snapshot"] {
+            let workspace = tempdir().unwrap();
+            let source = workspace.path().join("save.dat");
+            let replacement = workspace.path().join("replacement.dat");
+            fs::write(&source, b"first").unwrap();
+            fs::write(&replacement, b"other").unwrap();
+            let repository = LocalRepository::open(workspace.path().join("repo")).unwrap();
+            let entry = repository.add_entry(&source, None, None).unwrap();
+            let first = repository
+                .create_snapshot(&entry.id, "first", "test", false)
+                .unwrap();
+            fs::write(&source, b"second").unwrap();
+            let staged = repository
+                .prepare_snapshot_capture(&entry.id, "staged".into(), "test".into(), false)
+                .unwrap()
+                .stage(None)
+                .unwrap();
+            match mutation {
+                "delete" => repository.delete_entry(&entry.id, None).unwrap(),
+                "rebind" => {
+                    repository
+                        .update_entry_with_sync(
+                            &entry.id,
+                            "save",
+                            &[replacement.to_string_lossy().into_owned()],
+                            StoragePolicy::Local,
+                            SyncMode::Manual,
+                        )
+                        .unwrap();
+                }
+                "lock" => {
+                    repository
+                        .set_snapshot_locked(&entry.id, &first.id, true)
+                        .unwrap();
+                }
+                "note" => {
+                    repository
+                        .update_snapshot_note(&entry.id, &first.id, "keep note")
+                        .unwrap();
+                }
+                "exclusions" => {
+                    repository
+                        .set_entry_exclusions(&entry.id, vec!["*.tmp".into()])
+                        .unwrap();
+                }
+                "snapshot" => {
+                    repository
+                        .create_snapshot(&entry.id, "concurrent", "test", false)
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let expected = fs::read(repository.catalog_path()).unwrap();
+            assert!(
+                matches!(
+                    repository.commit_snapshot_capture(staged, None).unwrap(),
+                    crate::AutomaticSnapshotOutcome::Superseded
+                ),
+                "{mutation}"
+            );
+            assert_eq!(
+                fs::read(repository.catalog_path()).unwrap(),
+                expected,
+                "{mutation}"
+            );
+            assert_eq!(
+                fs::read_dir(repository.temp_dir()).unwrap().count(),
+                0,
+                "{mutation}"
+            );
+        }
+    }
+
+    #[test]
+    fn staged_capture_merges_unrelated_catalog_updates_and_preserves_immutable_object() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("save.dat");
+        fs::write(&source, b"save").unwrap();
+        let repository = LocalRepository::open(workspace.path().join("repo")).unwrap();
+        let entry = repository.add_entry(&source, None, None).unwrap();
+        let staged = repository
+            .prepare_snapshot_capture(&entry.id, "staged".into(), "test".into(), false)
+            .unwrap()
+            .stage(None)
+            .unwrap();
+        let category = repository
+            .create_category("added during compression", None)
+            .unwrap();
+        let other = repository
+            .add_entry(&source, Some("other"), Some(category.id.clone()))
+            .unwrap();
+        let crate::AutomaticSnapshotOutcome::Created(snapshot) =
+            repository.commit_snapshot_capture(staged, None).unwrap()
+        else {
+            panic!("capture should commit");
+        };
+        assert!(repository.verify_snapshot(&snapshot.id).unwrap());
+        assert_eq!(
+            repository.get_entry(&other.id).unwrap().category_id,
+            Some(category.id)
+        );
+        assert_eq!(repository.list_snapshots(&entry.id).unwrap().len(), 1);
+        assert_eq!(fs::read_dir(repository.temp_dir()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn staged_capture_detects_source_changes_and_can_be_cancelled_before_publish() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("save.dat");
+        fs::write(&source, b"first").unwrap();
+        let repository = LocalRepository::open(workspace.path().join("repo")).unwrap();
+        let entry = repository.add_entry(&source, None, None).unwrap();
+        let checks = std::cell::Cell::new(0);
+        let staged = repository
+            .prepare_snapshot_capture(&entry.id, "staged".into(), "test".into(), false)
+            .unwrap()
+            .stage(Some(&|| {
+                checks.set(checks.get() + 1);
+                if checks.get() == 2 {
+                    fs::write(&source, b"changed").unwrap();
+                }
+                true
+            }))
+            .unwrap();
+        assert!(matches!(
+            repository.commit_snapshot_capture(staged, None).unwrap(),
+            crate::AutomaticSnapshotOutcome::Superseded
+        ));
+        let staged = repository
+            .prepare_snapshot_capture(&entry.id, "cancel".into(), "test".into(), false)
+            .unwrap()
+            .stage(None)
+            .unwrap();
+        assert!(matches!(
+            repository
+                .commit_snapshot_capture(staged, Some(&|| false))
+                .unwrap(),
+            crate::AutomaticSnapshotOutcome::Superseded
+        ));
+        assert!(repository.list_snapshots(&entry.id).unwrap().is_empty());
+        assert_eq!(fs::read_dir(repository.temp_dir()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn two_captures_of_same_entry_cannot_overwrite_each_other() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("save.dat");
+        fs::write(&source, b"save").unwrap();
+        let repository = LocalRepository::open(workspace.path().join("repo")).unwrap();
+        let entry = repository.add_entry(&source, None, None).unwrap();
+        let first = repository
+            .prepare_snapshot_capture(&entry.id, "first".into(), "test".into(), false)
+            .unwrap();
+        let second = repository
+            .prepare_snapshot_capture(&entry.id, "second".into(), "test".into(), false)
+            .unwrap();
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| first.stage(None).unwrap());
+            let second = scope.spawn(|| second.stage(None).unwrap());
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        assert!(matches!(
+            repository.commit_snapshot_capture(first, None).unwrap(),
+            crate::AutomaticSnapshotOutcome::Created(_)
+        ));
+        assert!(matches!(
+            repository.commit_snapshot_capture(second, None).unwrap(),
+            crate::AutomaticSnapshotOutcome::Superseded
+        ));
+        let timeline = repository.list_snapshots(&entry.id).unwrap();
+        assert_eq!(timeline.len(), 1);
+        assert_eq!(timeline[0].title, "first");
+        assert!(repository.verify_snapshot(&timeline[0].id).unwrap());
+        assert_eq!(fs::read_dir(repository.temp_dir()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn metadata_cleanup_error_does_not_remove_a_published_snapshot_archive() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("save.dat");
+        fs::write(&source, b"save").unwrap();
+        let repository = LocalRepository::open(workspace.path().join("repo")).unwrap();
+        let entry = repository.add_entry(&source, None, None).unwrap();
+        let staged = repository
+            .prepare_snapshot_capture(&entry.id, "staged".into(), "test".into(), false)
+            .unwrap()
+            .stage(None)
+            .unwrap();
+        // Inject failure after the actual atomic catalog replacement, before backup cleanup.
+        FAIL_CATALOG_CLEANUP.with(|fail| fail.set(true));
+        let result = repository.commit_snapshot_capture(staged, None);
+        assert!(result.is_err());
+        let timeline = repository.list_snapshots(&entry.id).unwrap();
+        assert_eq!(timeline.len(), 1);
+        assert!(repository.verify_snapshot(&timeline[0].id).unwrap());
+    }
+
     #[test]
     fn archive_members_cannot_escape_the_extraction_directory() {
         for path in [

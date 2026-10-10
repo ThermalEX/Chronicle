@@ -34,7 +34,7 @@ describe("settings language selection", () => {
       expect(stored.has("chronicle.app-settings.v2")).toBe(false);
       expect(appSettings.language).toBe("zh-CN");
       expect(state.sections.value[0].label).toBe("General");
-      expect(state.colorModeOptions.value[0].label).toBe("Light");
+      expect(state.sections.value[1].id).toBe("personalization");
       await state.save();
       expect(appSettings.language).toBe("en");
       expect(appSettings.retentionCount).toBe(7);

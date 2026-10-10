@@ -53,6 +53,100 @@ fn validate_event(event: &Event) -> Result<(), String> {
 #[cfg(test)]
 mod record_validation_tests {
     use super::*;
+    #[tokio::test]
+    async fn event_reads_overlap_with_a_bounded_number_of_requests() {
+        let peak = event_read_peak(crate::RequestPolicy {
+            request_delay_ms: 0,
+            retry_limit: 0,
+            ..crate::RequestPolicy::default()
+        })
+        .await;
+        assert!((2..=4).contains(&peak), "peak = {peak}");
+    }
+    #[tokio::test]
+    async fn event_reads_respect_metadata_limits_and_legacy_request_spacing() {
+        for (limit, delay, maximum) in [(1, 0, 1), (3, 0, 3), (4, 25, 1)] {
+            let peak = event_read_peak(crate::RequestPolicy {
+                max_concurrent_metadata_reads: limit,
+                request_delay_ms: delay,
+                retry_limit: 0,
+                ..crate::RequestPolicy::default()
+            })
+            .await;
+            assert!(
+                peak <= maximum,
+                "configured limit {limit}, spacing {delay}ms: peak = {peak}"
+            );
+            if limit > 1 && delay == 0 {
+                assert!(peak >= 2);
+            }
+        }
+    }
+    async fn event_read_peak(policy: crate::RequestPolicy) -> usize {
+        use std::{
+            io::{Read, Write},
+            sync::{
+                Arc,
+                atomic::{AtomicUsize, Ordering},
+            },
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let server_peak = peak.clone();
+        let server = std::thread::spawn(move || {
+            let mut workers = Vec::new();
+            for _ in 0..9 {
+                let (mut socket, _) = listener.accept().unwrap();
+                let active = active.clone();
+                let peak = server_peak.clone();
+                workers.push(std::thread::spawn(move || {
+                    let mut bytes = [0; 4096];
+                    let count = socket.read(&mut bytes).unwrap();
+                    let request = String::from_utf8_lossy(&bytes[..count]);
+                    let path = request.split_whitespace().nth(1).unwrap();
+                    let (status, body) = if request.starts_with("PROPFIND") {
+                        use std::fmt::Write as _;
+                        let mut rows = String::new();
+                        for i in 0..8 {
+                            write!(rows, "<d:response><d:href>/Chronicle/sync-v2/operations/event-{i}.json</d:href><d:status>HTTP/1.1 200 OK</d:status></d:response>").unwrap();
+                        }
+                        ("207 Multi-Status", format!("<d:multistatus xmlns:d=\"DAV:\">{rows}</d:multistatus>"))
+                    } else {
+                        let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(count, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(80));
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        let id = path.rsplit('/').next().unwrap().trim_end_matches(".json");
+                        ("200 OK", format!(r#"{{"operationId":"{id}","device":{{"id":"pc","name":"PC","revision":0}},"kind":{{"type":"deviceNamed"}}}}"#))
+                    };
+                    write!(socket, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                }));
+            }
+            for worker in workers {
+                worker.join().unwrap();
+            }
+        });
+        let client = crate::WebDavClient::new(
+            crate::WebDavSource {
+                endpoint: format!("http://{address}"),
+                username: String::new(),
+                password: String::new(),
+                remote_path: "Chronicle".into(),
+            },
+            policy,
+        )
+        .unwrap();
+        let events = SnapshotRemote::Store(RemoteStore::LegacyWebDav(client))
+            .load_events()
+            .await
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(events.len(), 8);
+        assert_eq!(events[0].operation_id, "event-0");
+        peak.load(Ordering::SeqCst)
+    }
     #[test]
     fn snapshot_objects_cannot_target_protocol_or_library_configuration() {
         assert!(validate_object_path("catalog.json").is_err());
@@ -65,6 +159,7 @@ mod record_validation_tests {
 }
 
 /// Shared protocol I/O; every backend uses the same planner and immutable log.
+#[derive(Clone)]
 pub enum SnapshotRemote {
     Store(RemoteStore),
     GitHub(GitHubClient),
@@ -156,17 +251,53 @@ impl SnapshotRemote {
                 .await
                 .map_err(|error| error.to_string())?,
         };
-        let mut events = Vec::new();
-        for file in files {
-            let bytes = self
-                .optional_bytes(&file)
-                .await?
-                .ok_or_else(|| "操作记录在列举后丢失，请重新预览".to_owned())?;
-            let event: Event = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-            if operation_path(&event.operation_id)? != file {
-                return Err("操作记录标识与文件名不一致".into());
+        let legacy_policy = match self {
+            Self::Store(RemoteStore::LegacyWebDav(client)) => {
+                Some(client.metadata_request_policy())
             }
-            validate_event(&event)?;
+            Self::GitHub(client) => Some(client.metadata_request_policy()),
+            Self::Store(RemoteStore::OpenDal(..)) => None,
+        };
+        // Legacy adapters delay each request independently, rather than using a shared
+        // pacer. Keep paced reads serial so parallel dispatch cannot create bursts.
+        let concurrency = legacy_policy.map_or(4, |policy| {
+            if policy.request_delay_ms > 0 {
+                1
+            } else {
+                policy.max_concurrent_metadata_reads.clamp(1, 4)
+            }
+        });
+        let mut files = files.into_iter().enumerate();
+        let mut reads = tokio::task::JoinSet::new();
+        let mut records = BTreeMap::new();
+        loop {
+            while reads.len() < concurrency {
+                let Some((index, file)) = files.next() else {
+                    break;
+                };
+                let remote = self.clone();
+                reads.spawn(async move {
+                    let bytes = remote
+                        .optional_bytes(&file)
+                        .await?
+                        .ok_or_else(|| "操作记录在列举后丢失，请重新预览".to_owned())?;
+                    let event: Event =
+                        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+                    if operation_path(&event.operation_id)? != file {
+                        return Err("操作记录标识与文件名不一致".to_owned());
+                    }
+                    validate_event(&event)?;
+                    Ok((index, event))
+                });
+            }
+            let Some(result) = reads.join_next().await else {
+                break;
+            };
+            let (index, event) = result.map_err(|error| error.to_string())??;
+            records.insert(index, event);
+        }
+        let mut events = Vec::new();
+        for event in records.into_values() {
             for revision in event.related_revisions() {
                 events.push(revision.clone());
             }

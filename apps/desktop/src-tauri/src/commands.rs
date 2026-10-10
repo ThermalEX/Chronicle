@@ -222,15 +222,33 @@ fn entry_source_dto(source: EntrySource) -> EntrySourceDto {
     }
 }
 
-#[tauri::command(async)]
-pub fn repository_info(state: State<'_, AppState>) -> Result<RepositoryInfoDto, String> {
-    let repository = state.repository.lock().map_err(|_| state_error())?;
-    let recycle = settings_recycle_root(&repository);
+#[tauri::command]
+pub async fn repository_info(state: State<'_, AppState>) -> Result<RepositoryInfoDto, String> {
+    let repository = state.repository.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        repository_info_with_scan(&repository, |root, recycle| {
+            chronicle_storage::LocalRepository::stored_bytes_at(root, recycle)
+                .map_err(|error| error.to_string())
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn repository_info_with_scan(
+    repository: &std::sync::Mutex<chronicle_storage::LocalRepository>,
+    scan: impl FnOnce(&std::path::Path, Option<&std::path::Path>) -> Result<u64, String>,
+) -> Result<RepositoryInfoDto, String> {
+    let (root, recycle) = {
+        let repository = repository.lock().map_err(|_| state_error())?;
+        (
+            repository.root().to_path_buf(),
+            settings_recycle_root(&repository),
+        )
+    };
     Ok(RepositoryInfoDto {
-        path: repository.root().to_string_lossy().into_owned(),
-        total_bytes: repository
-            .total_stored_bytes_with_recycle(recycle.as_deref())
-            .map_err(|error| error.to_string())?,
+        path: root.to_string_lossy().into_owned(),
+        total_bytes: scan(&root, recycle.as_deref())?,
     })
 }
 
@@ -455,21 +473,16 @@ pub fn exit_chronicle(app: AppHandle) {
 #[tauri::command(async)]
 pub fn list_entries(state: State<'_, AppState>) -> Result<Vec<EntryDto>, String> {
     let repository = state.repository.lock().map_err(|_| state_error())?;
-    let categories = repository
-        .list_categories()
+    let listing = repository
+        .list_entries_with_latest()
         .map_err(|error| error.to_string())?;
-    repository
-        .list_entries()
-        .map_err(|error| error.to_string())?
+    listing
+        .entries
         .into_iter()
-        .map(|entry| {
-            let latest = repository
-                .list_snapshots(&entry.id)
-                .map_err(|error| error.to_string())?
-                .into_iter()
-                .next();
+        .map(|(entry, latest)| {
             let category_name = entry.category_id.as_ref().and_then(|category_id| {
-                categories
+                listing
+                    .categories
                     .iter()
                     .find(|category| &category.id == category_id)
                     .map(|category| category.name.clone())
@@ -605,6 +618,7 @@ pub fn save_settings(
     repository
         .save_settings(&settings)
         .map_err(|error| error.to_string())?;
+    state.close_behavior.update(&settings);
     drop(repository);
     crate::language::update_tray(&app, &settings);
     Ok(())
@@ -743,21 +757,47 @@ pub fn list_snapshots(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
-pub fn create_snapshot(
+#[tauri::command]
+pub async fn create_snapshot(
     state: State<'_, AppState>,
     entry_id: String,
     title: String,
     safety: bool,
 ) -> Result<SnapshotDto, String> {
-    let repository = state.repository.lock().map_err(|_| state_error())?;
-    let (device_id, _) = repository
-        .device_identity()
-        .map_err(|error| error.to_string())?;
-    repository
-        .create_snapshot(&entry_id, title, device_id, safety)
-        .map(snapshot_dto)
-        .map_err(|error| error.to_string())
+    let repository = state.repository.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        create_snapshot_from_repository(&repository, &entry_id, title, safety)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn create_snapshot_from_repository(
+    repository: &std::sync::Mutex<chronicle_storage::LocalRepository>,
+    entry_id: &str,
+    title: String,
+    safety: bool,
+) -> Result<SnapshotDto, String> {
+    let capture = {
+        let repository = repository.lock().map_err(|_| state_error())?;
+        let (device_id, _) = repository
+            .device_identity()
+            .map_err(|error| error.to_string())?;
+        repository
+            .prepare_snapshot_capture(entry_id, title, device_id, safety)
+            .map_err(|error| error.to_string())?
+    };
+    let staged = capture.stage(None).map_err(|error| error.to_string())?;
+    let repository = repository.lock().map_err(|_| state_error())?;
+    match repository
+        .commit_snapshot_capture(staged, None)
+        .map_err(|error| error.to_string())?
+    {
+        chronicle_storage::AutomaticSnapshotOutcome::Created(snapshot) => {
+            Ok(snapshot_dto(snapshot))
+        }
+        _ => Err("快照创建期间存档发生变化，请重试".into()),
+    }
 }
 
 #[tauri::command(async)]
@@ -824,29 +864,55 @@ pub fn verify_snapshot(state: State<'_, AppState>, snapshot_id: String) -> Resul
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
-pub fn restore_snapshot(
+#[tauri::command]
+pub async fn restore_snapshot(
     state: State<'_, AppState>,
     entry_id: String,
     snapshot_id: String,
     registry_mode: Option<chronicle_storage::registry::RegistryRestoreMode>,
 ) -> Result<(), String> {
     state.auto_backup.begin_restore_suppression(&entry_id)?;
-    let restored = {
-        let repository = state.repository.lock().map_err(|_| state_error())?;
+    let repository = state.repository.clone();
+    let restore_entry_id = entry_id.clone();
+    let restored = tauri::async_runtime::spawn_blocking(move || {
+        let repository = repository.lock().map_err(|_| state_error())?;
         repository
             .restore_snapshot_with_registry_mode(
-                &entry_id,
+                &restore_entry_id,
                 &snapshot_id,
                 registry_mode.unwrap_or_default(),
             )
             .map_err(|error| error.to_string())
-    };
+    })
+    .await
+    .map_err(|error| error.to_string())
+    .and_then(|result| result);
     match restored {
         Ok(()) => state.auto_backup.finish_restore_suppression(&entry_id),
         Err(error) => {
             let _ = state.auto_backup.cancel_restore_suppression(&entry_id);
             Err(error)
         }
+    }
+}
+
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[test]
+    fn capacity_scan_releases_repository_lock_before_walking_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = Mutex::new(chronicle_storage::LocalRepository::open(temp.path()).unwrap());
+        let info = repository_info_with_scan(&repository, |root, _recycle| {
+            let guard = repository
+                .try_lock()
+                .expect("capacity traversal must not hold the repository mutex");
+            assert_eq!(guard.root(), root);
+            Ok(42)
+        })
+        .unwrap();
+        assert_eq!(info.total_bytes, 42);
     }
 }

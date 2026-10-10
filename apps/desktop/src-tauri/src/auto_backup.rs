@@ -153,14 +153,25 @@ fn create_auto_backup_snapshot(
     retention: Option<usize>,
     can_commit: &dyn Fn() -> bool,
 ) -> Result<AutomaticSnapshotOutcome, String> {
+    let capture = {
+        let repository = repository
+            .lock()
+            .map_err(|_| "Chronicle 本地仓库状态不可用".to_owned())?;
+        let (device, _) = repository
+            .device_identity()
+            .map_err(|error| error.to_string())?;
+        repository
+            .prepare_snapshot_capture(entry_id, "自动备份".into(), device, false)
+            .map_err(|error| error.to_string())?
+    };
+    let staged = capture
+        .stage(Some(can_commit))
+        .map_err(|error| error.to_string())?;
     let repository = repository
         .lock()
         .map_err(|_| "Chronicle 本地仓库状态不可用".to_owned())?;
-    let (device, _) = repository
-        .device_identity()
-        .map_err(|error| error.to_string())?;
     let outcome = repository
-        .create_automatic_snapshot(entry_id, "自动备份", &device, can_commit)
+        .commit_snapshot_capture(staged, Some(can_commit))
         .map_err(|error| error.to_string())?;
     if !matches!(outcome, AutomaticSnapshotOutcome::Created(_)) {
         return Ok(outcome);
@@ -618,6 +629,49 @@ pub fn get_backup_runtime_states(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn automatic_capture_releases_repository_during_staging() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("save.dat");
+        std::fs::write(&source, b"save").unwrap();
+        let repository = super::LocalRepository::open(temp.path().join("repo")).unwrap();
+        let entry = repository.add_entry(&source, None, None).unwrap();
+        let repository = std::sync::Arc::new(std::sync::Mutex::new(repository));
+        let checks = std::cell::Cell::new(0);
+        let outcome = super::create_auto_backup_snapshot(&repository, &entry.id, None, &|| {
+            checks.set(checks.get() + 1);
+            if checks.get() <= 3 {
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            let repository = repository
+                                .try_lock()
+                                .expect("staging must allow metadata reads");
+                            repository.load_settings().unwrap();
+                            assert_eq!(repository.list_entries().unwrap().len(), 1);
+                        })
+                        .join()
+                        .unwrap();
+                });
+            }
+            true
+        })
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            super::AutomaticSnapshotOutcome::Created(_)
+        ));
+        assert_eq!(
+            repository
+                .lock()
+                .unwrap()
+                .list_snapshots(&entry.id)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
     #[test]
     fn exclusions_filter_watcher_events_but_registry_paths_never_trigger() {
         let entry: chronicle_core::Entry = serde_json::from_value(serde_json::json!({

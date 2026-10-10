@@ -29,9 +29,15 @@ export class BrowserDeviceRepository {
   }
 }
 
-export function deviceLabel(id: string | undefined, capturedName: string | undefined, known: DeviceIdentity[]): string {
+export function deviceNameIndex(known: readonly DeviceIdentity[]): ReadonlyMap<string, string> {
+  const names = new Map<string, string>();
+  for (const device of known) if (!names.has(device.id)) names.set(device.id, device.name);
+  return names;
+}
+
+export function deviceLabel(id: string | undefined, capturedName: string | undefined, known: DeviceIdentity[] | ReadonlyMap<string, string>): string {
   if (!id) return t("未知设备");
-  const name = known.find((device) => device.id === id)?.name || capturedName;
+  const name = (Array.isArray(known) ? known.find((device) => device.id === id)?.name : known.get(id)) || capturedName;
   return name ? `${name} · ${id.slice(0, 8)}` : id.slice(0, 8);
 }
 

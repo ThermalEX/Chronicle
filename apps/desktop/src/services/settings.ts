@@ -13,6 +13,7 @@ export interface AppSettings {
   language: Locale;
   colorTheme: ColorTheme;
   colorMode: ColorMode;
+  customAccent: string;
   launchAtStartup: boolean;
   closeBehavior: CloseBehavior;
   checkForUpdates: boolean;
@@ -88,6 +89,7 @@ export const defaultAppSettings: AppSettings = {
   language: "zh-CN",
   colorTheme: "teal",
   colorMode: "system",
+  customAccent: "#b83e49",
   launchAtStartup: false,
   closeBehavior: "ask",
   checkForUpdates: true,

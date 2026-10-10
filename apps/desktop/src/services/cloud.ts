@@ -43,9 +43,13 @@ export const cloudRepository = {
     if (!isTauri()) desktopOnly();
     return invoke("test_cloud_source", { source, password });
   },
-  preview(sourceId: string): Promise<CloudPreview> {
+  preview(sourceId: string, requestId?: string): Promise<CloudPreview> {
     if (!isTauri()) desktopOnly();
-    return invoke("cloud_preview", { sourceId });
+    return invoke("cloud_preview", { sourceId, requestId: requestId ?? null });
+  },
+  cancelPreview(requestId: string): Promise<void> {
+    if (!isTauri()) desktopOnly();
+    return invoke("cancel_snapshot_sync", { requestId });
   },
   sync(sourceId: string, entryId: string): Promise<CloudSyncResult> {
     if (!isTauri()) desktopOnly();

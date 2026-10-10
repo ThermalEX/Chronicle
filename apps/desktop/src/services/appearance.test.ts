@@ -4,6 +4,21 @@ import { animateAppearance, applyAppearance, normalizeAppearance, resolvedColorM
 afterEach(() => vi.unstubAllGlobals());
 
 describe("appearance settings", () => {
+  it("preserves custom accent across mode toggles and rejects invalid CSS", () => {
+    expect(normalizeAppearance({ colorTheme: "custom", colorMode: "light", customAccent: "#b83e49" }, true)).toEqual({ colorTheme: "custom", colorMode: "dark", customAccent: "#b83e49" });
+    expect(normalizeAppearance({ colorTheme: "custom", customAccent: "url(secret)" }).customAccent).toBe("#b83e49");
+  });
+  it("derives contrasting custom button text for both extreme colors", () => {
+    const values = new Map<string, string>();
+    const root = { dataset: {}, style: { setProperty: (k: string, v: string) => values.set(k, v), removeProperty: (k: string) => values.delete(k) } };
+    vi.stubGlobal("document", { documentElement: root });
+    applyAppearance({ colorTheme: "custom", colorMode: "light", customAccent: "#ffffff" });
+    expect(values.get("--custom-on-primary")).toBe("#111111");
+    applyAppearance({ colorTheme: "custom", colorMode: "dark", customAccent: "#000000" });
+    expect(values.get("--custom-on-primary")).toBe("#ffffff");
+    expect(values.get("--custom-primary-dark")).toBe("#a6a6a6");
+    expect(values.get("--custom-on-hover")).toBe("#111111");
+  });
   it("keeps valid saved themes and falls back safely for older settings", () => {
     expect(normalizeAppearance({ colorTheme: "violet", colorMode: "dark" })).toEqual({
       colorTheme: "violet",

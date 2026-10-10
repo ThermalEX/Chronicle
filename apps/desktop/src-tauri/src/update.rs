@@ -5,7 +5,7 @@ use std::{
 };
 
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 const RELEASE_PATH: [&str; 4] = ["ThermalEX", "Chronicle", "releases", "download"];
@@ -52,8 +52,62 @@ fn checksum_for_file<'a>(contents: &'a str, file_name: &str) -> Option<&'a str> 
     })
 }
 
+#[cfg(test)]
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateProgress<'a> {
+    request_id: &'a str,
+    phase: &'a str,
+    bytes: u64,
+    total_bytes: Option<u64>,
+}
+
+async fn download_bytes(
+    client: &reqwest::Client,
+    url: &str,
+    mut report: impl FnMut(u64, Option<u64>),
+) -> Result<Vec<u8>, String> {
+    let mut response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("下载安装包失败：{error}"))?
+        .error_for_status()
+        .map_err(|error| format!("下载安装包失败：{error}"))?;
+    let total = response.content_length();
+    let mut bytes = Vec::new();
+    report(0, total);
+    let mut last_report = std::time::Instant::now();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("读取安装包失败：{error}"))?
+    {
+        bytes.extend_from_slice(&chunk);
+        if last_report.elapsed() >= std::time::Duration::from_millis(100) {
+            report(bytes.len() as u64, total);
+            last_report = std::time::Instant::now();
+        }
+    }
+    report(bytes.len() as u64, total);
+    report(bytes.len() as u64, Some(bytes.len() as u64));
+    Ok(bytes)
+}
+
+fn sha256_with_progress(bytes: &[u8], mut report: impl FnMut(u64, u64)) -> String {
+    let mut digest = Sha256::new();
+    let mut done = 0;
+    report(0, bytes.len() as u64);
+    for chunk in bytes.chunks(64 * 1024) {
+        digest.update(chunk);
+        done += chunk.len() as u64;
+        report(done, bytes.len() as u64);
+    }
+    format!("{:x}", digest.finalize())
 }
 
 fn installer_path(download_directory: &Path) -> PathBuf {
@@ -114,6 +168,7 @@ pub async fn download_and_install_update(
     url: String,
     file_name: String,
     sha256_sums_url: Option<String>,
+    request_id: String,
 ) -> Result<(), String> {
     if !is_trusted_installer(&url, &file_name) {
         return Err("更新安装包来源无效，已取消下载".to_owned());
@@ -126,20 +181,27 @@ pub async fn download_and_install_update(
 
     let client = reqwest::Client::builder()
         .user_agent("Chronicle update checker")
+        .timeout(std::time::Duration::from_secs(600))
         .build()
         .map_err(|error| error.to_string())?;
-    let installer = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|error| format!("下载安装包失败：{error}"))?
-        .error_for_status()
-        .map_err(|error| format!("下载安装包失败：{error}"))?
-        .bytes()
-        .await
-        .map_err(|error| format!("读取安装包失败：{error}"))?;
+    let report = |phase, bytes, total_bytes| {
+        let _ = app.emit(
+            "update-progress",
+            UpdateProgress {
+                request_id: &request_id,
+                phase,
+                bytes,
+                total_bytes,
+            },
+        );
+    };
+    let installer = download_bytes(&client, &url, |bytes, total| {
+        report("download", bytes, total)
+    })
+    .await?;
 
     if let Some(checksum_url) = sha256_sums_url {
+        report("checksum", 0, None);
         let checksums = client
             .get(checksum_url)
             .send()
@@ -152,11 +214,46 @@ pub async fn download_and_install_update(
             .map_err(|error| format!("读取更新校验文件失败：{error}"))?;
         let expected = checksum_for_file(&checksums, &file_name)
             .ok_or_else(|| "更新校验文件中缺少安装包的 SHA-256".to_owned())?;
-        if !expected.eq_ignore_ascii_case(&sha256_hex(&installer)) {
+        // Hash on a worker so UI/event processing remains responsive during verification.
+        let handle = app.clone();
+        let verification_id = request_id.clone();
+        let (installer, digest) = tauri::async_runtime::spawn_blocking(move || {
+            let mut last_report = std::time::Instant::now();
+            let digest = sha256_with_progress(&installer, |bytes, total| {
+                if bytes == 0
+                    || bytes == total
+                    || last_report.elapsed() >= std::time::Duration::from_millis(100)
+                {
+                    let _ = handle.emit(
+                        "update-progress",
+                        UpdateProgress {
+                            request_id: &verification_id,
+                            phase: "verify",
+                            bytes,
+                            total_bytes: Some(total),
+                        },
+                    );
+                    last_report = std::time::Instant::now();
+                }
+            });
+            (installer, digest)
+        })
+        .await
+        .map_err(|error| format!("安装包校验失败：{error}"))?;
+        if !expected.eq_ignore_ascii_case(&digest) {
             return Err("安装包 SHA-256 校验失败，已取消安装".to_owned());
         }
+        return save_and_launch(&app, installer, &request_id).await;
     }
 
+    save_and_launch(&app, installer, &request_id).await
+}
+
+async fn save_and_launch(
+    app: &AppHandle,
+    installer: Vec<u8>,
+    request_id: &str,
+) -> Result<(), String> {
     let download_directory = app
         .path()
         .download_dir()
@@ -167,6 +264,15 @@ pub async fn download_and_install_update(
     let temporary = destination.with_extension("download");
     fs::write(&temporary, &installer).map_err(|error| format!("无法保存安装包：{error}"))?;
     fs::rename(&temporary, &destination).map_err(|error| format!("无法保存安装包：{error}"))?;
+    let _ = app.emit(
+        "update-progress",
+        UpdateProgress {
+            request_id,
+            phase: "launch",
+            bytes: 1,
+            total_bytes: Some(1),
+        },
+    );
 
     #[cfg(target_os = "windows")]
     {
@@ -186,6 +292,45 @@ pub async fn download_and_install_update(
 #[cfg(test)]
 mod tests {
     use super::{checksum_for_file, is_trusted_installer};
+    #[test]
+    fn verification_progress_tracks_bytes_and_reaches_total() {
+        let bytes = vec![b'a'; 200_000];
+        let mut progress = Vec::new();
+        let digest =
+            super::sha256_with_progress(&bytes, |done, total| progress.push((done, total)));
+        assert_eq!(digest, super::sha256_hex(&bytes));
+        assert_eq!(progress.first(), Some(&(0, 200_000)));
+        assert_eq!(progress.last(), Some(&(200_000, 200_000)));
+        assert!(progress.len() > 2);
+        assert!(progress.windows(2).all(|p| p[0].0 < p[1].0));
+    }
+    #[tokio::test]
+    async fn download_reports_bytes_even_without_content_length() {
+        use std::io::{Read, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = server.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = server.accept().unwrap();
+            let mut request = [0; 4096];
+            stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabc")
+                .unwrap();
+        });
+        let mut updates = Vec::new();
+        let bytes = super::download_bytes(
+            &reqwest::Client::new(),
+            &format!("http://{address}"),
+            |done, total| updates.push((done, total)),
+        )
+        .await
+        .unwrap();
+        worker.join().unwrap();
+        assert_eq!(bytes, b"abc");
+        assert_eq!(updates.first(), Some(&(0, None)));
+        assert_eq!(updates.last(), Some(&(3, Some(3))));
+        assert!(updates.iter().any(|p| p == &(3, None)));
+    }
 
     #[test]
     fn installer_launch_only_succeeds_after_authorization() {

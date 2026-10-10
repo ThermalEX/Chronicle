@@ -143,27 +143,36 @@ pub fn cancel_backup_health_check(
     Ok(())
 }
 #[tauri::command]
-pub fn load_backup_health_report(
+pub async fn load_backup_health_report(
     state: State<'_, crate::AppState>,
 ) -> Result<Option<HealthReport>, String> {
-    let root = state
-        .repository
-        .lock()
-        .map_err(|e| e.to_string())?
-        .root()
-        .to_path_buf();
-    match fs::read(root.join("cache/backup-health-report.json")) {
-        Ok(bytes) => {
-            let report: HealthReport =
-                serde_json::from_slice(&bytes).map_err(|_| "health_cache_corrupt")?;
-            if report.format_version != 1 {
-                return Err("health_cache_corrupt".into());
+    load_report_from_repository(state.repository.clone()).await
+}
+
+async fn load_report_from_repository(
+    repository: Arc<Mutex<chronicle_storage::LocalRepository>>,
+) -> Result<Option<HealthReport>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = repository
+            .lock()
+            .map_err(|e| e.to_string())?
+            .root()
+            .to_path_buf();
+        match fs::read(root.join("cache/backup-health-report.json")) {
+            Ok(bytes) => {
+                let report: HealthReport =
+                    serde_json::from_slice(&bytes).map_err(|_| "health_cache_corrupt")?;
+                if report.format_version != 1 {
+                    return Err("health_cache_corrupt".into());
+                }
+                Ok(Some(report))
             }
-            Ok(Some(report))
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.to_string()),
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.to_string()),
-    }
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 #[tauri::command]
 pub fn start_backup_health_check(
@@ -228,12 +237,9 @@ pub fn start_backup_health_check(
                 let current = repository
                     .lock()
                     .map_err(|e| e.to_string())?
-                    .health_inputs()
+                    .health_input(&input.entry.id)
                     .map_err(|e| e.to_string())?;
-                if !current
-                    .iter()
-                    .any(|i| i.entry.id == input.entry.id && i.fingerprint == input.fingerprint)
-                {
+                if !current.is_some_and(|item| item.fingerprint == input.fingerprint) {
                     result.code = HealthCode::ChangedDuringCheck;
                     result.comparison = ContentComparison::Unknown;
                 }
@@ -265,10 +271,12 @@ pub fn start_backup_health_check(
             // while later archives were being checked. Do not publish a stale success.
             let guard = repository.lock().map_err(|e| e.to_string())?;
             let current = guard.health_inputs().map_err(|e| e.to_string())?;
+            let fingerprints: BTreeMap<_, _> = current
+                .iter()
+                .map(|item| (&item.entry.id, &item.fingerprint))
+                .collect();
             for (input, result) in inputs.iter().zip(results.iter_mut()) {
-                if !current.iter().any(|item| {
-                    item.entry.id == input.entry.id && item.fingerprint == input.fingerprint
-                }) {
+                if fingerprints.get(&input.entry.id).copied() != Some(&input.fingerprint) {
                     result.code = HealthCode::ChangedDuringCheck;
                     result.comparison = ContentComparison::Unknown;
                     observations.entries.remove(&input.entry.id);
@@ -311,6 +319,39 @@ pub fn start_backup_health_check(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn report_read_yields_instead_of_waiting_on_repository_in_async_executor() {
+        use std::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let repository = Arc::new(Mutex::new(
+            chronicle_storage::LocalRepository::open(temp.path()).unwrap(),
+        ));
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let busy_repository = repository.clone();
+        let worker = std::thread::spawn(move || {
+            let _guard = busy_repository.lock().unwrap();
+            ready_tx.send(()).unwrap();
+            // Bounded fallback makes the old blocking implementation fail rather than hang.
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(2));
+        });
+        ready_rx.recv().unwrap();
+        let mut future = std::pin::pin!(load_report_from_repository(repository));
+        let initial = future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()));
+        let _ = release_tx.send(());
+        worker.join().unwrap();
+        assert!(
+            matches!(initial, Poll::Pending),
+            "report IO must yield while repository is busy"
+        );
+        assert!(tauri::async_runtime::block_on(future).unwrap().is_none());
+    }
+
     #[test]
     fn duplicate_start_and_wrong_cancel_do_not_replace_current_task() {
         let tasks = HealthTasks::default();
