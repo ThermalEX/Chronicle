@@ -18,6 +18,8 @@ Chronicle 是面向游戏存档、软件配置和个人文件的桌面时间线�
 
 当前正式版为 **1.3.6**，包含定制主题库、多源并行同步和整体响应优化；各版本差异见更新日志。截图来自 Windows 桌面端，使用「牧濑红莉栖」主题和独立演示资料库。软件不附带默认壁纸或角色主题包，主题市场和视频主题尚未实现。
 
+示例主题可单独下载：[牧濑红莉栖](https://github.com/ThermalEX/Chronicle/releases/download/v1.3.6/Makise-Kurisu.zip) · [粉漫少女](https://github.com/ThermalEX/Chronicle/releases/download/v1.3.6/Pink-Anime-Girl.zip)。无需解压，在「设置 → 个性化 → 定制主题」导入 ZIP，预览后保存；主题名取自 ZIP 文件名，可在导入前改为中文名称。素材版权和来源见 [主题包说明](docs/themes.md)。
+
 ![红莉栖主题下的 Chronicle 主工作区](docs/images/kurisu-workspace.jpg)
 
 ## 能做什么
