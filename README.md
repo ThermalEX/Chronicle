@@ -16,11 +16,11 @@ Chronicle 是面向游戏存档、软件配置和个人文件的桌面时间线�
 
 [下载发行版](https://github.com/ThermalEX/Chronicle/releases) · [更新日志](docs/changelog.md) · [云端配置指南](docs/cloud-setup.md) · [主题包说明](docs/themes.md)
 
-当前正式版为 **1.3.6**，包含定制主题库、多源并行同步和整体响应优化；各版本差异见更新日志。截图来自 Windows 桌面端，使用「牧濑红莉栖」主题和独立演示资料库。软件不附带默认壁纸或角色主题包，主题市场和视频主题尚未实现。
+当前正式版为 **1.3.7**，包含定制主题库、多源并行同步和整体响应优化；各版本差异见更新日志。截图来自 Windows 桌面端，使用「牧濑红莉栖」主题和独立演示资料库。软件不附带默认壁纸或角色主题包，主题市场和视频主题尚未实现。
 
-**2026-10-11 修补版**修复了新同步协议下「覆盖下载」被拦截的问题，确认后可从云端替换本机快照库，不改游戏原始文件。原 1.3.6 用户请重新下载覆盖安装，同版本不会弹出升级提示。
+**1.3.7 下载优化**支持全选存档（不自动选择设置文件）、批量覆盖确认和快照下载进度；同一次预览的下载复用首次扫描结果，文件并行传输，已校验的本机快照无需重复下载，不改游戏原始文件。1.3.6 用户可通过更新检查升级。
 
-示例主题可单独下载：[牧濑红莉栖](https://github.com/ThermalEX/Chronicle/releases/download/v1.3.6/Makise-Kurisu.zip) · [粉漫少女](https://github.com/ThermalEX/Chronicle/releases/download/v1.3.6/Pink-Anime-Girl.zip)。无需解压，在「设置 → 个性化 → 定制主题」导入 ZIP，预览后保存；主题名取自 ZIP 文件名，可在导入前改为中文名称。素材版权和来源见 [主题包说明](docs/themes.md)。
+示例主题可单独下载：[牧濑红莉栖](https://github.com/ThermalEX/Chronicle/releases/download/v1.3.7/Makise-Kurisu.zip) · [粉漫少女](https://github.com/ThermalEX/Chronicle/releases/download/v1.3.7/Pink-Anime-Girl.zip)。无需解压，在「设置 → 个性化 → 定制主题」导入 ZIP，预览后保存；主题名取自 ZIP 文件名，可在导入前改为中文名称。素材版权和来源见 [主题包说明](docs/themes.md)。
 
 ![红莉栖主题下的 Chronicle 主工作区](docs/images/kurisu-workspace.jpg)
 

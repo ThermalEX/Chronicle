@@ -87,6 +87,18 @@ pub enum RemoteStore {
 }
 
 impl RemoteStore {
+    pub(crate) async fn object_etag(&self, path: &str) -> Result<Option<String>> {
+        validate_relative_path(path)?;
+        self.pace().await;
+        match self {
+            Self::LegacyWebDav(client) => client.object_etag(path).await,
+            Self::OpenDal(op, ..) => op
+                .stat(path)
+                .await
+                .map(|metadata| metadata.etag().map(str::to_owned))
+                .map_err(remote_error),
+        }
+    }
     /// # Errors
     /// Returns an error for invalid configuration, paths, serialization or failed I/O.
     #[allow(clippy::needless_pass_by_value)] // Consume credential input at the client boundary.
@@ -261,6 +273,44 @@ impl RemoteStore {
                 result.sort();
                 result.dedup();
                 Ok(result)
+            }
+        }
+    }
+    pub(crate) async fn operation_versions(&self, prefix: &str) -> Result<(Vec<String>, bool)> {
+        validate_relative_path(prefix)?;
+        self.pace().await;
+        match self {
+            Self::LegacyWebDav(client) => client.operation_versions(prefix).await,
+            Self::OpenDal(op, ..) => {
+                let mut versions = Vec::new();
+                let mut reliable = true;
+                for entry in op.list(prefix).await.map_err(remote_error)? {
+                    validate_relative_path(entry.path())?;
+                    let suffix = entry
+                        .path()
+                        .strip_prefix(prefix)
+                        .ok_or_else(|| invalid("列举返回了越界路径"))?;
+                    if suffix.contains('/')
+                        || Path::new(suffix).extension() != Some(std::ffi::OsStr::new("json"))
+                    {
+                        continue;
+                    }
+                    let meta = entry.metadata();
+                    let version = meta
+                        .version()
+                        .or(meta.etag())
+                        .or(meta.content_md5())
+                        .filter(|value| !value.is_empty());
+                    reliable &= version.is_some();
+                    versions.push(serde_json::to_string(&(
+                        entry.path(),
+                        version,
+                        format!("{:?}", meta.last_modified()),
+                        meta.content_length(),
+                    ))?);
+                }
+                versions.sort();
+                Ok((versions, reliable))
             }
         }
     }

@@ -65,7 +65,7 @@ mod record_validation_tests {
     }
     #[tokio::test]
     async fn event_reads_respect_metadata_limits_and_legacy_request_spacing() {
-        for (limit, delay, maximum) in [(1, 0, 1), (3, 0, 3), (4, 25, 1)] {
+        for (limit, delay, maximum) in [(1, 0, 1), (3, 0, 3), (4, 25, 4)] {
             let peak = event_read_peak(crate::RequestPolicy {
                 max_concurrent_metadata_reads: limit,
                 request_delay_ms: delay,
@@ -77,7 +77,7 @@ mod record_validation_tests {
                 peak <= maximum,
                 "configured limit {limit}, spacing {delay}ms: peak = {peak}"
             );
-            if limit > 1 && delay == 0 {
+            if limit > 1 {
                 assert!(peak >= 2);
             }
         }
@@ -165,6 +165,40 @@ pub enum SnapshotRemote {
     GitHub(GitHubClient),
 }
 impl SnapshotRemote {
+    /// Reads only a control object's version header when supported by the backend.
+    /// # Errors
+    /// Returns remote failures other than not-found; no credentials are exposed.
+    pub async fn object_etag(&self, path: &str) -> Result<Option<String>, String> {
+        match self {
+            Self::Store(store) => match store.object_etag(path).await {
+                Ok(tag) => Ok(tag),
+                Err(WebDavError::NotFound(_)) => Ok(Some("not-found".into())),
+                Err(error) => Err(error.to_string()),
+            },
+            Self::GitHub(client) => client
+                .head()
+                .await
+                .map(|(commit, _)| Some(commit))
+                .map_err(|e| e.to_string()),
+        }
+    }
+    /// Checks the append-only log's directory metadata without downloading its records.
+    /// # Errors
+    /// Returns listing or branch-read errors; access errors are never treated as empty.
+    pub async fn operation_versions(&self) -> Result<(Vec<String>, bool), String> {
+        match self {
+            Self::Store(store) => match store.operation_versions(OPERATIONS).await {
+                Ok(versions) => Ok(versions),
+                Err(WebDavError::NotFound(_)) => Ok((Vec::new(), true)),
+                Err(error) => Err(error.to_string()),
+            },
+            Self::GitHub(client) => client
+                .head()
+                .await
+                .map(|(commit, tree)| (vec![commit, tree], true))
+                .map_err(|e| e.to_string()),
+        }
+    }
     /// Reads an optional protocol object.
     ///
     /// # Errors
@@ -258,15 +292,9 @@ impl SnapshotRemote {
             Self::GitHub(client) => Some(client.metadata_request_policy()),
             Self::Store(RemoteStore::OpenDal(..)) => None,
         };
-        // Legacy adapters delay each request independently, rather than using a shared
-        // pacer. Keep paced reads serial so parallel dispatch cannot create bursts.
-        let concurrency = legacy_policy.map_or(4, |policy| {
-            if policy.request_delay_ms > 0 {
-                1
-            } else {
-                policy.max_concurrent_metadata_reads.clamp(1, 4)
-            }
-        });
+        // Cloned adapters share their request pacer, so spaced reads may overlap safely.
+        let concurrency =
+            legacy_policy.map_or(4, |policy| policy.max_concurrent_metadata_reads.clamp(1, 4));
         let mut files = files.into_iter().enumerate();
         let mut reads = tokio::task::JoinSet::new();
         let mut records = BTreeMap::new();

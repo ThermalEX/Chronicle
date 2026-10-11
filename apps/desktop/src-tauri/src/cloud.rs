@@ -111,6 +111,274 @@ pub struct CloudPreviewDto {
     source_name: String,
     library_id: Option<String>,
     items: Vec<RemoteItemDto>,
+    download_token: Option<String>,
+}
+
+#[derive(Clone)]
+struct DownloadScan {
+    catalog: Value,
+    events: Vec<chronicle_sync::snapshot_protocol::Event>,
+    tree: Option<Value>,
+    stamp: Vec<u8>,
+    reliable_versions: bool,
+    reuse_local: bool,
+    transfer_limit: usize,
+}
+struct CachedDownloadScan {
+    token: String,
+    source_id: String,
+    root: PathBuf,
+    signature: Vec<u8>,
+    scan: std::sync::Arc<DownloadScan>,
+}
+static DOWNLOAD_SCANS: std::sync::LazyLock<std::sync::Mutex<Vec<CachedDownloadScan>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+#[derive(Debug)]
+struct DownloadBaseline {
+    catalog: Value,
+    bindings: Vec<u8>,
+    deletions: Vec<u8>,
+}
+impl DownloadBaseline {
+    fn capture(
+        repository: &std::sync::Mutex<chronicle_storage::LocalRepository>,
+        root: &Path,
+    ) -> Result<Self, String> {
+        let repo = repository.lock().map_err(|_| storage_error())?;
+        if repo.root() != root {
+            return Err("资料库位置已改变，请重新预览".into());
+        }
+        Ok(Self {
+            catalog: read_json(&root.join("catalog.json"))?,
+            bindings: fs::read(root.join("config/bindings.json")).map_err(|e| e.to_string())?,
+            deletions: serde_json::to_vec(
+                &repo.list_snapshot_deletions().map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?,
+        })
+    }
+}
+
+async fn download_stamp(
+    remote: &chronicle_sync::snapshot_protocol::SnapshotRemote,
+) -> Result<(Vec<u8>, bool), String> {
+    let (versions, reliable) = remote.operation_versions().await?;
+    let mut hash = Sha256::new();
+    hash.update(serde_json::to_vec(&versions).map_err(|e| e.to_string())?);
+    if matches!(
+        remote,
+        chronicle_sync::snapshot_protocol::SnapshotRemote::GitHub(_)
+    ) {
+        return Ok((hash.finalize().to_vec(), reliable));
+    }
+    for path in [
+        "catalog.json",
+        "sync-v2/protocol.json",
+        "category-tree.json",
+    ] {
+        match remote.object_etag(path).await? {
+            Some(tag) => {
+                hash.update([1]);
+                hash.update(serde_json::to_vec(&tag).map_err(|e| e.to_string())?);
+            }
+            // Some providers expose no version header: compare only these small control
+            // documents rather than weakening stale-state protection or rereading the log.
+            None => {
+                hash.update([0]);
+                hash.update(
+                    serde_json::to_vec(&remote.optional_bytes(path).await?)
+                        .map_err(|e| e.to_string())?,
+                );
+            }
+        }
+    }
+    Ok((hash.finalize().to_vec(), reliable))
+}
+async fn scan_download(
+    remote: &chronicle_sync::snapshot_protocol::SnapshotRemote,
+) -> Result<DownloadScan, String> {
+    let (stamp, reliable_versions) = download_stamp(remote).await?;
+    let (catalog, events) = crate::snapshot_sync::overwrite_download_view(remote).await?;
+    let tree = remote
+        .optional_bytes("category-tree.json")
+        .await?
+        .map(|bytes| serde_json::from_slice(&bytes))
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    if download_stamp(remote).await? != (stamp.clone(), reliable_versions) {
+        return Err("本机或云端状态已变化，请重新预览".into());
+    }
+    Ok(DownloadScan {
+        catalog,
+        events,
+        tree,
+        stamp,
+        reliable_versions,
+        reuse_local: true,
+        transfer_limit: 2,
+    })
+}
+
+async fn validate_download_scan(
+    remote: &chronicle_sync::snapshot_protocol::SnapshotRemote,
+    scan: &DownloadScan,
+) -> Result<(), String> {
+    if !scan.reliable_versions && scan.reuse_local {
+        return Err("云盘未提供可靠的清单版本标识，无法安全复用扫描结果进行覆盖下载；Backblaze B2 可改用 S3 接口".into());
+    }
+    if download_stamp(remote).await? != (scan.stamp.clone(), scan.reliable_versions) {
+        return Err("本机或云端状态已变化，请重新预览".into());
+    }
+    // Legacy callers retain their full-record guard on providers without versions.
+    // The cached UI download path never falls back to another full scan.
+    if !scan.reliable_versions {
+        let (catalog, events) = crate::snapshot_sync::overwrite_download_view(remote).await?;
+        if catalog != scan.catalog
+            || serde_json::to_vec(&events).map_err(|e| e.to_string())?
+                != serde_json::to_vec(&scan.events).map_err(|e| e.to_string())?
+        {
+            return Err("本机或云端状态已变化，请重新预览".into());
+        }
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadResultDto {
+    entry_id: String,
+    error: Option<String>,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadProgressDto {
+    request_id: String,
+    entry_id: String,
+    completed: usize,
+    total: usize,
+    phase: String,
+}
+
+#[tauri::command(async)]
+pub async fn cloud_download_selected(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    source_id: String,
+    entry_ids: Vec<String>,
+    preview_token: String,
+    confirmed: bool,
+    use_cloud_category_tree: bool,
+    request_id: String,
+) -> Result<Vec<DownloadResultDto>, String> {
+    use tauri::Emitter;
+    if !confirmed {
+        return Err("请先确认覆盖下载".into());
+    }
+    let (remote, root, _, signature) = snapshot_remote(&state, &source_id)?;
+    let scan = {
+        let cache = DOWNLOAD_SCANS.lock().map_err(|_| storage_error())?;
+        cache
+            .iter()
+            .find(|item| {
+                item.token == preview_token
+                    && item.source_id == source_id
+                    && item.root == root
+                    && item.signature == signature
+            })
+            .map(|item| std::sync::Arc::clone(&item.scan))
+            .ok_or("请刷新云端清单后重试")?
+    };
+    let mut ids = std::collections::HashSet::new();
+    if entry_ids.is_empty()
+        || entry_ids
+            .iter()
+            .any(|id| id.starts_with("config:") || !ids.insert(id))
+    {
+        return Err("请选择存档，不能批量覆盖设置文件".into());
+    }
+    let total = entry_ids
+        .iter()
+        .map(|id| {
+            scan.catalog["entries"]
+                .as_array()
+                .and_then(|entries| {
+                    entries
+                        .iter()
+                        .find(|entry| entry["id"].as_str() == Some(id))
+                })
+                .and_then(|entry| entry["snapshots"].as_array())
+                .map_or(0, Vec::len)
+        })
+        .sum();
+    let mut completed = 0;
+    let mut results = Vec::new();
+    let mut baseline = DownloadBaseline::capture(&state.repository, &root)?;
+    let mut interrupted = false;
+    for entry_id in entry_ids {
+        if interrupted {
+            results.push(DownloadResultDto {
+                entry_id,
+                error: Some("批量下载已停止，请重新预览后重试".into()),
+            });
+            continue;
+        }
+        let progress = |done: usize, committing: bool| {
+            let _ = app.emit(
+                "cloud-download-progress",
+                DownloadProgressDto {
+                    request_id: request_id.clone(),
+                    entry_id: entry_id.clone(),
+                    completed: completed + done,
+                    total,
+                    phase: if committing { "commit" } else { "download" }.into(),
+                },
+            );
+        };
+        let outcome = overwrite_scanned_download(
+            &state.repository,
+            &remote,
+            &root,
+            &entry_id,
+            use_cloud_category_tree,
+            &scan,
+            &baseline,
+            &progress,
+        )
+        .await;
+        if let Ok(updated) = &outcome {
+            completed += scan.catalog["entries"]
+                .as_array()
+                .and_then(|entries| {
+                    entries
+                        .iter()
+                        .find(|entry| entry["id"].as_str() == Some(&entry_id))
+                })
+                .and_then(|entry| entry["snapshots"].as_array())
+                .map_or(0, Vec::len);
+            baseline = DownloadBaseline {
+                catalog: updated.catalog.clone(),
+                bindings: updated.bindings.clone(),
+                deletions: updated.deletions.clone(),
+            };
+        }
+        interrupted = outcome.is_err();
+        results.push(DownloadResultDto {
+            entry_id,
+            error: outcome.err(),
+        });
+    }
+    let _ = app.emit(
+        "cloud-download-progress",
+        DownloadProgressDto {
+            request_id,
+            entry_id: String::new(),
+            completed,
+            total,
+            phase: "complete".into(),
+        },
+    );
+    Ok(results)
 }
 
 #[derive(Debug, Serialize)]
@@ -457,18 +725,6 @@ pub(crate) fn snapshot_remote(
     Ok((remote, root, name, signature))
 }
 
-fn configured_github_client(
-    state: &State<'_, AppState>,
-    source_id: &str,
-) -> Result<(GitHubClient, CloudSourceInput, PathBuf), String> {
-    let (source, root, request_policy) = configured_source(state, source_id)?;
-    if source.provider != "legacy_github" {
-        return Err("该同步源不是 GitHub 仓库".into());
-    }
-    let client = github_client(&source, credential(&source)?, request_policy)?;
-    Ok((client, source, root))
-}
-
 #[tauri::command(async)]
 pub async fn save_cloud_credential(
     source_id: String,
@@ -765,19 +1021,47 @@ pub async fn cloud_preview(
     let request_id = request_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     crate::snapshot_sync::begin(&request_id)?;
     let result = crate::snapshot_sync::cancellable_read(&request_id, async {
-        let (source, _, _) = configured_source(&state, &source_id)?;
-        if source.provider == "legacy_github" {
-            let (client, source, _) = configured_github_client(&state, &source_id)?;
-            return github_preview(&client, source).await;
+        let (remote, root, name, signature) = snapshot_remote(&state, &source_id)?;
+        let mut scan = scan_download(&remote).await?;
+        scan.transfer_limit = configured_source(&state, &source_id)?
+            .2
+            .max_concurrent_transfers
+            .clamp(1, 4);
+        let scan = std::sync::Arc::new(scan);
+        let library = remote
+            .optional_bytes("library.json")
+            .await?
+            .map(|bytes| serde_json::from_slice::<Value>(&bytes))
+            .transpose()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(Value::Null);
+        let mut result = preview_from_catalog(
+            name,
+            &library,
+            Some(serde_json::from_value(scan.catalog.clone()).map_err(|e| e.to_string())?),
+        );
+        let token = Uuid::new_v4().to_string();
+        let mut cache = DOWNLOAD_SCANS.lock().map_err(|_| storage_error())?;
+        cache.retain(|item| item.source_id != source_id);
+        if cache.len() >= 8 {
+            cache.remove(0);
         }
-        let (client, source, _) = configured_client(&state, &source_id)?;
-        preview_store(&client, source.name).await
+        cache.push(CachedDownloadScan {
+            token: token.clone(),
+            source_id: source_id.clone(),
+            root,
+            signature,
+            scan,
+        });
+        result.download_token = Some(token);
+        Ok(result)
     })
     .await;
     crate::snapshot_sync::end(&request_id);
     result
 }
 
+#[cfg(test)]
 async fn preview_store(client: &RemoteStore, name: String) -> Result<CloudPreviewDto, String> {
     let library = match client.get_json("library.json").await {
         Ok(value) => value,
@@ -858,6 +1142,7 @@ fn preview_from_catalog(
             .and_then(Value::as_str)
             .map(str::to_owned),
         items,
+        download_token: None,
     }
 }
 
@@ -1009,23 +1294,6 @@ fn merge_entry_categories_from_catalog(
         .ok_or_else(|| "云端分类层级格式无效".to_owned())?;
     merge_categories(catalog, categories);
     Ok(())
-}
-
-async fn github_preview(
-    client: &GitHubClient,
-    source: CloudSourceInput,
-) -> Result<CloudPreviewDto, String> {
-    let library = match client.get_json("library.json").await {
-        Ok(value) => value,
-        Err(GitHubError::NotFound(_)) => Value::Null,
-        Err(error) => return Err(error.to_string()),
-    };
-    let catalog: Option<Catalog> = match client.get_json("catalog.json").await {
-        Ok(value) => Some(value),
-        Err(GitHubError::NotFound(_)) => None,
-        Err(error) => return Err(error.to_string()),
-    };
-    Ok(preview_from_catalog(source.name, &library, catalog))
 }
 
 async fn github_overwrite_upload(
@@ -2149,7 +2417,14 @@ pub async fn cloud_overwrite_download(
 ) -> Result<(), String> {
     if confirmed == Some(true) {
         let (remote, root, _, _) = snapshot_remote(&state, &source_id)?;
-        return overwrite_snapshot_download(&state.repository, &remote, &root, &entry_id, use_cloud_category_tree).await;
+        return overwrite_snapshot_download(
+            &state.repository,
+            &remote,
+            &root,
+            &entry_id,
+            use_cloud_category_tree,
+        )
+        .await;
     }
     crate::snapshot_sync::guard_legacy_write(&state, &source_id).await?;
     let (configured_source, root, request_policy) = configured_source(&state, &source_id)?;
@@ -2271,7 +2546,6 @@ pub async fn cloud_overwrite_download(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
 async fn overwrite_snapshot_download(
     repository: &std::sync::Mutex<chronicle_storage::LocalRepository>,
     remote: &chronicle_sync::snapshot_protocol::SnapshotRemote,
@@ -2279,6 +2553,35 @@ async fn overwrite_snapshot_download(
     entry_id: &str,
     use_cloud_category_tree: bool,
 ) -> Result<(), String> {
+    // Preserve the original caller's concurrent-edit guard while using the shared pipeline.
+    let baseline = DownloadBaseline::capture(repository, root)?;
+    let mut scan = scan_download(remote).await?;
+    scan.reuse_local = false;
+    overwrite_scanned_download(
+        repository,
+        remote,
+        root,
+        entry_id,
+        use_cloud_category_tree,
+        &scan,
+        &baseline,
+        &|_, _| {},
+    )
+    .await
+    .map(|_| ())
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+async fn overwrite_scanned_download(
+    repository: &std::sync::Mutex<chronicle_storage::LocalRepository>,
+    remote: &chronicle_sync::snapshot_protocol::SnapshotRemote,
+    root: &Path,
+    entry_id: &str,
+    use_cloud_category_tree: bool,
+    scan: &DownloadScan,
+    baseline: &DownloadBaseline,
+    progress: &(dyn Fn(usize, bool) + Sync),
+) -> Result<DownloadBaseline, String> {
     use chronicle_core::Snapshot;
     use chronicle_sync::snapshot_protocol::{Action, EventKind, plan_sync};
     let (original, deletions, bindings) = {
@@ -2293,7 +2596,15 @@ async fn overwrite_snapshot_download(
             fs::read(root.join("config/bindings.json")).map_err(|e| e.to_string())?,
         )
     };
-    let (remote_catalog, events) = crate::snapshot_sync::overwrite_download_view(remote).await?;
+    if serde_json::from_slice::<Value>(&original).map_err(|e| e.to_string())? != baseline.catalog
+        || deletions != baseline.deletions
+        || bindings != baseline.bindings
+    {
+        return Err("本机或云端状态已变化，请重新预览".into());
+    }
+    validate_download_scan(remote, scan).await?;
+    let remote_catalog = &scan.catalog;
+    let events = &scan.events;
     if plan_sync(&[], &events, &[], false)
         .iter()
         .any(|op| op.snapshot.entry_id == entry_id && op.action == Action::Conflict)
@@ -2373,6 +2684,21 @@ async fn overwrite_snapshot_download(
     let outcome = async {
         let mut names = std::collections::HashSet::new();
         let mut ids = std::collections::HashSet::new();
+        let published: std::collections::HashMap<_, _> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::Published {
+                    snapshot,
+                    object_path,
+                    ..
+                } if snapshot.entry_id == entry_id => Some((
+                    (snapshot.id.as_str(), snapshot.object_hash.as_str()),
+                    object_path,
+                )),
+                _ => None,
+            })
+            .collect();
+        let mut jobs = Vec::new();
         for snapshot in &snapshots {
             checked_folder(&snapshot.archive_name)?;
             if snapshot.entry_id != entry_id
@@ -2381,55 +2707,88 @@ async fn overwrite_snapshot_download(
             {
                 return Err("云端快照标识或文件名重复".into());
             }
-            let path = events
-                .iter()
-                .find_map(|event| match &event.kind {
-                    EventKind::Published {
-                        snapshot: original,
-                        object_path,
-                        ..
-                    } if original.id == snapshot.id
-                        && original.entry_id == entry_id
-                        && original.object_hash == snapshot.object_hash =>
-                    {
-                        Some(object_path)
-                    }
-                    _ => None,
-                })
+            let path = published
+                .get(&(snapshot.id.as_str(), snapshot.object_hash.as_str()))
                 .ok_or("云端快照缺少发布记录")?;
-            let bytes = remote
-                .optional_bytes(path)
-                .await?
-                .ok_or("远端快照文件不存在，本地内容未更改")?;
-            if format!("{:x}", Sha256::digest(&bytes)) != snapshot.object_hash {
-                return Err("远端快照校验失败，本地内容未更改".into());
+            jobs.push((snapshot.clone(), (*path).clone()));
+        }
+        let mut done = 0;
+        for chunk in jobs.chunks(scan.transfer_limit) {
+            let mut downloads = Vec::new();
+            for (snapshot, path) in chunk {
+                let remote = remote.clone();
+                let snapshot = snapshot.clone();
+                let path = path.clone();
+                let target = staging.join(&snapshot.archive_name);
+                let source = root
+                    .join("archives")
+                    .join(&folder)
+                    .join(&snapshot.archive_name);
+                let reuse = scan.reuse_local;
+                downloads.push(tauri::async_runtime::spawn(async move {
+                    let hash = snapshot.object_hash.clone();
+                    let cached = tauri::async_runtime::spawn_blocking(move || {
+                        if !reuse {
+                            return None;
+                        }
+                        fs::read(source)
+                            .ok()
+                            .filter(|bytes| format!("{:x}", Sha256::digest(bytes)) == hash)
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?;
+                    let bytes = match cached {
+                        Some(bytes) => bytes,
+                        None => remote
+                            .optional_bytes(&path)
+                            .await?
+                            .ok_or("远端快照文件不存在，本地内容未更改")?,
+                    };
+                    tauri::async_runtime::spawn_blocking(move || {
+                        if format!("{:x}", Sha256::digest(&bytes)) != snapshot.object_hash {
+                            return Err("远端快照校验失败，本地内容未更改".to_owned());
+                        }
+                        fs::write(target, bytes).map_err(|e| e.to_string())
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?
+                }));
             }
-            fs::write(staging.join(&snapshot.archive_name), bytes).map_err(|e| e.to_string())?;
+            // Drain all in-flight writes before removing staging on any error.
+            let mut failure = None;
+            for task in downloads {
+                match task
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|result| result)
+                {
+                    Ok(()) => {
+                        done += 1;
+                        progress(done, false);
+                    }
+                    Err(error) => {
+                        failure.get_or_insert(error);
+                    }
+                }
+            }
+            if let Some(error) = failure {
+                return Err(error);
+            }
         }
         let tree = if use_cloud_category_tree {
-            remote
-                .optional_bytes("category-tree.json")
-                .await?
-                .map(|bytes| serde_json::from_slice::<Value>(&bytes))
-                .transpose()
-                .map_err(|e| e.to_string())?
+            scan.tree.as_ref()
         } else {
             None
         };
-        if crate::snapshot_sync::overwrite_download_view(remote).await?
-            != (remote_catalog.clone(), events.clone())
-        {
-            return Err("本机或云端状态已变化，请重新预览".into());
-        }
+        progress(done, true);
+        validate_download_scan(remote, scan).await?;
         let entries = catalog["entries"]
             .as_array_mut()
             .ok_or("本地清单格式无效")?;
         entries.retain(|entry| entry["id"].as_str() != Some(entry_id));
         entries.push(entry);
         if use_cloud_category_tree
-            && !tree
-                .as_ref()
-                .is_some_and(|tree| merge_entry_category_tree(&mut catalog, tree, entry_id))
+            && !tree.is_some_and(|tree| merge_entry_category_tree(&mut catalog, tree, entry_id))
         {
             merge_entry_categories_from_catalog(&mut catalog, &remote_catalog, entry_id)?;
         }
@@ -2445,7 +2804,7 @@ async fn overwrite_snapshot_download(
             return Err("本机或云端状态已变化，请重新预览".into());
         }
         let mut documents = overwrite_revision_documents(&repo, entry_id, &snapshots, &events)?;
-        documents.push((root.join("catalog.json"), catalog));
+        documents.push((root.join("catalog.json"), catalog.clone()));
         let previous = documents
             .iter()
             .map(|(path, _)| {
@@ -2503,7 +2862,11 @@ async fn overwrite_snapshot_download(
         if backup.exists() {
             let _ = fs::remove_dir_all(&backup);
         }
-        Ok(())
+        Ok(DownloadBaseline {
+            catalog,
+            bindings,
+            deletions,
+        })
     }
     .await;
     if staging.exists() {
@@ -3046,17 +3409,27 @@ mod tests {
     use chronicle_sync::snapshot_protocol::{Device, Event, EventKind, SnapshotRemote};
     use std::sync::{Arc, Mutex};
 
-    fn overwrite_fixture() -> (tempfile::TempDir, Arc<Mutex<LocalRepository>>, String, Snapshot) {
+    fn overwrite_fixture() -> (
+        tempfile::TempDir,
+        Arc<Mutex<LocalRepository>>,
+        String,
+        Snapshot,
+    ) {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("save.txt");
         std::fs::write(&source, "local save").unwrap();
         let repo = LocalRepository::open(temp.path().join("repo")).unwrap();
         let entry = repo.add_entry(&source, None, None).unwrap();
-        let snapshot = repo.create_snapshot(&entry.id, "local", &repo.read_device().unwrap().id, false).unwrap();
+        let snapshot = repo
+            .create_snapshot(&entry.id, "local", &repo.read_device().unwrap().id, false)
+            .unwrap();
         (temp, Arc::new(Mutex::new(repo)), entry.id, snapshot)
     }
 
-    async fn overwrite_remote(repo: &Mutex<LocalRepository>, snapshot: &Snapshot) -> SnapshotRemote {
+    async fn overwrite_remote(
+        repo: &Mutex<LocalRepository>,
+        snapshot: &Snapshot,
+    ) -> SnapshotRemote {
         let remote = SnapshotRemote::Store(chronicle_sync::RemoteStore::OpenDal(
             opendal::Operator::new(opendal::services::Memory::default()).unwrap(),
             Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now())),
@@ -3064,19 +3437,368 @@ mod tests {
         ));
         let (catalog, bytes) = {
             let repo = repo.lock().unwrap();
-            let catalog: serde_json::Value = super::read_json(&repo.root().join("catalog.json")).unwrap();
-            let bytes = std::fs::read(repo.root().join("archives").join(catalog["entries"][0]["folder"].as_str().unwrap()).join(&snapshot.archive_name)).unwrap();
+            let catalog: serde_json::Value =
+                super::read_json(&repo.root().join("catalog.json")).unwrap();
+            let bytes = std::fs::read(
+                repo.root()
+                    .join("archives")
+                    .join(catalog["entries"][0]["folder"].as_str().unwrap())
+                    .join(&snapshot.archive_name),
+            )
+            .unwrap();
             (catalog, bytes)
         };
-        remote.put("catalog.json", serde_json::to_vec(&catalog).unwrap()).await.unwrap();
-        remote.put("sync-v2/protocol.json", br#"{"version":2}"#.to_vec()).await.unwrap();
-        remote.put("sync-v2/objects/test.7z", bytes).await.unwrap();
-        remote.append_event(&Event {
-            operation_id: "publication".into(),
-            device: Device { id: snapshot.device_id.clone(), name: snapshot.device_name.clone(), revision: 0 },
-            kind: EventKind::Published { snapshot: snapshot.clone(), entry: catalog["entries"][0].clone(), object_path: "sync-v2/objects/test.7z".into() },
-        }).await.unwrap();
         remote
+            .put("catalog.json", serde_json::to_vec(&catalog).unwrap())
+            .await
+            .unwrap();
+        remote
+            .put("sync-v2/protocol.json", br#"{"version":2}"#.to_vec())
+            .await
+            .unwrap();
+        remote.put("sync-v2/objects/test.7z", bytes).await.unwrap();
+        remote
+            .append_event(&Event {
+                operation_id: "publication".into(),
+                device: Device {
+                    id: snapshot.device_id.clone(),
+                    name: snapshot.device_name.clone(),
+                    revision: 0,
+                },
+                kind: EventKind::Published {
+                    snapshot: snapshot.clone(),
+                    entry: catalog["entries"][0].clone(),
+                    object_path: "sync-v2/objects/test.7z".into(),
+                },
+            })
+            .await
+            .unwrap();
+        remote
+    }
+
+    #[tokio::test]
+    async fn cached_download_rejects_a_provider_without_reliable_operation_versions() {
+        let (_temp, source, entry, snapshot) = overwrite_fixture();
+        let remote = overwrite_remote(&source, &snapshot).await;
+        let scan = super::scan_download(&remote).await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let target = Mutex::new(LocalRepository::open(&root).unwrap());
+        let baseline = super::DownloadBaseline::capture(&target, &root).unwrap();
+        let before = std::fs::read(root.join("catalog.json")).unwrap();
+        assert!(
+            super::overwrite_scanned_download(
+                &target,
+                &remote,
+                &root,
+                &entry,
+                false,
+                &scan,
+                &baseline,
+                &|_, _| {}
+            )
+            .await
+            .unwrap_err()
+            .contains("可靠的清单版本标识")
+        );
+        assert_eq!(std::fs::read(root.join("catalog.json")).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn legacy_scan_guard_compares_the_same_projected_events_without_a_protocol_marker() {
+        let (_temp, repo, _entry, snapshot) = overwrite_fixture();
+        let remote = overwrite_remote(&repo, &snapshot).await;
+        remote.delete("sync-v2/protocol.json").await.unwrap();
+        remote
+            .delete("sync-v2/operations/publication.json")
+            .await
+            .unwrap();
+        remote
+            .append_event(&Event {
+                operation_id: "legacy-note".into(),
+                device: Device {
+                    id: snapshot.device_id.clone(),
+                    name: snapshot.device_name.clone(),
+                    revision: 0,
+                },
+                kind: EventKind::Revised {
+                    snapshot,
+                    parents: vec![],
+                },
+            })
+            .await
+            .unwrap();
+        let mut scan = super::scan_download(&remote).await.unwrap();
+        scan.reuse_local = false;
+        assert!(!scan.reliable_versions);
+        assert!(scan.events.len() > remote.load_events().await.unwrap().len());
+        super::validate_download_scan(&remote, &scan).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cached_batch_does_not_accept_an_edit_between_entries_as_its_new_baseline() {
+        let (_temp, repo, entry, snapshot) = overwrite_fixture();
+        let remote = overwrite_remote(&repo, &snapshot).await;
+        let scan = super::scan_download(&remote).await.unwrap();
+        let root = repo.lock().unwrap().root().to_owned();
+        let baseline = super::DownloadBaseline::capture(&repo, &root).unwrap();
+        repo.lock()
+            .unwrap()
+            .update_snapshot_note(&entry, &snapshot.id, "new automatic or user edit")
+            .unwrap();
+        let before = std::fs::read(root.join("catalog.json")).unwrap();
+        assert!(
+            super::overwrite_scanned_download(
+                &repo,
+                &remote,
+                &root,
+                &entry,
+                false,
+                &scan,
+                &baseline,
+                &|_, _| {}
+            )
+            .await
+            .unwrap_err()
+            .contains("状态已变化")
+        );
+        assert_eq!(std::fs::read(root.join("catalog.json")).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn cached_http_download_reads_events_only_during_scan_and_reuses_verified_local_files() {
+        use sha2::Digest;
+        use std::{
+            collections::HashMap,
+            io::{Read, Write},
+            sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+        let (_temp, repo, entry, first) = overwrite_fixture();
+        let second = {
+            let repo = repo.lock().unwrap();
+            repo.create_snapshot(&entry, "second", &repo.read_device().unwrap().id, false)
+                .unwrap()
+        };
+        let memory = overwrite_remote(&repo, &first).await;
+        let catalog = memory
+            .optional_bytes("catalog.json")
+            .await
+            .unwrap()
+            .unwrap();
+        let entry_json =
+            serde_json::from_slice::<serde_json::Value>(&catalog).unwrap()["entries"][0].clone();
+        let second_bytes = {
+            let repo = repo.lock().unwrap();
+            std::fs::read(
+                repo.root()
+                    .join("archives")
+                    .join(entry_json["folder"].as_str().unwrap())
+                    .join(&second.archive_name),
+            )
+            .unwrap()
+        };
+        memory
+            .put("sync-v2/objects/second.7z", second_bytes)
+            .await
+            .unwrap();
+        memory
+            .append_event(&Event {
+                operation_id: "second".into(),
+                device: Device {
+                    id: second.device_id.clone(),
+                    name: second.device_name.clone(),
+                    revision: 0,
+                },
+                kind: EventKind::Published {
+                    snapshot: second.clone(),
+                    object_path: "sync-v2/objects/second.7z".into(),
+                    entry: entry_json,
+                },
+            })
+            .await
+            .unwrap();
+        let mut files = HashMap::new();
+        for path in [
+            "catalog.json",
+            "sync-v2/protocol.json",
+            "sync-v2/operations/publication.json",
+            "sync-v2/operations/second.json",
+            "sync-v2/objects/test.7z",
+            "sync-v2/objects/second.7z",
+        ] {
+            files.insert(
+                format!("/Chronicle/{path}"),
+                memory.optional_bytes(path).await.unwrap().unwrap(),
+            );
+        }
+        let files = Arc::new(Mutex::new(files));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server_files = files.clone();
+        let server_requests = requests.clone();
+        let server_active = active.clone();
+        let server_peak = peak.clone();
+        let server_stop = stop.clone();
+        let server = std::thread::spawn(move || {
+            let mut workers = Vec::new();
+            let started = std::time::Instant::now();
+            while !server_stop.load(Ordering::SeqCst) && started.elapsed().as_secs() < 15 {
+                let Ok((mut socket, _)) = listener.accept() else {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    continue;
+                };
+                let files = server_files.clone();
+                let requests = server_requests.clone();
+                let active = server_active.clone();
+                let peak = server_peak.clone();
+                workers.push(std::thread::spawn(move || {
+                    socket.set_nonblocking(false).unwrap();
+                    socket.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+                    let mut buffer = [0; 8192]; let count = socket.read(&mut buffer).unwrap();
+                    let text = String::from_utf8_lossy(&buffer[..count]); let mut parts = text.split_whitespace();
+                    let method = parts.next().unwrap(); let path = parts.next().unwrap();
+                    requests.lock().unwrap().push((method.to_owned(), path.to_owned()));
+                    let (status, body) = if method == "PROPFIND" {
+                        let rows = files.lock().unwrap().iter().filter(|(file, _)| file.starts_with(path) && file.ends_with(".json")).map(|(file, bytes)| format!("<d:response><d:href>{file}</d:href><d:getetag>{:x}</d:getetag><d:status>HTTP/1.1 200 OK</d:status></d:response>", sha2::Sha256::digest(bytes))).collect::<String>();
+                        ("207 Multi-Status", format!("<d:multistatus xmlns:d=\"DAV:\">{rows}</d:multistatus>").into_bytes())
+                    } else {
+                        let bytes = files.lock().unwrap().get(path).cloned();
+                        if path.ends_with(".7z") {
+                            let current = active.fetch_add(1, Ordering::SeqCst) + 1; peak.fetch_max(current, Ordering::SeqCst);
+                            std::thread::sleep(std::time::Duration::from_millis(100)); active.fetch_sub(1, Ordering::SeqCst);
+                        }
+                        match bytes { Some(bytes) => ("200 OK", bytes), None => ("404 Not Found", Vec::new()) }
+                    };
+                    write!(socket, "HTTP/1.1 {status}\r\nETag: \"{:x}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", sha2::Sha256::digest(&body), body.len()).unwrap();
+                    if method != "HEAD" { socket.write_all(&body).unwrap(); }
+                }));
+            }
+            for worker in workers {
+                worker.join().unwrap();
+            }
+        });
+        let remote = SnapshotRemote::Store(chronicle_sync::RemoteStore::LegacyWebDav(
+            chronicle_sync::WebDavClient::new(
+                chronicle_sync::WebDavSource {
+                    endpoint: format!("http://{address}"),
+                    username: String::new(),
+                    password: String::new(),
+                    remote_path: "Chronicle".into(),
+                },
+                chronicle_sync::RequestPolicy {
+                    request_delay_ms: 0,
+                    retry_limit: 0,
+                    ..chronicle_sync::RequestPolicy::default()
+                },
+            )
+            .unwrap(),
+        ));
+        let scan = super::scan_download(&remote).await.unwrap();
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(method, path)| method == "GET" && path.contains("/operations/"))
+                .count(),
+            2
+        );
+        let target_temp = tempfile::tempdir().unwrap();
+        let root = target_temp.path().join("repo");
+        let target = Mutex::new(LocalRepository::open(&root).unwrap());
+        let baseline = super::DownloadBaseline::capture(&target, &root).unwrap();
+        let baseline = super::overwrite_scanned_download(
+            &target,
+            &remote,
+            &root,
+            &entry,
+            false,
+            &scan,
+            &baseline,
+            &|_, _| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            2,
+            "two snapshot transfers should overlap"
+        );
+        files
+            .lock()
+            .unwrap()
+            .retain(|path, _| !path.ends_with(".7z"));
+        let baseline = super::overwrite_scanned_download(
+            &target,
+            &remote,
+            &root,
+            &entry,
+            false,
+            &scan,
+            &baseline,
+            &|_, _| {},
+        )
+        .await
+        .unwrap();
+        {
+            let mut files = files.lock().unwrap();
+            let record = files
+                .get_mut("/Chronicle/sync-v2/operations/publication.json")
+                .unwrap();
+            let changed = String::from_utf8(record.clone())
+                .unwrap()
+                .replace("\"title\":\"local\"", "\"title\":\"other\"")
+                .into_bytes();
+            assert_ne!(*record, changed);
+            assert_eq!(record.len(), changed.len());
+            *record = changed;
+        }
+        let before = std::fs::read(root.join("catalog.json")).unwrap();
+        assert!(
+            super::overwrite_scanned_download(
+                &target,
+                &remote,
+                &root,
+                &entry,
+                false,
+                &scan,
+                &baseline,
+                &|_, _| {}
+            )
+            .await
+            .unwrap_err()
+            .contains("状态已变化")
+        );
+        assert_eq!(std::fs::read(root.join("catalog.json")).unwrap(), before);
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(method, path)| method == "GET" && path.contains("/operations/"))
+                .count(),
+            2,
+            "downloads must never refetch operation records"
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(method, path)| method == "GET" && path.ends_with(".7z"))
+                .count(),
+            2,
+            "second download must reuse verified local copies"
+        );
+        assert_eq!(
+            target.lock().unwrap().list_snapshots(&entry).unwrap(),
+            vec![second, first]
+        );
+        assert_eq!(std::fs::read_dir(root.join(".tmp")).unwrap().count(), 0);
     }
 
     #[tokio::test]
@@ -3087,14 +3809,22 @@ mod tests {
         let root = temp.path().join("repo");
         let target = Mutex::new(LocalRepository::open(&root).unwrap());
         let identity = target.lock().unwrap().read_device().unwrap();
-        super::overwrite_snapshot_download(&target, &remote, &root, &entry, true).await.unwrap();
+        super::overwrite_snapshot_download(&target, &remote, &root, &entry, true)
+            .await
+            .unwrap();
         {
             let target = target.lock().unwrap();
             assert_eq!(target.list_snapshots(&entry).unwrap(), vec![snapshot]);
             assert!(target.get_entry(&entry).unwrap().sources.is_empty());
             assert_eq!(target.read_device().unwrap().id, identity.id);
         }
-        assert!(remote.optional_bytes("sync-v2/operations/publication.json").await.unwrap().is_some());
+        assert!(
+            remote
+                .optional_bytes("sync-v2/operations/publication.json")
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -3103,14 +3833,23 @@ mod tests {
         let remote = overwrite_remote(&repo, &snapshot).await;
         let (root, extra, other, bindings) = {
             let repo = repo.lock().unwrap();
-            let extra = repo.create_snapshot(&entry, "local only", &repo.read_device().unwrap().id, false).unwrap();
+            let extra = repo
+                .create_snapshot(&entry, "local only", &repo.read_device().unwrap().id, false)
+                .unwrap();
             let path = temp.path().join("other.txt");
             std::fs::write(&path, "other").unwrap();
             let other = repo.add_entry(&path, None, None).unwrap();
-            (repo.root().to_owned(), extra, other, repo.get_entry(&entry).unwrap().sources)
+            (
+                repo.root().to_owned(),
+                extra,
+                other,
+                repo.get_entry(&entry).unwrap().sources,
+            )
         };
         let remote_before = remote.load_events().await.unwrap();
-        super::overwrite_snapshot_download(&repo, &remote, &root, &entry, false).await.unwrap();
+        super::overwrite_snapshot_download(&repo, &remote, &root, &entry, false)
+            .await
+            .unwrap();
         {
             let repo = repo.lock().unwrap();
             assert_eq!(repo.list_snapshots(&entry).unwrap(), vec![snapshot]);
@@ -3120,19 +3859,33 @@ mod tests {
             assert!(repo.list_snapshot_deletions().unwrap().is_empty());
         }
         assert_eq!(remote.load_events().await.unwrap(), remote_before);
-        assert_eq!(std::fs::read_to_string(temp.path().join("save.txt")).unwrap(), "local save");
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("save.txt")).unwrap(),
+            "local save"
+        );
     }
 
     #[tokio::test]
     async fn confirmed_overwrite_integrity_failure_keeps_the_local_catalog_and_objects() {
         let (_temp, repo, entry, snapshot) = overwrite_fixture();
         let remote = overwrite_remote(&repo, &snapshot).await;
-        remote.put("sync-v2/objects/test.7z", b"corrupt".to_vec()).await.unwrap();
+        remote
+            .put("sync-v2/objects/test.7z", b"corrupt".to_vec())
+            .await
+            .unwrap();
         let root = repo.lock().unwrap().root().to_owned();
         let before = std::fs::read(root.join("catalog.json")).unwrap();
-        assert!(super::overwrite_snapshot_download(&repo, &remote, &root, &entry, false).await.unwrap_err().contains("校验失败"));
+        assert!(
+            super::overwrite_snapshot_download(&repo, &remote, &root, &entry, false)
+                .await
+                .unwrap_err()
+                .contains("校验失败")
+        );
         assert_eq!(std::fs::read(root.join("catalog.json")).unwrap(), before);
-        assert_eq!(repo.lock().unwrap().list_snapshots(&entry).unwrap(), vec![snapshot]);
+        assert_eq!(
+            repo.lock().unwrap().list_snapshots(&entry).unwrap(),
+            vec![snapshot]
+        );
         assert_eq!(std::fs::read_dir(root.join(".tmp")).unwrap().count(), 0);
     }
 
@@ -3143,7 +3896,12 @@ mod tests {
         remote.delete("sync-v2/objects/test.7z").await.unwrap();
         let root = repo.lock().unwrap().root().to_owned();
         let before = std::fs::read(root.join("catalog.json")).unwrap();
-        assert!(super::overwrite_snapshot_download(&repo, &remote, &root, &entry, false).await.unwrap_err().contains("文件不存在"));
+        assert!(
+            super::overwrite_snapshot_download(&repo, &remote, &root, &entry, false)
+                .await
+                .unwrap_err()
+                .contains("文件不存在")
+        );
         assert_eq!(std::fs::read(root.join("catalog.json")).unwrap(), before);
         assert!(repo.lock().unwrap().verify_snapshot(&snapshot.id).unwrap());
         assert_eq!(std::fs::read_dir(root.join(".tmp")).unwrap().count(), 0);
@@ -3159,10 +3917,28 @@ mod tests {
             repo.root().to_owned()
         };
         let before = std::fs::read(root.join("catalog.json")).unwrap();
-        assert!(super::overwrite_snapshot_download(&repo, &remote, &root, &entry, false).await.unwrap_err().contains("已回收"));
+        assert!(
+            super::overwrite_snapshot_download(&repo, &remote, &root, &entry, false)
+                .await
+                .unwrap_err()
+                .contains("已回收")
+        );
         assert_eq!(std::fs::read(root.join("catalog.json")).unwrap(), before);
-        assert_eq!(repo.lock().unwrap().list_snapshot_deletions().unwrap().len(), 1);
-        assert!(repo.lock().unwrap().list_snapshots(&entry).unwrap().is_empty());
+        assert_eq!(
+            repo.lock()
+                .unwrap()
+                .list_snapshot_deletions()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            repo.lock()
+                .unwrap()
+                .list_snapshots(&entry)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -3171,33 +3947,68 @@ mod tests {
         let remote = overwrite_remote(&repo, &snapshot).await;
         let root = {
             let repo = repo.lock().unwrap();
-            repo.set_snapshot_locked(&entry, &snapshot.id, true).unwrap();
+            repo.set_snapshot_locked(&entry, &snapshot.id, true)
+                .unwrap();
             repo.root().to_owned()
         };
-        assert!(super::overwrite_snapshot_download(&repo, &remote, &root, &entry, false).await.unwrap_err().contains("锁定"));
-        assert!(repo.lock().unwrap().get_snapshot(&snapshot.id).unwrap().locked);
+        assert!(
+            super::overwrite_snapshot_download(&repo, &remote, &root, &entry, false)
+                .await
+                .unwrap_err()
+                .contains("锁定")
+        );
+        assert!(
+            repo.lock()
+                .unwrap()
+                .get_snapshot(&snapshot.id)
+                .unwrap()
+                .locked
+        );
     }
 
     #[tokio::test]
     async fn confirmed_overwrite_uses_live_events_instead_of_a_stale_catalog() {
         let (_temp, repo, entry, snapshot) = overwrite_fixture();
         let remote = overwrite_remote(&repo, &snapshot).await;
-        remote.append_event(&Event {
-            operation_id: "delete".into(),
-            device: Device { id: snapshot.device_id.clone(), name: snapshot.device_name.clone(), revision: 0 },
-            kind: EventKind::Deleted {
-                snapshot: snapshot.clone(),
-                reason: "manual".into(), deleted_at_ms: 100,
-                observed_revisions: vec![], related_revisions: vec![],
-                object_path: "sync-v2/recovery/delete.7z".into(),
-                entry: serde_json::Value::Null,
-            },
-        }).await.unwrap();
+        remote
+            .append_event(&Event {
+                operation_id: "delete".into(),
+                device: Device {
+                    id: snapshot.device_id.clone(),
+                    name: snapshot.device_name.clone(),
+                    revision: 0,
+                },
+                kind: EventKind::Deleted {
+                    snapshot: snapshot.clone(),
+                    reason: "manual".into(),
+                    deleted_at_ms: 100,
+                    observed_revisions: vec![],
+                    related_revisions: vec![],
+                    object_path: "sync-v2/recovery/delete.7z".into(),
+                    entry: serde_json::Value::Null,
+                },
+            })
+            .await
+            .unwrap();
         let root = repo.lock().unwrap().root().to_owned();
-        super::overwrite_snapshot_download(&repo, &remote, &root, &entry, false).await.unwrap();
-        assert!(repo.lock().unwrap().list_snapshots(&entry).unwrap().is_empty());
+        super::overwrite_snapshot_download(&repo, &remote, &root, &entry, false)
+            .await
+            .unwrap();
+        assert!(
+            repo.lock()
+                .unwrap()
+                .list_snapshots(&entry)
+                .unwrap()
+                .is_empty()
+        );
         // Overwrite is local-only; it never manufactures a deletion operation to upload.
-        assert!(repo.lock().unwrap().list_snapshot_deletions().unwrap().is_empty());
+        assert!(
+            repo.lock()
+                .unwrap()
+                .list_snapshot_deletions()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(remote.load_events().await.unwrap().len(), 2);
     }
 
@@ -3205,17 +4016,34 @@ mod tests {
     async fn confirmed_overwrite_keeps_legacy_catalog_downloads_compatible() {
         let (_temp, repo, entry, snapshot) = overwrite_fixture();
         let remote = overwrite_remote(&repo, &snapshot).await;
-        let catalog: serde_json::Value = super::read_json(&repo.lock().unwrap().root().join("catalog.json")).unwrap();
-        let bytes = remote.optional_bytes("sync-v2/objects/test.7z").await.unwrap().unwrap();
-        let path = format!("archives/{}/{}", catalog["entries"][0]["folder"].as_str().unwrap(), snapshot.archive_name);
+        let catalog: serde_json::Value =
+            super::read_json(&repo.lock().unwrap().root().join("catalog.json")).unwrap();
+        let bytes = remote
+            .optional_bytes("sync-v2/objects/test.7z")
+            .await
+            .unwrap()
+            .unwrap();
+        let path = format!(
+            "archives/{}/{}",
+            catalog["entries"][0]["folder"].as_str().unwrap(),
+            snapshot.archive_name
+        );
         remote.put(&path, bytes).await.unwrap();
         remote.delete("sync-v2/protocol.json").await.unwrap();
-        remote.delete("sync-v2/operations/publication.json").await.unwrap();
+        remote
+            .delete("sync-v2/operations/publication.json")
+            .await
+            .unwrap();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("repo");
         let target = Mutex::new(LocalRepository::open(&root).unwrap());
-        super::overwrite_snapshot_download(&target, &remote, &root, &entry, false).await.unwrap();
-        assert_eq!(target.lock().unwrap().list_snapshots(&entry).unwrap(), vec![snapshot]);
+        super::overwrite_snapshot_download(&target, &remote, &root, &entry, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            target.lock().unwrap().list_snapshots(&entry).unwrap(),
+            vec![snapshot]
+        );
     }
 
     #[tokio::test]
@@ -3223,18 +4051,31 @@ mod tests {
         let (_temp, repo, entry, snapshot) = overwrite_fixture();
         let remote = overwrite_remote(&repo, &snapshot).await;
         let root = repo.lock().unwrap().root().to_owned();
-        let SnapshotRemote::Store(chronicle_sync::RemoteStore::OpenDal(_, pacing, _)) = &remote else { panic!("memory remote"); };
+        let SnapshotRemote::Store(chronicle_sync::RemoteStore::OpenDal(_, pacing, _)) = &remote
+        else {
+            panic!("memory remote");
+        };
         let gate = pacing.lock().await;
         let (result, ()) = tokio::join!(
             super::overwrite_snapshot_download(&repo, &remote, &root, &entry, false),
             async {
                 tokio::task::yield_now().await;
-                repo.lock().unwrap().update_snapshot_note(&entry, &snapshot.id, "edited during download").unwrap();
+                repo.lock()
+                    .unwrap()
+                    .update_snapshot_note(&entry, &snapshot.id, "edited during download")
+                    .unwrap();
                 drop(gate);
             }
         );
         assert!(result.unwrap_err().contains("状态已变化"));
-        assert_eq!(repo.lock().unwrap().get_snapshot(&snapshot.id).unwrap().note, "edited during download");
+        assert_eq!(
+            repo.lock()
+                .unwrap()
+                .get_snapshot(&snapshot.id)
+                .unwrap()
+                .note,
+            "edited during download"
+        );
         assert!(repo.lock().unwrap().verify_snapshot(&snapshot.id).unwrap());
         assert_eq!(std::fs::read_dir(root.join(".tmp")).unwrap().count(), 0);
     }
@@ -3246,26 +4087,51 @@ mod tests {
         let mut revised = snapshot.clone();
         revised.note = "cloud note".into();
         revised.metadata_updated_at_ms += 1;
-        remote.append_event(&Event {
-            operation_id: "cloud-note".into(),
-            device: Device { id: snapshot.device_id.clone(), name: snapshot.device_name.clone(), revision: 0 },
-            kind: EventKind::Revised { snapshot: revised, parents: vec![] },
-        }).await.unwrap();
+        remote
+            .append_event(&Event {
+                operation_id: "cloud-note".into(),
+                device: Device {
+                    id: snapshot.device_id.clone(),
+                    name: snapshot.device_name.clone(),
+                    revision: 0,
+                },
+                kind: EventKind::Revised {
+                    snapshot: revised,
+                    parents: vec![],
+                },
+            })
+            .await
+            .unwrap();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("repo");
         let target = Mutex::new(LocalRepository::open(&root).unwrap());
-        super::overwrite_snapshot_download(&target, &remote, &root, &entry, false).await.unwrap();
+        super::overwrite_snapshot_download(&target, &remote, &root, &entry, false)
+            .await
+            .unwrap();
         {
             let target = target.lock().unwrap();
-            target.update_snapshot_note(&entry, &snapshot.id, "new local note").unwrap();
+            target
+                .update_snapshot_note(&entry, &snapshot.id, "new local note")
+                .unwrap();
             let revisions = target.snapshot_revision_records().unwrap();
-            assert_eq!(revisions[0]["kind"]["parents"], serde_json::json!(["cloud-note"]));
+            assert_eq!(
+                revisions[0]["kind"]["parents"],
+                serde_json::json!(["cloud-note"])
+            );
         }
         let events = remote.load_events().await.unwrap();
         let target = target.lock().unwrap();
-        let plan = chronicle_sync::snapshot_protocol::plan_sync(&target.list_snapshots(&entry).unwrap(), &events, &crate::snapshot_sync::pending(&target).unwrap(), false);
+        let plan = chronicle_sync::snapshot_protocol::plan_sync(
+            &target.list_snapshots(&entry).unwrap(),
+            &events,
+            &crate::snapshot_sync::pending(&target).unwrap(),
+            false,
+        );
         assert_eq!(plan.len(), 1);
-        assert_eq!(plan[0].action, chronicle_sync::snapshot_protocol::Action::UploadRevision);
+        assert_eq!(
+            plan[0].action,
+            chronicle_sync::snapshot_protocol::Action::UploadRevision
+        );
     }
 
     #[tokio::test]
@@ -3274,25 +4140,37 @@ mod tests {
         let remote = overwrite_remote(&repo, &snapshot).await;
         let (root, other) = {
             let repo = repo.lock().unwrap();
-            repo.update_snapshot_note(&entry, &snapshot.id, "discarded local note").unwrap();
+            repo.update_snapshot_note(&entry, &snapshot.id, "discarded local note")
+                .unwrap();
             let path = temp.path().join("other.txt");
             std::fs::write(&path, "other").unwrap();
             let other = repo.add_entry(&path, None, None).unwrap();
-            let node = repo.create_snapshot(&other.id, "other", &repo.read_device().unwrap().id, false).unwrap();
-            repo.update_snapshot_note(&other.id, &node.id, "keep other note").unwrap();
+            let node = repo
+                .create_snapshot(&other.id, "other", &repo.read_device().unwrap().id, false)
+                .unwrap();
+            repo.update_snapshot_note(&other.id, &node.id, "keep other note")
+                .unwrap();
             (repo.root().to_owned(), other)
         };
-        super::overwrite_snapshot_download(&repo, &remote, &root, &entry, false).await.unwrap();
+        super::overwrite_snapshot_download(&repo, &remote, &root, &entry, false)
+            .await
+            .unwrap();
         let repo = repo.lock().unwrap();
         let pending = crate::snapshot_sync::pending(&repo).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].snapshot().unwrap().entry_id, other.id);
         // Historical dependencies remain available; they simply are not pending uploads.
         assert_eq!(repo.snapshot_revision_records().unwrap().len(), 2);
-        repo.update_snapshot_note(&entry, &snapshot.id, "fresh local edit").unwrap();
+        repo.update_snapshot_note(&entry, &snapshot.id, "fresh local edit")
+            .unwrap();
         let pending = crate::snapshot_sync::pending(&repo).unwrap();
-        let event = pending.iter().find(|event| event.snapshot().unwrap().entry_id == entry).unwrap();
-        let EventKind::Revised { parents, .. } = &event.kind else { panic!("revision"); };
+        let event = pending
+            .iter()
+            .find(|event| event.snapshot().unwrap().entry_id == entry)
+            .unwrap();
+        let EventKind::Revised { parents, .. } = &event.kind else {
+            panic!("revision");
+        };
         assert!(parents.is_empty());
     }
 

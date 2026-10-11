@@ -42,10 +42,40 @@ afterEach(() => {
 });
 
 describe("cloud preview dismissal", () => {
+  it("selects only visible archives and leaves configuration selection unchanged", async () => {
+    const { state } = await dialog((s) => { s.preview.value = { sourceName: "test", downloadToken: "scan", items: [
+      { id: "config:app-settings", name: "app-settings.json", kind: "config" },
+      { id: "one", name: "API", kind: "archive", protected: false, syncMode: "manual" },
+      { id: "two", name: "key", kind: "archive", protected: false, syncMode: "manual" },
+    ] }; });
+    state.toggleAllArchives();
+    expect(state.selected.value).toEqual(["one", "two"]);
+    expect(state.allArchivesSelected.value).toBe(true);
+    state.toggleAllArchives();
+    expect(state.selected.value).toEqual([]);
+    state.cloudSearch.value = "API";
+    state.toggleAllArchives();
+    expect(state.selected.value).toEqual(["one"]);
+  });
+  it("confirms a batch once, ignores configs and does not rescan after download", async () => {
+    const batch = vi.spyOn(cloudRepository, "downloadSelected").mockResolvedValue([{ entryId: "one", error: null }]);
+    const preview = vi.spyOn(cloudRepository, "preview");
+    const { state } = await dialog((s) => { s.preview.value = { sourceName: "test", downloadToken: "scan", items: [
+      { id: "config:app-settings", name: "app-settings.json", kind: "config" },
+      { id: "one", name: "API", kind: "archive", protected: false, snapshotCount: 1 },
+    ] }; s.selected.value = ["config:app-settings", "one"]; });
+    state.confirmSelectedDownload();
+    expect(state.confirmAction.value.message).toContain("API");
+    expect(state.confirmAction.value.message).not.toContain("app-settings.json");
+    expect(batch).not.toHaveBeenCalled();
+    await state.runConfirmed();
+    expect(batch.mock.calls[0]?.slice(0, 4)).toEqual(["first", ["one"], "scan", true]);
+    expect(preview).not.toHaveBeenCalled();
+  });
   it("does not download until overwrite is confirmed and sends the explicit confirmation", async () => {
-    const download = vi.spyOn(cloudRepository, "download").mockResolvedValue(undefined);
+    const download = vi.spyOn(cloudRepository, "downloadSelected").mockResolvedValue([{ entryId: "archive", error: null }]);
     vi.spyOn(cloudRepository, "preview").mockResolvedValue({ sourceName: "first", items: [] });
-    const { state } = await dialog();
+    const { state } = await dialog((s) => { s.preview.value = { sourceName: "first", downloadToken: "scan", items: [] }; });
     const item = { id: "archive", name: "Save", kind: "archive", protected: false, snapshotCount: 1, sizeBytes: 4, syncMode: "manual" };
     state.confirmOverwrite(item, "download");
     expect(download).not.toHaveBeenCalled();
@@ -53,7 +83,7 @@ describe("cloud preview dismissal", () => {
     expect(download).not.toHaveBeenCalled();
     state.confirmOverwrite(item, "download");
     await state.confirmAction.value.run();
-    expect(download).toHaveBeenCalledWith("first", "archive", true, true);
+    expect(download.mock.calls[0]?.slice(0, 5)).toEqual(["first", ["archive"], "scan", true, true]);
   });
   it("cannot replace a write with a preview and enable closing", async () => {
     const preview = vi.spyOn(cloudRepository, "preview");

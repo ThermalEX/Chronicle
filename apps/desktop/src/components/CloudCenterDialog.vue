@@ -2,7 +2,7 @@
 import { t, locale } from "../services/i18n";
 import { ChevronDown, CloudCog, Download, ExternalLink, Pause, Play, Plus, RefreshCw, Search, Server, Trash2, Upload, X } from "@lucide/vue";
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
-import { cloudRepository, saveCloudConfiguration, uploadArchiveWithCategoryTree, type CloudPreview, type RemoteItem } from "../services/cloud";
+import { cloudRepository, saveCloudConfiguration, uploadArchiveWithCategoryTree, type CloudDownloadProgress, type CloudPreview, type RemoteItem } from "../services/cloud";
 import { cloudSettings, type CloudProvider, type CloudSettings, type CloudSource } from "../services/settings";
 import { createBackdropDismissal } from "../services/dialogDismissal";
 import ConfirmDialog from "./ConfirmDialog.vue";
@@ -51,6 +51,7 @@ const cloudSearch = ref("");
 const useCloudCategoryTree = ref(true);
 const confirmingDownload = ref(false);
 const selected = ref<string[]>([]);
+const downloadProgress = ref<CloudDownloadProgress>();
 const remoteArchives = computed(() => (preview.value?.items ?? []).filter((item) => item.kind === "archive"));
 const remoteConfigs = computed(() => (preview.value?.items ?? []).filter((item) => item.id === "config:app-settings"));
 const visibleRemoteArchives = computed(() => {
@@ -59,6 +60,12 @@ const visibleRemoteArchives = computed(() => {
   return remoteArchives.value.filter((item) => item.name.toLocaleLowerCase().includes(query));
 });
 const remoteSnapshotTotal = computed(() => remoteArchives.value.reduce((total, item) => total + item.snapshotCount, 0));
+const selectedArchives = computed(() => remoteArchives.value.filter((item) => selected.value.includes(item.id) && !item.protected));
+const allArchivesSelected = computed(() => visibleRemoteArchives.value.length > 0 && visibleRemoteArchives.value.every((item) => selected.value.includes(item.id)));
+function toggleAllArchives(): void {
+  const visible = new Set(visibleRemoteArchives.value.map((item) => item.id));
+  selected.value = allArchivesSelected.value ? selected.value.filter((id) => !visible.has(id)) : [...new Set([...selected.value, ...visible])];
+}
 let savedFingerprint = JSON.stringify(draft);
 function hasUnsavedConfiguration(): boolean {
   return savedFingerprint !== JSON.stringify(draft)
@@ -232,7 +239,7 @@ async function runItemAction(item: RemoteItem, action: "sync" | "upload" | "down
   try {
     if (action === "sync") showToast("success", (await cloudRepository.sync(repositorySource.value.id, item.id)).message);
     if (action === "upload") { await uploadArchiveWithCategoryTree(repositorySource.value.id, item.id); showToast("success", t('已用本地存档覆盖远端')); }
-    if (action === "download") { await cloudRepository.download(repositorySource.value.id, item.id, useCloudCategoryTree.value, true); emit("downloaded"); showToast("success", t('已下载远端存档')); }
+    if (action === "download") { await downloadArchives([item]); return; }
     busy.value = "";
     await loadPreview();
   } catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
@@ -240,13 +247,41 @@ async function runItemAction(item: RemoteItem, action: "sync" | "upload" | "down
 }
 
 function confirmOverwrite(item: RemoteItem, direction: "upload" | "download"): void {
-  confirmingDownload.value = direction === "download";
-  if (confirmingDownload.value) useCloudCategoryTree.value = true;
+  if (direction === "download") { confirmArchiveDownloads([item]); return; }
+  confirmingDownload.value = false;
   confirmAction.value = {
-    title: direction === "upload" ? t('覆盖上传') : t('覆盖下载'),
-    message: direction === "upload" ? t('远端“{value1}”将被本地仓库完整替换。', { value1: item.name }) : t('本机“{value1}”的快照库将被云端版本替换，本机独有的快照将被移除。不会修改原始来源文件或删除云端内容；下载及校验失败时保留本机原数据。确定覆盖下载？', { value1: item.name }),
+    title: t('覆盖上传'),
+    message: t('远端“{value1}”将被本地仓库完整替换。', { value1: item.name }),
     run: () => runItemAction(item, direction),
   };
+}
+
+function confirmSelectedDownload(): void { confirmArchiveDownloads(selectedArchives.value); }
+function confirmArchiveDownloads(items: RemoteItem[]): void {
+  if (!items.length || writeBusy.value) return;
+  const sourceId = repositorySourceId.value;
+  const token = preview.value?.downloadToken;
+  if (!sourceId || !token) { showToast("error", t('请刷新云端清单后重试')); return; }
+  confirmingDownload.value = true;
+  useCloudCategoryTree.value = true;
+  confirmAction.value = {
+    title: t('覆盖下载'),
+    message: t('以下存档的本机快照库将被云端版本替换，本机独有快照将被移除。不会修改原始来源文件或删除云端内容；下载及校验失败时保留该存档的原数据。确定覆盖下载？') + '\n\n' + items.map((item) => item.name).join('\n'),
+    run: () => downloadArchives(items, sourceId, token),
+  };
+}
+async function downloadArchives(items: RemoteItem[], sourceId = repositorySourceId.value, token = preview.value?.downloadToken): Promise<void> {
+  if (!sourceId || !token) throw new Error(t('请刷新云端清单后重试'));
+  busy.value = "download";
+  downloadProgress.value = { requestId: "", entryId: items[0]!.id, completed: 0, total: items.reduce((total, item) => total + item.snapshotCount, 0), phase: "download" };
+  try {
+    const results = await cloudRepository.downloadSelected(sourceId, items.map((item) => item.id), token, true, useCloudCategoryTree.value, (progress) => { downloadProgress.value = progress; });
+    if (results.some((result) => !result.error)) emit("downloaded");
+    const failures = results.filter((result) => result.error);
+    if (failures.length) showToast("error", failures.map((result) => `${items.find((item) => item.id === result.entryId)?.name ?? result.entryId}：${t(result.error!)}`).join('\n'));
+    else showToast("success", t('已下载远端存档'));
+    // Download only changes local data; keep the scanned remote list and token.
+  } finally { busy.value = ""; downloadProgress.value = undefined; }
 }
 
 async function uploadApplicationSettings(): Promise<void> {
@@ -360,29 +395,30 @@ onBeforeUnmount(() => { stopPreview(); window.clearTimeout(toastTimer); });
 
 <template>
   <div class="dialog-backdrop" @pointerdown="backdrop.pointerDown" @pointerup="backdrop.pointerUp" @pointercancel="backdrop.pointerCancel">
-    <section data-tour="cloud-form" class="cloud-center" role="dialog" aria-modal="true" aria-labelledby="cloud-title" @keydown.esc.stop="requestClose">
+    <section data-tour="cloud-form" class="cloud-center" :inert="Boolean(confirmAction || closeConfirmationOpen)" role="dialog" aria-modal="true" aria-labelledby="cloud-title" @keydown.esc.stop="requestClose">
       <header><div class="heading-icon"><CloudCog :size="21" /></div><div><p>{{ t('同步服务') }}</p><h2 id="cloud-title">{{ t('云端设置') }}</h2></div><button ref="closeButton" :disabled="writeBusy" :aria-label="t('关闭云端设置')" :title="t('关闭云端设置')" @click="requestClose"><X :size="18" /></button></header>
-      <nav :aria-label="t('云端设置页面')"><button :class="{ active: tab === 'repository' }" @click="tab = 'repository'; repositorySource && loadPreview()">{{ t('云端仓库') }}</button><button :class="{ active: tab === 'sources' }" @click="tab = 'sources'">{{ t('同步源') }}</button></nav>
+      <nav :aria-label="t('云端设置页面')"><button :disabled="writeBusy" :class="{ active: tab === 'repository' }" @click="tab = 'repository'; !preview && repositorySource && loadPreview()">{{ t('云端仓库') }}</button><button :disabled="writeBusy" :class="{ active: tab === 'sources' }" @click="tab = 'sources'">{{ t('同步源') }}</button></nav>
       <main>
         <section v-if="tab === 'repository'" class="repository-page">
           <div v-if="!repositorySource" class="empty"><CloudCog :size="30" /><h3>{{ t('尚未配置云同步源') }}</h3><p>{{ t('添加 WebDAV 后即可查看和管理远端 Chronicle 仓库。') }}</p><button @click="addSource('legacy_webdav')"><Plus :size="16" />{{ t('添加同步源') }}</button></div>
           <template v-else>
             <div class="repository-heading">
-              <div><p class="repository-eyebrow">{{ t('云端预览') }}</p><ThemedSelect class="repository-source-select" :model-value="repositorySourceId" :options="sourceOptions" :label="t('查看云端仓库来源')" @update:model-value="selectRepositorySource" /><p class="repository-description">{{ t('按存档标题汇总远端时间节点；仓库配置由 Chronicle 自动维护。') }}</p></div>
+              <div><p class="repository-eyebrow">{{ t('云端预览') }}</p><ThemedSelect class="repository-source-select" :disabled="writeBusy" :model-value="repositorySourceId" :options="sourceOptions" :label="t('查看云端仓库来源')" @update:model-value="selectRepositorySource" /><p class="repository-description">{{ t('按存档标题汇总远端时间节点；仓库配置由 Chronicle 自动维护。') }}</p></div>
               <button :disabled="Boolean(busy)" @click="loadPreview"><RefreshCw :size="15" />{{ t('刷新') }}</button>
             </div>
             <div class="repository-summary" aria-live="polite"><span>{{ t('远端 {count} 个存档', { count: remoteArchives.length }) }}</span><span>{{ t('共 {count} 个时间节点', { count: remoteSnapshotTotal }) }}</span><span>{{ preview?.libraryId ? t('仓库已初始化') : t('等待首次上传') }}</span></div>
             <div class="repository-controls">
               <label class="archive-search"><Search :size="16" /><input v-model="cloudSearch" type="search" :placeholder="t('搜索存档标题')" :aria-label="t('搜索云端存档标题')" /></label>
-              <button class="danger" :disabled="Boolean(busy) || !selected.length" @click="confirmDelete(selected)"><Trash2 :size="14" />{{ t('删除所选') }}</button>
+              <div class="batch-actions"><button class="batch-download" :disabled="Boolean(busy) || !selectedArchives.length" @click="confirmSelectedDownload"><Download :size="14" />{{ t('覆盖下载所选') }}</button><button class="danger" :disabled="Boolean(busy) || !selected.length" @click="confirmDelete(selected)"><Trash2 :size="14" />{{ t('删除所选') }}</button></div>
             </div>
+            <div v-if="downloadProgress" class="download-progress" role="status" aria-live="polite"><span>{{ downloadProgress.phase === 'commit' ? t('正在校验并提交…') : t('正在下载存档…') }} {{ downloadProgress.completed }} / {{ downloadProgress.total }}</span><progress :value="downloadProgress.completed" :max="Math.max(1, downloadProgress.total)" :aria-label="t('存档下载进度')" /></div>
             <div v-if="busy === 'preview' && !preview" class="loading">{{ t('正在读取远端清单…') }}</div>
             <div v-else-if="preview" class="remote-table-wrap">
               <table class="remote-table">
-                <thead><tr><th scope="col" class="selection-column"><span class="sr-only">{{ t('选择') }}</span></th><th scope="col">{{ t('存档') }}</th><th scope="col">{{ t('同步方案') }}</th><th scope="col">{{ t('云端时间线') }}</th><th scope="col">{{ t('最后更新') }}</th><th scope="col" class="actions-column">{{ t('操作') }}</th></tr></thead>
+                <thead><tr><th scope="col" class="selection-column"><input type="checkbox" :checked="allArchivesSelected" :disabled="Boolean(busy) || !visibleRemoteArchives.length" :aria-label="t('全选当前显示的存档（不含设置文件）')" @change="toggleAllArchives" /></th><th scope="col">{{ t('存档') }}</th><th scope="col">{{ t('同步方案') }}</th><th scope="col">{{ t('云端时间线') }}</th><th scope="col">{{ t('最后更新') }}</th><th scope="col" class="actions-column">{{ t('操作') }}</th></tr></thead>
                 <tbody>
                   <tr v-for="item in [...remoteConfigs, ...visibleRemoteArchives]" :key="item.id" :class="{ 'configuration-row': item.kind === 'config' }">
-                    <td class="selection-column"><input v-model="selected" type="checkbox" :value="item.id" :aria-label="t('选择 {value1}', { value1: item.name })" /></td>
+                    <td class="selection-column"><input v-model="selected" type="checkbox" :disabled="Boolean(busy)" :value="item.id" :aria-label="t('选择 {value1}', { value1: item.name })" /></td>
                     <td class="archive-name"><b :title="item.name">{{ item.name }}</b><small v-if="item.kind === 'config'">{{ t('云端设置文件') }}</small></td>
                     <td><ThemedSelect v-if="item.kind === 'archive'" :model-value="item.syncMode" :options="syncOptions" :disabled="Boolean(busy)" :label="t('{value1} 同步方案', { value1: item.name })" @update:model-value="changeSyncMode(item, $event)" /><span v-else class="configuration-label">{{ t('系统配置') }}</span></td>
                     <td><template v-if="item.kind === 'archive'"><span class="timeline-count">{{ t('{count} 个节点', { count: item.snapshotCount }) }}</span><small>{{ formatBytes(item.sizeBytes) }}</small></template><span v-else class="configuration-label">—</span></td>
@@ -423,6 +459,8 @@ onBeforeUnmount(() => { stopPreview(); window.clearTimeout(toastTimer); });
 .dialog-backdrop{position:fixed;z-index:45;inset:0;display:grid;place-items:center;padding:28px;background:#18181b99;backdrop-filter:blur(3px)}.cloud-center{display:grid;grid-template-rows:72px 44px minmax(0,1fr) 64px;width:min(940px,calc(100vw - 56px));height:min(720px,calc(100vh - 56px));overflow:hidden;background:var(--surface);border:1px solid var(--border-2);border-radius:13px;box-shadow:0 24px 80px #0d24205c}.cloud-center>header{display:grid;grid-template-columns:42px 1fr 38px;align-items:center;gap:11px;padding:0 22px;border-bottom:1px solid var(--border)}.heading-icon{display:grid;place-items:center;width:38px;height:38px;color:var(--primary);background:var(--primary-soft);border-radius:9px}header p,header h2{margin:0}header p{color:var(--text-3);font-size:9px;font-weight:700;letter-spacing:.08em}header h2{margin-top:3px;font-size:18px}header button{display:grid;place-items:center;width:38px;height:38px;background:transparent;border-radius:7px}header button:hover{background:var(--hover)}nav{display:flex;gap:4px;padding:5px 22px 0;border-bottom:1px solid var(--border)}nav button{padding:0 14px;color:var(--text-3);background:transparent;border-bottom:2px solid transparent;font-size:11px;font-weight:650}nav button.active{color:var(--primary-dark);border-color:var(--primary)}main{overflow-y:auto;padding:20px 24px 28px}.empty{display:grid;place-items:center;min-height:390px;color:var(--text-3);text-align:center}.empty.compact{min-height:190px}.empty h3{margin:12px 0 0;color:var(--text);font-size:15px}.empty p{margin:7px 0 16px;font-size:10px}.empty button,.source-toolbar>button,.test-button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:34px;padding:0 10px;color:var(--primary-dark);background:var(--primary-soft);border-radius:7px;font-size:10px;font-weight:650}.fields input,fieldset input{height:34px;padding:0 9px;color:#263431;background:#f8faf9;border:1px solid var(--border-2);border-radius:6px;font-size:10px}.item-actions{display:flex;gap:5px}.item-actions button{display:inline-flex;align-items:center;gap:4px;min-height:31px;padding:0 7px;color:var(--text-2);background:#f2f6f4;border-radius:6px;font-size:9px}.item-actions span{color:var(--text-3);font-size:9px}.list-empty,.loading{display:grid;place-items:center;min-height:150px;color:var(--text-3);font-size:10px}.source-toolbar{display:flex;align-items:end;gap:8px;margin-bottom:14px}.fields label span,fieldset label span{color:var(--text-2);font-size:9px;font-weight:650}.source-toolbar button:disabled{color:var(--text-3);background:#f1f3f2;cursor:default}.source-card{margin-bottom:12px;padding:14px;border:1px solid var(--border);border-radius:9px}.source-title{display:flex;align-items:center;margin-bottom:12px}.source-title b{font-size:11px}.source-title small{padding:3px 6px;color:var(--primary-dark);background:var(--primary-soft);border-radius:10px;font-size:8px}.icon-danger{display:grid;place-items:center;width:32px;height:32px;color:#a52e28;background:transparent;border-radius:6px}.icon-danger:hover{background:#fff0ef}.fields{display:grid;grid-template-columns:1fr 1.5fr 1fr 1fr;gap:10px}.fields label{display:flex;flex-direction:column;gap:5px}.fields label.wide{grid-column:1/-1}.test-button{margin-top:12px}.sources-page fieldset{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:16px;padding:14px;border:1px solid var(--border);border-radius:9px}.sources-page legend{padding:0 6px;color:var(--text-2);font-size:10px;font-weight:700}.sources-page fieldset label{display:flex;flex-direction:column;gap:5px}.cloud-center>footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:0 22px;border-top:1px solid var(--border)}footer button{min-height:36px;padding:0 13px;border-radius:7px;font-size:10px;font-weight:650}.cancel{background:transparent}.cancel:hover{background:var(--hover)}.save{background:var(--primary)}button:disabled{cursor:default;opacity:.55}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--primary);outline-offset:2px}@media(max-width:900px){.fields{grid-template-columns:1fr 1fr}.sources-page fieldset{grid-template-columns:1fr 1fr}.item-actions{grid-column:2/-1}.cloud-center{width:calc(100vw - 28px);height:calc(100vh - 28px)}.dialog-backdrop{padding:14px}}.repository-page{min-width:0}.repository-heading{display:flex;align-items:start;justify-content:space-between;gap:20px}.repository-eyebrow{margin:0;color:var(--text-2);font-size:13px;font-weight:750;letter-spacing:.04em}.repository-source-select{margin:10px 0 15px}.repository-description{margin:7px 0 0;color:var(--text-3);font-size:10px}.repository-heading>button{display:inline-flex;flex:0 0 auto;align-items:center;justify-content:center;gap:6px;min-height:34px;padding:0 10px;color:var(--primary-dark);background:var(--primary-soft);border-radius:7px;font-size:10px;font-weight:650}.repository-summary{display:flex;flex-wrap:wrap;gap:7px;margin:15px 0 12px}.repository-summary span{padding:4px 7px;color:var(--text-2);background:#f2f6f4;border-radius:12px;font-size:9px;font-variant-numeric:tabular-nums}.repository-summary span:last-child{color:var(--primary-dark);background:var(--primary-soft)}.repository-controls{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.archive-search{display:flex;align-items:center;gap:8px;min-width:0;width:min(360px,100%);height:36px;padding:0 10px;color:var(--text-3);background:#f8faf9;border:1px solid var(--border-2);border-radius:7px}.archive-search:focus-within{border-color:var(--primary)}.archive-search input{min-width:0;flex:1;height:100%;color:var(--text);background:transparent;border:0;font-size:10px}.archive-search input:focus{outline:0}.repository-controls .danger{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:34px;padding:0 10px;color:#a52e28;background:#fff0ef;border-radius:7px;font-size:10px;font-weight:650}.remote-table-wrap{position:relative;overflow:visible;border:1px solid var(--border);border-radius:9px}.remote-table{width:100%;min-width:0;border-collapse:collapse;table-layout:fixed}.remote-table tbody tr:focus-within{position:relative;z-index:1}.remote-table th{height:34px;padding:0 9px;color:var(--text-3);border-bottom:1px solid var(--border);font-size:9px;font-weight:700;text-align:left}.remote-table td{height:58px;padding:7px 9px;border-bottom:1px solid var(--border);color:var(--text-2);font-size:10px;vertical-align:middle}.remote-table tbody tr:last-child td{border-bottom:0}.remote-table tbody tr:hover{background:#f8fbfa}.remote-table .selection-column{width:32px;padding-right:0;text-align:center}.remote-table .actions-column{width:168px}.remote-table .archive-name{width:25%;min-width:180px}.archive-name b{display:block;overflow:hidden;color:var(--text);font-size:11px;text-overflow:ellipsis;white-space:nowrap}.remote-table :deep(.themed-select){width:110px}.timeline-count{display:block;color:var(--text-2);font-variant-numeric:tabular-nums}.remote-table td small{display:block;margin-top:3px;color:var(--text-3);font-size:9px;font-variant-numeric:tabular-nums}.updated-at{color:var(--text-3)!important;font-variant-numeric:tabular-nums;white-space:nowrap}.remote-table .item-actions{display:flex;align-items:center;gap:5px}.remote-table .item-actions button{display:inline-flex;align-items:center;justify-content:center;gap:4px;min-width:30px;min-height:30px;padding:0 7px;color:var(--text-2);background:#f2f6f4;border-radius:6px;font-size:9px}.remote-table .item-actions button:first-child{color:var(--primary-dark);background:var(--primary-soft)}.remote-table .item-actions button:hover{background:var(--hover)}.remote-empty{border:1px dashed var(--border-2);border-radius:9px}.sr-only{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}@media(max-width:900px){.repository-heading{align-items:start}.repository-controls{align-items:stretch;flex-direction:column}.archive-search{width:100%}.repository-controls .danger{align-self:flex-end}}
 .github-token-field>div{display:flex;gap:8px}.github-token-field input{min-width:0;flex:1}.github-token-field button,.create-repository-button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:34px;padding:0 10px;color:var(--primary-dark);background:var(--primary-soft);border:1px solid transparent;border-radius:6px;font-size:10px;font-weight:650;white-space:nowrap}.github-token-field small{color:var(--text-3);font-size:9px;line-height:1.4}.create-repository-button{align-self:end}.github-token-field button:hover,.create-repository-button:hover{background:var(--hover);border-color:var(--border-2)}.github-token-field button:focus-visible{outline:2px solid var(--primary);outline-offset:2px}@media(max-width:900px){.github-token-field>div{align-items:stretch;flex-direction:column}}
 .repository-controls .danger, .icon-danger { color: var(--danger); background: var(--danger-soft); }
+.batch-actions{display:flex;gap:8px;flex-wrap:wrap}.batch-download{display:inline-flex;align-items:center;gap:6px;min-height:34px;padding:0 10px;color:var(--primary-dark);background:var(--primary-soft);border-radius:7px;font-size:10px;font-weight:650}.download-progress{display:grid;gap:6px;margin:12px 0;color:var(--text-2);font-size:10px}.download-progress progress{width:100%;height:7px;accent-color:var(--primary)}
+:deep(.confirm-dialog){max-height:calc(100dvh - 48px);display:flex;flex-direction:column}:deep(.confirm-dialog .message){min-height:0;max-height:45vh;overflow-y:auto;overflow-wrap:anywhere}:deep(.confirm-dialog header),:deep(.confirm-dialog footer){flex-shrink:0}
 .repository-summary span, .remote-table tbody tr:hover, .archive-search, .fields input, fieldset input, .item-actions button, .remote-table .item-actions button { background: var(--subtle); }
 .remote-table tbody tr.configuration-row { background: var(--surface); }.remote-table tbody tr.configuration-row:hover { background: var(--subtle); }.configuration-row .archive-name b { color: var(--text); }.configuration-row .item-actions button { color: var(--primary-dark); background: var(--primary-soft); }.remote-table .item-actions button { border: 1px solid var(--border-2); }.configuration-label { color: var(--text-3); font-size: 9px; }.download-tree-option { display: flex; align-items: center; gap: 7px; padding: 0 22px 18px; color: var(--text-2); font-size: 11px; }
 .fields input, fieldset input { color: var(--text); }

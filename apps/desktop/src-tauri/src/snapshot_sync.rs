@@ -379,8 +379,14 @@ pub(crate) fn pending(repository: &LocalRepository) -> Result<Vec<Event>, String
             },
         })
         .collect::<Vec<_>>();
-    let superseded = repository.superseded_snapshot_revision_ids().map_err(|error| error.to_string())?;
-    events.extend(revisions.into_iter().filter(|revision| !superseded.contains(&revision.operation_id)));
+    let superseded = repository
+        .superseded_snapshot_revision_ids()
+        .map_err(|error| error.to_string())?;
+    events.extend(
+        revisions
+            .into_iter()
+            .filter(|revision| !superseded.contains(&revision.operation_id)),
+    );
     Ok(events)
 }
 fn source_token(

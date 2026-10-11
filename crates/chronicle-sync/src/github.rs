@@ -81,9 +81,18 @@ pub struct GitHubClient {
     api_root: String,
     source: GitHubSource,
     policy: RequestPolicy,
+    next_request: std::sync::Arc<tokio::sync::Mutex<tokio::time::Instant>>,
 }
 
 impl GitHubClient {
+    async fn pace(&self) {
+        if self.policy.request_delay_ms == 0 {
+            return;
+        }
+        let mut next = self.next_request.lock().await;
+        tokio::time::sleep_until(*next).await;
+        *next = tokio::time::Instant::now() + Duration::from_millis(self.policy.request_delay_ms);
+    }
     pub(crate) fn metadata_request_policy(&self) -> RequestPolicy {
         self.policy
     }
@@ -184,6 +193,9 @@ impl GitHubClient {
             api_root: format!("https://api.github.com/repos/{}", source.repository),
             source,
             policy,
+            next_request: std::sync::Arc::new(tokio::sync::Mutex::new(
+                tokio::time::Instant::now() + Duration::from_millis(policy.request_delay_ms),
+            )),
         })
     }
 
@@ -222,9 +234,7 @@ impl GitHubClient {
         body: Option<Value>,
     ) -> Result<reqwest::Response> {
         for attempt in 0..=self.policy.retry_limit {
-            if self.policy.request_delay_ms > 0 {
-                sleep(Duration::from_millis(self.policy.request_delay_ms)).await;
-            }
+            self.pace().await;
             let mut request = self
                 .client
                 .request(method.clone(), self.api(&suffix))
@@ -360,9 +370,7 @@ impl GitHubClient {
             urlencoding::encode(&self.source.branch)
         );
         for attempt in 0..=self.policy.retry_limit {
-            if self.policy.request_delay_ms > 0 {
-                sleep(Duration::from_millis(self.policy.request_delay_ms)).await;
-            }
+            self.pace().await;
             let response = self
                 .client
                 .get(self.api(&suffix))
@@ -394,7 +402,7 @@ impl GitHubClient {
         unreachable!("retry loop always returns")
     }
 
-    async fn head(&self) -> Result<(String, String)> {
+    pub(crate) async fn head(&self) -> Result<(String, String)> {
         let branch = urlencoding::encode(&self.source.branch);
         let reference: Value = self
             .request(reqwest::Method::GET, format!("branches/{branch}"), None)

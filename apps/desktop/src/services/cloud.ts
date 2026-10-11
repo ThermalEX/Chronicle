@@ -1,5 +1,6 @@
 import { t } from "./i18n";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { ArchiveSyncMode } from "../domain";
 import { saveCloudSettings, type CloudSettings, type CloudSource } from "./settings";
 import { runAcrossEnabledSources, runItemsBySource } from "./multiSourceSync";
@@ -15,7 +16,9 @@ export type RemoteItem = {
   syncMode: ArchiveSyncMode;
 };
 
-export type CloudPreview = { sourceName: string; libraryId?: string; items: RemoteItem[] };
+export type CloudPreview = { sourceName: string; libraryId?: string; downloadToken?: string; items: RemoteItem[] };
+export type CloudDownloadProgress = { requestId: string; entryId: string; completed: number; total: number; phase: "download" | "commit" | "complete" };
+export type CloudDownloadResult = { entryId: string; error: string | null };
 export type CloudSyncResult = { status: "uploaded" | "downloaded" | "current" | "conflict"; message: string };
 export type CreatedGitHubRepository = { repository: string; branch: string };
 export type CloudSourceStatus = { sourceId: string; credentialSaved: boolean };
@@ -67,6 +70,16 @@ export const cloudRepository = {
     if (!isTauri()) desktopOnly();
     if (!confirmed) throw new Error(t("请先确认覆盖下载"));
     return invoke("cloud_overwrite_download", { sourceId, entryId, useCloudCategoryTree, confirmed });
+  },
+  async downloadSelected(sourceId: string, entryIds: string[], previewToken: string, confirmed: boolean, useCloudCategoryTree = false, onProgress?: (progress: CloudDownloadProgress) => void): Promise<CloudDownloadResult[]> {
+    if (!isTauri()) desktopOnly();
+    if (!confirmed) throw new Error(t("请先确认覆盖下载"));
+    const requestId = `cloud-download-${crypto.randomUUID()}`;
+    const unlisten = await listen<CloudDownloadProgress>("cloud-download-progress", ({ payload }) => {
+      if (payload.requestId === requestId) onProgress?.(payload);
+    });
+    try { return await invoke("cloud_download_selected", { sourceId, entryIds, previewToken, confirmed, useCloudCategoryTree, requestId }); }
+    finally { unlisten(); }
   },
   uploadApplicationSettings(sourceId: string): Promise<void> {
     if (!isTauri()) desktopOnly();

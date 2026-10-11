@@ -245,6 +245,7 @@ pub fn run() {
             cloud::cloud_sync_entry,
             cloud::cloud_overwrite_upload,
             cloud::cloud_overwrite_download,
+            cloud::cloud_download_selected,
             cloud::cloud_upload_application_settings,
             cloud::cloud_upload_sync_metadata,
             cloud::cloud_upload_entry_category_tree,

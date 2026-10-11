@@ -1,4 +1,13 @@
 export const dialogMessages: Record<string, string> = {
+  "覆盖下载所选": "Overwrite selected archives",
+  "全选当前显示的存档（不含设置文件）": "Select all visible archives (excluding settings)",
+  "请刷新云端清单后重试": "Refresh the cloud list and try again",
+  "批量下载已停止，请重新预览后重试": "Batch download stopped. Preview again before retrying",
+  "云盘未提供可靠的清单版本标识，无法安全复用扫描结果进行覆盖下载；Backblaze B2 可改用 S3 接口": "This provider does not expose reliable operation versions, so cached overwrite downloads are not safe. For Backblaze B2, use its S3 interface",
+  "以下存档的本机快照库将被云端版本替换，本机独有快照将被移除。不会修改原始来源文件或删除云端内容；下载及校验失败时保留该存档的原数据。确定覆盖下载？": "The local snapshot libraries of the following archives will be replaced by their cloud versions. Local-only snapshots will be removed. Original source files and cloud data are not changed. A failed download or verification preserves that archive's original local data. Proceed?",
+  "正在校验并提交…": "Verifying and committing…",
+  "正在下载存档…": "Downloading archives…",
+  "存档下载进度": "Archive download progress",
   "确认回收": "Confirm recycling",
   "未选择操作，已跳过": "Skipped: no operations selected",
   "修复云端显示索引": "Repair cloud display index",

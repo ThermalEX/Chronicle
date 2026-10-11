@@ -1,9 +1,9 @@
 # 本机主题包
 
-本机 `themes` 目录只保留完整 ZIP；素材不提交到 Git，也不捆绑进软件安装包。以下两个示例主题可从 [v1.3.6 发行页](https://github.com/ThermalEX/Chronicle/releases/tag/v1.3.6) 单独下载，使用同页的 `SHA256SUMS.txt` 校验：
+本机 `themes` 目录只保留完整 ZIP；素材不提交到 Git，也不捆绑进软件安装包。以下两个示例主题可从 [v1.3.7 发行页](https://github.com/ThermalEX/Chronicle/releases/tag/v1.3.7) 单独下载，使用同页的 `SHA256SUMS.txt` 校验：
 
-- [牧濑红莉栖](https://github.com/ThermalEX/Chronicle/releases/download/v1.3.6/Makise-Kurisu.zip)（`Makise-Kurisu.zip`）：红色配色、壁纸、图标和五种 Rayburst 音效。
-- [粉漫少女](https://github.com/ThermalEX/Chronicle/releases/download/v1.3.6/Pink-Anime-Girl.zip)（`Pink-Anime-Girl.zip`）：配色与壁纸，不替换图标或音效。旧包内的「粉蓝插画」名称不参与命名，导入以 ZIP 文件名为准。
+- [牧濑红莉栖](https://github.com/ThermalEX/Chronicle/releases/download/v1.3.7/Makise-Kurisu.zip)（`Makise-Kurisu.zip`）：红色配色、壁纸、图标和五种 Rayburst 音效。
+- [粉漫少女](https://github.com/ThermalEX/Chronicle/releases/download/v1.3.7/Pink-Anime-Girl.zip)（`Pink-Anime-Girl.zip`）：配色与壁纸，不替换图标或音效。旧包内的「粉蓝插画」名称不参与命名，导入以 ZIP 文件名为准。
 
 发行附件使用英文文件名和中文显示标签。若希望软件中显示中文主题名，先按下载时的英文文件名校验，再将 ZIP 重命名为 `牧濑红莉栖.zip` 或 `粉漫少女.zip` 后导入；不需要解压或改动 JSON。
 
