@@ -1444,6 +1444,16 @@ impl LocalRepository {
         });
         Ok(records)
     }
+    /// Local revisions explicitly superseded by a confirmed cloud overwrite.
+    /// Their records remain available as historical deletion dependencies.
+    ///
+    /// # Errors
+    /// Returns an error if the superseded revision document cannot be read.
+    pub fn superseded_snapshot_revision_ids(&self) -> Result<std::collections::HashSet<String>> {
+        let path = self.config_dir().join("snapshot-superseded-revisions.json");
+        if path.exists() { read_json(&path) } else { Ok(std::collections::HashSet::new()) }
+    }
+
     fn observed_snapshot_revisions(&self, snapshot_id: &str) -> Result<Vec<String>> {
         let path = self.config_dir().join("snapshot-observed-revisions.json");
         let mut parents: Vec<String> = if path.exists() {
@@ -1453,8 +1463,10 @@ impl LocalRepository {
         } else {
             Vec::new()
         };
+        let superseded = self.superseded_snapshot_revision_ids()?;
         for record in self.snapshot_revision_records()? {
-            if record["kind"]["snapshot"]["id"].as_str() == Some(snapshot_id) {
+            if record["kind"]["snapshot"]["id"].as_str() == Some(snapshot_id)
+                && !record["operationId"].as_str().is_some_and(|id| superseded.contains(id)) {
                 parents.push(
                     record["operationId"]
                         .as_str()

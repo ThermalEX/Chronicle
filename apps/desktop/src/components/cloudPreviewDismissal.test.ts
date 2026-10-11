@@ -42,6 +42,19 @@ afterEach(() => {
 });
 
 describe("cloud preview dismissal", () => {
+  it("does not download until overwrite is confirmed and sends the explicit confirmation", async () => {
+    const download = vi.spyOn(cloudRepository, "download").mockResolvedValue(undefined);
+    vi.spyOn(cloudRepository, "preview").mockResolvedValue({ sourceName: "first", items: [] });
+    const { state } = await dialog();
+    const item = { id: "archive", name: "Save", kind: "archive", protected: false, snapshotCount: 1, sizeBytes: 4, syncMode: "manual" };
+    state.confirmOverwrite(item, "download");
+    expect(download).not.toHaveBeenCalled();
+    state.confirmAction.value = undefined;
+    expect(download).not.toHaveBeenCalled();
+    state.confirmOverwrite(item, "download");
+    await state.confirmAction.value.run();
+    expect(download).toHaveBeenCalledWith("first", "archive", true, true);
+  });
   it("cannot replace a write with a preview and enable closing", async () => {
     const preview = vi.spyOn(cloudRepository, "preview");
     const { state, closed } = await dialog((s) => { s.busy.value = "upload:archive"; });

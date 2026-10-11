@@ -63,8 +63,9 @@ describe("cloud repository adapter", () => {
     expect(invoke).toHaveBeenCalledWith("cloud_sync_entry", { sourceId: "source-1", entryId: "entry-1" });
     await cloudRepository.upload("source-1", "entry-1");
     expect(invoke).toHaveBeenCalledWith("cloud_overwrite_upload", { sourceId: "source-1", entryId: "entry-1" });
-    await cloudRepository.download("source-1", "entry-1");
-    expect(invoke).toHaveBeenCalledWith("cloud_overwrite_download", { sourceId: "source-1", entryId: "entry-1", useCloudCategoryTree: false });
+    await expect(cloudRepository.download("source-1", "entry-1")).rejects.toThrow();
+    await cloudRepository.download("source-1", "entry-1", false, true);
+    expect(invoke).toHaveBeenCalledWith("cloud_overwrite_download", { sourceId: "source-1", entryId: "entry-1", useCloudCategoryTree: false, confirmed: true });
     await cloudRepository.delete("source-1", ["entry-1", "entry-2"]);
     expect(invoke).toHaveBeenCalledWith("cloud_delete_entries", { sourceId: "source-1", entryIds: ["entry-1", "entry-2"] });
     await cloudRepository.deleteConfigurations("source-1", ["config:app-settings"]);

@@ -232,7 +232,7 @@ async function runItemAction(item: RemoteItem, action: "sync" | "upload" | "down
   try {
     if (action === "sync") showToast("success", (await cloudRepository.sync(repositorySource.value.id, item.id)).message);
     if (action === "upload") { await uploadArchiveWithCategoryTree(repositorySource.value.id, item.id); showToast("success", t('已用本地存档覆盖远端')); }
-    if (action === "download") { await cloudRepository.download(repositorySource.value.id, item.id, useCloudCategoryTree.value); emit("downloaded"); showToast("success", t('已下载远端存档')); }
+    if (action === "download") { await cloudRepository.download(repositorySource.value.id, item.id, useCloudCategoryTree.value, true); emit("downloaded"); showToast("success", t('已下载远端存档')); }
     busy.value = "";
     await loadPreview();
   } catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
@@ -244,7 +244,7 @@ function confirmOverwrite(item: RemoteItem, direction: "upload" | "download"): v
   if (confirmingDownload.value) useCloudCategoryTree.value = true;
   confirmAction.value = {
     title: direction === "upload" ? t('覆盖上传') : t('覆盖下载'),
-    message: direction === "upload" ? t('远端“{value1}”将被本地仓库完整替换。', { value1: item.name }) : t('本地仓库中的“{value1}”将被远端版本完整替换，原始来源文件不会改动。', { value1: item.name }),
+    message: direction === "upload" ? t('远端“{value1}”将被本地仓库完整替换。', { value1: item.name }) : t('本机“{value1}”的快照库将被云端版本替换，本机独有的快照将被移除。不会修改原始来源文件或删除云端内容；下载及校验失败时保留本机原数据。确定覆盖下载？', { value1: item.name }),
     run: () => runItemAction(item, direction),
   };
 }

@@ -323,7 +323,21 @@ async fn remote_events(remote: &SnapshotRemote) -> Result<(Vec<Event>, bool), St
     events.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));
     Ok((events, marker.is_none()))
 }
-fn pending(repository: &LocalRepository) -> Result<Vec<Event>, String> {
+
+pub(crate) async fn overwrite_download_view(
+    remote: &SnapshotRemote,
+) -> Result<(Value, Vec<Event>), String> {
+    let (events, _) = remote_events(remote).await?;
+    let catalog = remote
+        .optional_bytes("catalog.json")
+        .await?
+        .map(|bytes| parse(&bytes))
+        .transpose()?
+        .unwrap_or_else(|| json!({"entries": []}));
+    // The immutable operation log, not a possibly stale catalog, defines live nodes.
+    Ok((project_remote_index(catalog, &events)?, events))
+}
+pub(crate) fn pending(repository: &LocalRepository) -> Result<Vec<Event>, String> {
     let revisions: Vec<Event> = repository
         .snapshot_revision_records()
         .map_err(|error| error.to_string())?
@@ -365,7 +379,8 @@ fn pending(repository: &LocalRepository) -> Result<Vec<Event>, String> {
             },
         })
         .collect::<Vec<_>>();
-    events.extend(revisions);
+    let superseded = repository.superseded_snapshot_revision_ids().map_err(|error| error.to_string())?;
+    events.extend(revisions.into_iter().filter(|revision| !superseded.contains(&revision.operation_id)));
     Ok(events)
 }
 fn source_token(

@@ -63,9 +63,10 @@ export const cloudRepository = {
     if (!isTauri()) desktopOnly();
     return invoke("cloud_overwrite_upload", { sourceId, entryId });
   },
-  download(sourceId: string, entryId: string, useCloudCategoryTree = false): Promise<void> {
+  async download(sourceId: string, entryId: string, useCloudCategoryTree = false, confirmed = false): Promise<void> {
     if (!isTauri()) desktopOnly();
-    return invoke("cloud_overwrite_download", { sourceId, entryId, useCloudCategoryTree });
+    if (!confirmed) throw new Error(t("请先确认覆盖下载"));
+    return invoke("cloud_overwrite_download", { sourceId, entryId, useCloudCategoryTree, confirmed });
   },
   uploadApplicationSettings(sourceId: string): Promise<void> {
     if (!isTauri()) desktopOnly();
