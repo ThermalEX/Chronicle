@@ -7,12 +7,11 @@ import {
   RefreshCw, Search, Settings2, SlidersHorizontal, UploadCloud, X,
   Star, Sun, Trash2,
 } from "@lucide/vue";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
-import CloudCenterDialog from "./components/CloudCenterDialog.vue";
 import AppToast from "./components/AppToast.vue";
 import CloudHealthDialog from "./components/CloudHealthDialog.vue";
 import ArchiveMetadata from "./components/ArchiveMetadata.vue";
@@ -22,14 +21,9 @@ import type { RegistryRestoreMode } from "./domain";
 import { notifyTrayBackground } from "./services/trayNotification";
 import CreateCategoryDialog from "./components/CreateCategoryDialog.vue";
 import CreateArchiveDialog from "./components/CreateArchiveDialog.vue";
-import SettingsDialog from "./components/SettingsDialog.vue";
 import WallpaperLayers from "./components/WallpaperLayers.vue";
-import SnapshotSyncDialog from "./components/SnapshotSyncDialog.vue";
 import { snapshotSync, quickSyncPlan, type OperationResult } from "./services/snapshotSync";
-import BackupHealthDialog from "./components/BackupHealthDialog.vue";
 import { setBackupTrigger, getBackupRuntimeStates, subscribeBackupRuntime, acceptBackupRuntime, backupAutomationLabel, type BackupRuntimeStatus } from "./services/backupAutomation";
-import SteamScanDialog from "./components/SteamScanDialog.vue";
-import UpdateDialog from "./components/UpdateDialog.vue";
 import TutorialOverlay from "./components/TutorialOverlay.vue";
 import { advanceTutorial, createTutorialState, loadTutorialProgress, saveTutorialProgress, shouldOfferTutorial, tutorialViews, type TutorialEvent, type TutorialProgress, type TutorialState } from "./services/onboarding";
 import ThemedSelect, { type ThemedSelectOption } from "./components/ThemedSelect.vue";
@@ -60,6 +54,14 @@ import { canAcceptExternalDrop, normalizeDroppedSources, type DroppedPathDto, ty
 import type { SettingsChanges } from "./services/settingsChanges";
 import { buildLibraryIndex } from "./services/libraryIndex";
 import { createTimelineLabels } from "./services/timelineLabels";
+
+// Rarely opened dialogs load on first use to keep the startup bundle small.
+const CloudCenterDialog = defineAsyncComponent(() => import("./components/CloudCenterDialog.vue"));
+const SettingsDialog = defineAsyncComponent(() => import("./components/SettingsDialog.vue"));
+const SnapshotSyncDialog = defineAsyncComponent(() => import("./components/SnapshotSyncDialog.vue"));
+const BackupHealthDialog = defineAsyncComponent(() => import("./components/BackupHealthDialog.vue"));
+const SteamScanDialog = defineAsyncComponent(() => import("./components/SteamScanDialog.vue"));
+const UpdateDialog = defineAsyncComponent(() => import("./components/UpdateDialog.vue"));
 
 type CategoryTreeNode = CategoryRecord & {
   nodeType: "category";
@@ -905,7 +907,7 @@ async function createSnapshot(title = t("手动备份"), archive = selectedArchi
     if (selectedArchiveId.value === archive.id) selectedSnapshotId.value = snapshot.id;
     tutorialEvent({ type: "snapshot-created", archiveId: archive.id });
     await uploadNewSnapshot(archive);
-    showNotice(t("时间节点已创建，保存 {length} 个文件", { length: snapshot.files.length }), "success", "notification");
+    showNotice(t("时间节点已创建，保存 {length} 个文件", { length: snapshot.fileCount }), "success", "notification");
   } catch (error) {
     reportError(error, { operation: t("创建备份"), archiveId: archive.id });
   } finally {
@@ -1417,30 +1419,34 @@ onMounted(async () => {
   }
   refreshCurrentTime();
   try {
-    localDevice.value = await deviceRepository.read();
-    knownDeviceSources.value = await readKnownDevices();
+    [localDevice.value, knownDeviceSources.value] = await Promise.all([deviceRepository.read(), readKnownDevices()]);
     stopSystemAppearance = watchSystemAppearance(() => activeAppearance());
     startupUpdatePending = appSettings.checkForUpdates;
-    if (isTauriRuntime) {
-      await listen<{ archiveId: string; error?: string }>("auto-backup-created", async ({ payload }) => {
-        await refreshAfterAutomaticBackup(payload.archiveId);
-        const archive = archives.value.find((item) => item.id === payload.archiveId);
-        if (archive) await uploadNewSnapshot(archive);
-        showNotice(archive ? t("“{name}”已自动备份", { name: archive.name }) : t("已自动备份"), "success", "notification");
-      });
-      await listen<{ archiveId: string; error?: string }>("auto-backup-failed", ({ payload }) => reportError(payload.error ?? t("自动备份失败"), { operation: t("自动备份"), archiveId: payload.archiveId }));
-      await listen<{generation:number}>("backup-automation-reset", ({payload}) => { if (payload.generation >= backupRuntimeGeneration) { backupRuntimeGeneration = payload.generation; backupRuntime.value = {}; } });
-      await subscribeBackupRuntime(status => { if (status.generation >= backupRuntimeGeneration) backupRuntime.value[status.entryId] = acceptBackupRuntime(backupRuntime.value[status.entryId], status); });
-      try {
-        await archiveRepository.refreshAutoBackup();
-        for (const status of await getBackupRuntimeStates()) if (status.generation >= backupRuntimeGeneration) backupRuntime.value[status.entryId] = acceptBackupRuntime(backupRuntime.value[status.entryId], status);
-      } catch (error) { showNotice(backupAutomationLabel(String(error)), 'error'); }
-      await listen("chronicle-close-requested", () => { closeRequestOpen.value = true; });
-      await listen("chronicle-hidden-to-tray", () => { void notifyTrayBackground(appSettings.notifications); });
-    }
+    // Show the library first; the storage walk and watcher rebuild finish in the background.
     await refreshCategories();
     await refreshArchives();
-    await refreshRepositoryInfo();
+    void refreshRepositoryInfo().catch((error) => showNotice(readableError(error), "error"));
+    if (isTauriRuntime) {
+      await Promise.all([
+        listen<{ archiveId: string; error?: string }>("auto-backup-created", async ({ payload }) => {
+          await refreshAfterAutomaticBackup(payload.archiveId);
+          const archive = archives.value.find((item) => item.id === payload.archiveId);
+          if (archive) await uploadNewSnapshot(archive);
+          showNotice(archive ? t("“{name}”已自动备份", { name: archive.name }) : t("已自动备份"), "success", "notification");
+        }),
+        listen<{ archiveId: string; error?: string }>("auto-backup-failed", ({ payload }) => reportError(payload.error ?? t("自动备份失败"), { operation: t("自动备份"), archiveId: payload.archiveId })),
+        listen<{generation:number}>("backup-automation-reset", ({payload}) => { if (payload.generation >= backupRuntimeGeneration) { backupRuntimeGeneration = payload.generation; backupRuntime.value = {}; } }),
+        subscribeBackupRuntime(status => { if (status.generation >= backupRuntimeGeneration) backupRuntime.value[status.entryId] = acceptBackupRuntime(backupRuntime.value[status.entryId], status); }),
+        listen("chronicle-close-requested", () => { closeRequestOpen.value = true; }),
+        listen("chronicle-hidden-to-tray", () => { void notifyTrayBackground(appSettings.notifications); }),
+      ]);
+      void (async () => {
+        try {
+          await archiveRepository.refreshAutoBackup();
+          for (const status of await getBackupRuntimeStates()) if (status.generation >= backupRuntimeGeneration) backupRuntime.value[status.entryId] = acceptBackupRuntime(backupRuntime.value[status.entryId], status);
+        } catch (error) { showNotice(backupAutomationLabel(String(error)), 'error'); }
+      })();
+    }
     if (appSettings.checkCloudOnLaunch && isTauriRuntime) void checkCloudSources();
     try {
       tutorialProgress.value = await loadTutorialProgress(archives.value.length > 0 || categoryRecords.value.length > 0);

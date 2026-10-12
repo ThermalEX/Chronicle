@@ -18,7 +18,7 @@ import type { ArchiveRecord, SnapshotRecord } from "../domain";
 
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
 const archive = (id: string): ArchiveRecord => ({ id, name: id, sources: [], sourcePath: "C:/synthetic", category: "", tags: [], kind: "file", storagePolicy: "local", syncMode: "manual", autoBackupEnabled: false, automaticUploadEnabled: false, createdAt: 0, updatedAt: 0, totalBytes: 0 });
-const snapshot = (id: string, archiveId: string): SnapshotRecord => ({ id, archiveId, title: id, createdAt: 1, totalBytes: 0, contentHash: "hash", files: [], changes: { added: 0, modified: 0, deleted: 0 }, safety: false });
+const snapshot = (id: string, archiveId: string): SnapshotRecord => ({ id, archiveId, title: id, createdAt: 1, totalBytes: 0, contentHash: "hash", fileCount: 0, changes: { added: 0, modified: 0, deleted: 0 }, safety: false });
 async function flush() { for (let index = 0; index < 15; index++) await Promise.resolve(); await nextTick(); }
 async function app() {
   let state: any;

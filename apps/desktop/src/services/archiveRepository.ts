@@ -435,7 +435,7 @@ export class BrowserArchiveRepository {
     }
     onProgress?.({ current: sourceFiles.length, total: sourceFiles.length, currentPath: "" });
     const previous = (await this.listSnapshots(archive.id))[0];
-    const previousFiles = new Map(previous?.files.map((file) => [file.path, file]));
+    const previousFiles = new Map(previous?.files?.map((file) => [file.path, file]));
     const currentFiles = new Map(files.map((file) => [file.path, file]));
     const changes = { added: 0, modified: 0, deleted: 0 };
     for (const file of files) {
@@ -456,6 +456,7 @@ export class BrowserArchiveRepository {
       createdAt: Date.now(),
       totalBytes: files.reduce((total, file) => total + file.size, 0),
       contentHash: await digest(new Blob([manifest])),
+      fileCount: files.length,
       files,
       changes,
       safety,
@@ -548,7 +549,7 @@ export class BrowserArchiveRepository {
       if (!source.handle) throw new Error(t("“{name}”缺少本地文件句柄", { name: source.name }));
       await ensurePermission(source.handle, "readwrite");
       const prefix = `${source.id}/`;
-      const files = snapshot.files.filter((file) => file.path.startsWith(prefix) && !excluded(file.path.slice(prefix.length)));
+      const files = (snapshot.files ?? []).filter((file) => file.path.startsWith(prefix) && !excluded(file.path.slice(prefix.length)));
       if (source.kind === "file") {
         const file = files.find((item) => item.path === `${prefix}${source.name}`);
         if (!file?.blob) throw new Error(t("快照中缺少“{name}”", { name: source.name }));

@@ -723,7 +723,7 @@ fn save_scan_result(path: &Path, result: &ScanResult) -> Result<(), String> {
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn load_steam_scan_results(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<Option<ScanResult>, String> {

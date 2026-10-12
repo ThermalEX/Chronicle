@@ -50,14 +50,14 @@ fn write(root: &Path, progress: &TutorialProgress) -> Result<(), String> {
     crate::atomic_file::write_json_pretty(&root.join("config/onboarding-local.json"), progress)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn load_onboarding(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<TutorialProgress, String> {
     let repository = state.repository.lock().map_err(|error| error.to_string())?;
     read(repository.root())
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_onboarding(
     state: tauri::State<'_, crate::AppState>,
     progress: TutorialProgress,

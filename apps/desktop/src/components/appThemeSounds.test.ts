@@ -94,7 +94,7 @@ it("does not announce a successful connection after cloud sync is disabled mid-c
 it("plays a completion notification only after backup and restore finish", async () => {
   const archive: ArchiveRecord = { id: "a", name: "test", sourcePath: "C:/test", sources: [], category: "", tags: [], kind: "file",
     storagePolicy: "local", syncMode: "manual", autoBackupEnabled: false, automaticUploadEnabled: false, createdAt: 1, updatedAt: 1, totalBytes: 0 };
-  const snapshot: SnapshotRecord = { id: "s", archiveId: "a", title: "test", createdAt: 1, totalBytes: 0, contentHash: "hash", files: [], changes: { added: 0, modified: 0, deleted: 0 }, safety: false };
+  const snapshot: SnapshotRecord = { id: "s", archiveId: "a", title: "test", createdAt: 1, totalBytes: 0, contentHash: "hash", fileCount: 0, changes: { added: 0, modified: 0, deleted: 0 }, safety: false };
   vi.spyOn(archiveRepository, "listArchives").mockResolvedValue([archive]);
   vi.spyOn(archiveRepository, "listSnapshots").mockResolvedValue([snapshot]);
   vi.spyOn(archiveRepository, "getRepositoryInfo").mockResolvedValue({ path: "test", totalBytes: 0 });

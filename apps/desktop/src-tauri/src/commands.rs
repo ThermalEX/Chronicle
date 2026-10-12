@@ -1,8 +1,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use chronicle_core::{
-    Category, ChangeSummary, Entry, EntryKind, EntrySource, Snapshot, SnapshotFile, StoragePolicy,
-    SyncMode,
+    Category, ChangeSummary, Entry, EntryKind, EntrySource, Snapshot, StoragePolicy, SyncMode,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -108,15 +107,6 @@ pub struct EntrySourceDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SnapshotFileDto {
-    path: String,
-    size: u64,
-    last_modified: u64,
-    hash: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct SnapshotDto {
     id: String,
     archive_id: String,
@@ -125,7 +115,8 @@ pub struct SnapshotDto {
     created_at: u64,
     total_bytes: u64,
     content_hash: String,
-    files: Vec<SnapshotFileDto>,
+    /// The timeline only shows counts; per-file manifests stay in the catalog.
+    file_count: usize,
     changes: ChangeSummary,
     safety: bool,
     locked: bool,
@@ -422,15 +413,6 @@ pub fn open_recycle_bin(
         .map_err(|error| error.to_string())
 }
 
-fn snapshot_file_dto(file: SnapshotFile) -> SnapshotFileDto {
-    SnapshotFileDto {
-        path: file.relative_path,
-        size: file.size_bytes,
-        last_modified: file.modified_at_ms,
-        hash: file.content_hash,
-    }
-}
-
 fn snapshot_dto(snapshot: Snapshot) -> SnapshotDto {
     SnapshotDto {
         id: snapshot.id,
@@ -440,7 +422,7 @@ fn snapshot_dto(snapshot: Snapshot) -> SnapshotDto {
         created_at: snapshot.created_at_ms,
         total_bytes: snapshot.files.iter().map(|file| file.size_bytes).sum(),
         content_hash: snapshot.object_hash,
-        files: snapshot.files.into_iter().map(snapshot_file_dto).collect(),
+        file_count: snapshot.files.len(),
         changes: snapshot.changes,
         safety: snapshot.safety,
         locked: snapshot.locked,

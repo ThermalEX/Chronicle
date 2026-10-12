@@ -83,7 +83,7 @@ pub fn load_triggers(root: &Path) -> Result<TriggerDocument, String> {
 fn save_triggers(root: &Path, document: &TriggerDocument) -> Result<(), String> {
     crate::atomic_file::write_json_pretty(&root.join("config/backup-automation.json"), document)
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_backup_trigger(
     state: State<'_, crate::AppState>,
     entry_id: String,
@@ -95,7 +95,7 @@ pub fn get_backup_trigger(
         .remove(&entry_id)
         .unwrap_or_default())
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_backup_trigger(
     state: State<'_, crate::AppState>,
     entry_id: String,

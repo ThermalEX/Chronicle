@@ -12,7 +12,7 @@ function archive(id: string, categoryId?: string): ArchiveRecord {
   return { id, name: id, categoryId, category: "", sourcePath: "C:/synthetic", sources: [], tags: [], kind: "file", storagePolicy: "local", syncMode: "manual", autoBackupEnabled: false, automaticUploadEnabled: false, createdAt: 1, updatedAt: 1, totalBytes: 0 };
 }
 function snapshot(id: string, archiveId: string): SnapshotRecord {
-  return { id, archiveId, title: id, createdAt: 1, totalBytes: 0, contentHash: "hash", files: [], changes: { added: 0, modified: 0, deleted: 0 }, safety: false };
+  return { id, archiveId, title: id, createdAt: 1, totalBytes: 0, contentHash: "hash", fileCount: 0, changes: { added: 0, modified: 0, deleted: 0 }, safety: false };
 }
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
 async function app() {

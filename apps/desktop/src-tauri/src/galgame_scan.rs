@@ -536,7 +536,7 @@ fn cache_path(state: &crate::AppState) -> Result<PathBuf, String> {
         .join("cache/galgame-scan-results.json"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn load_galgame_scan_results(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<Option<ScanResult>, String> {

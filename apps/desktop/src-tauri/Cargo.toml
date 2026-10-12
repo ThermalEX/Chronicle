@@ -8,7 +8,8 @@ rust-version = "1.97"
 
 [lib]
 name = "chronicle_desktop_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Windows desktop only: the mobile staticlib/cdylib outputs were never shipped.
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
@@ -45,6 +46,11 @@ winreg = "0.55"
 tempfile = "3"
 opendal = { version = "=0.59.1", default-features = false, features = ["services-memory"] }
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
 
 [lints.rust]
 unsafe_code = "forbid"

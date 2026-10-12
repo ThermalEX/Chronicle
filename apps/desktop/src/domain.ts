@@ -70,7 +70,9 @@ export type SnapshotRecord = {
   createdAt: number;
   totalBytes: number;
   contentHash: string;
-  files: SnapshotFile[];
+  fileCount: number;
+  /** Only the browser preview adapter keeps per-file manifests on snapshot records. */
+  files?: SnapshotFile[];
   changes: { added: number; modified: number; deleted: number };
   safety: boolean;
   deviceId?: string;
