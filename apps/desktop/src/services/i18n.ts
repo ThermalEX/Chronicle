@@ -15,9 +15,12 @@ export function setLocale(value: unknown): void {
 
 const messages: Record<string, string> = { ...commonMessages, ...settingsMessages, ...dialogMessages, ...workspaceMessages };
 
-/** Translate only application-owned messages, never arbitrary user data or remote errors. */
-export function t(source: string, params: Record<string, string | number> = {}): string {
-  const message = locale.value === "en" ? messages[source] ?? source : source;
+/**
+ * Translate only application-owned messages, never arbitrary user data or remote errors.
+ * `context` picks a "context|source" entry when the same Chinese text needs different English.
+ */
+export function t(source: string, params: Record<string, string | number> = {}, context?: string): string {
+  const message = locale.value === "en" ? (context ? messages[`${context}|${source}`] : undefined) ?? messages[source] ?? source : source;
   return message.replace(/\{(\w+)\}/g, (token, name: string) =>
     Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : token);
 }

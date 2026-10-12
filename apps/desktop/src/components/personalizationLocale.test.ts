@@ -16,4 +16,4 @@ it("translates all static personalization labels without changing user names",as
 it("has English mappings for every new static UI and validation key",()=>{
   setLocale("en");for(const path of ["PersonalizationSettings.vue","WallpaperGallery.vue","../services/personalization.ts"]){const source=readFileSync(new URL(path,import.meta.url),"utf8");for(const match of source.matchAll(/\bt\(["']([^"']+)["']/g)){const key=match[1]!;if(/[\u4e00-\u9fff]/.test(key))expect(t(key),key).not.toBe(key);}}
 });
-it("localizes owned error messages but preserves external diagnostics",()=>{setLocale("en");expect(personalizationErrorLabel("主题资源不存在")).toBe("A theme resource is missing.");expect(personalizationErrorLabel("Disk full: C:/主题.zip")).toBe("Disk full: C:/主题.zip");});
+it("localizes owned error messages but preserves external diagnostics",()=>{setLocale("en");expect(personalizationErrorLabel("主题资源缺失")).toBe("A theme resource is missing.");expect(personalizationErrorLabel("Disk full: C:/主题.zip")).toBe("Disk full: C:/主题.zip");});

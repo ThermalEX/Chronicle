@@ -21,10 +21,18 @@ describe("application language", () => {
   });
   it("interpolates named values without translating or reprocessing user content", () => {
     setLocale("en");
-    expect(t("共 {count} 项", { count: 3 })).toBe("3 items");
+    expect(t("{count} 项", { count: 3 })).toBe("3 items");
     expect(t("Missing {name}", { name: "中文存档 {count} $&" })).toBe("Missing 中文存档 {count} $&");
     expect(t("unknown message")).toBe("unknown message");
     setLocale("zh-CN");
-    expect(t("共 {count} 项", { count: 3 })).toBe("共 3 项");
+    expect(t("{count} 项", { count: 3 })).toBe("3 项");
+  });
+  it("uses a context entry when the same Chinese text needs different English", () => {
+    setLocale("en");
+    expect(t("删除")).toBe("Delete");
+    expect(t("删除", {}, "change")).toBe("Deleted");
+    expect(t("取消", {}, "change")).toBe("Cancel");
+    setLocale("zh-CN");
+    expect(t("删除", {}, "change")).toBe("删除");
   });
 });

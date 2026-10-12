@@ -12,4 +12,8 @@ describe("English language catalogs", () => {
       expect(placeholders(translated), source).toEqual(placeholders(source));
     }
   });
+  it("defines each source text in only one catalog", () => {
+    const keys = [commonMessages, settingsMessages, dialogMessages, workspaceMessages].flatMap(Object.keys);
+    expect(keys.filter((key, index) => keys.indexOf(key) !== index)).toEqual([]);
+  });
 });
