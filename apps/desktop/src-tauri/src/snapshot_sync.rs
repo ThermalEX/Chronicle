@@ -1758,6 +1758,9 @@ async fn apply_source_plan(
             error: outcome.err(),
         });
     }
+    // The remote catalog is a projection of the operation log; rebuild it once after
+    // this source's operations instead of re-uploading it after every snapshot.
+    let mut committed_events = None;
     for op in selected {
         let outcome = async {
             cancelled(&plan_id)?;
@@ -1783,22 +1786,42 @@ async fn apply_source_plan(
             let (updated_events, _) = cancellable_read(&plan_id, remote_events(remote)).await?;
             validate_remote_commit(&events, &committed, &updated_events)?;
             let events = updated_events;
-            refresh_remote_index_from_events(remote, &events, Some(&plan_id)).await?;
             let repository = state.repository.lock().map_err(|_| "资料库状态不可用")?;
             session.check_local(&repository)?;
             expected = session.initial.source_token(&events, signature)?;
-            Ok::<_, String>(())
+            Ok::<_, String>(events)
         }
         .await;
+        let error = match outcome {
+            Ok(events) => {
+                committed_events = Some(events);
+                None
+            }
+            Err(error) => Some(error),
+        };
         results.push(OperationResult {
             operation_id: op.id.clone(),
             source_id: source.source_id.clone(),
-            status: if outcome.is_ok() { "success" } else { "failed" }.into(),
-            error: outcome.err(),
+            status: if error.is_none() { "success" } else { "failed" }.into(),
+            error,
         });
         let _ = app.emit(
             "snapshot-sync-progress",
             json!({"requestId":plan_id,"results":[results.last()]}),
+        );
+    }
+    if let (Some(events), Ok((remote, ..))) = (committed_events, connection.as_ref())
+        && let Err(error) = refresh_remote_index_from_events(remote, &events, Some(plan_id)).await
+        && let Some(last) = results
+            .iter_mut()
+            .rev()
+            .find(|result| result.status == "success")
+    {
+        last.status = "failed".into();
+        last.error = Some(error);
+        let _ = app.emit(
+            "snapshot-sync-progress",
+            json!({"requestId":plan_id,"results":[&*last]}),
         );
     }
     if let Some(repair_id) = repair_id.filter(|_| has_snapshots) {
