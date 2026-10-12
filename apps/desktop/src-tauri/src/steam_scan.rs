@@ -717,14 +717,10 @@ pub async fn scan_steam_saves(
 }
 
 fn save_scan_result(path: &Path, result: &ScanResult) -> Result<(), String> {
-    fs::create_dir_all(path.parent().ok_or("无效缓存目录")?).map_err(|e| e.to_string())?;
-    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    fs::write(
-        &temporary,
-        serde_json::to_vec(result).map_err(|e| e.to_string())?,
+    crate::atomic_file::write_atomic(
+        path,
+        &serde_json::to_vec(result).map_err(|e| e.to_string())?,
     )
-    .map_err(|e| e.to_string())?;
-    fs::rename(&temporary, path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

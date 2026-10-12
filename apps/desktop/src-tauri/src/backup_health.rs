@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs,
-    path::Path,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -95,21 +94,6 @@ fn now() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
-}
-fn atomic_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
-    let parent = path.parent().ok_or("invalid_cache_path")?;
-    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let tmp = parent.join(format!("{}.tmp", uuid::Uuid::new_v4()));
-    fs::write(
-        &tmp,
-        serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    let result = fs::rename(&tmp, path).map_err(|e| e.to_string());
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
 }
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -289,8 +273,8 @@ pub fn start_backup_health_check(
                 task.state.status = "cancelled".into();
             } else {
                 task.state.entries = results.clone();
-                atomic_json(&observations_path, &observations)?;
-                atomic_json(
+                crate::atomic_file::write_json_pretty(&observations_path, &observations)?;
+                crate::atomic_file::write_json_pretty(
                     &repo.root().join("cache/backup-health-report.json"),
                     &HealthReport {
                         format_version: 1,

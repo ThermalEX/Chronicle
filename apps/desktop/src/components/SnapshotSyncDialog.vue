@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { X, RefreshCw, UploadCloud, LoaderCircle, ChevronRight, Check, CircleAlert } from "@lucide/vue";
 import { listen } from "@tauri-apps/api/event";
 import { t, locale } from "../services/i18n";
+import { formatBytes } from "../services/format";
 import { deviceLabel } from "../services/devices";
 import { snapshotSync, defaultPlanSelection, executable, type SyncPlan, type SyncOperation, type OperationResult } from "../services/snapshotSync";
 import ConfirmDialog from "./ConfirmDialog.vue";
@@ -123,7 +124,6 @@ function selectDeletes(): void {
   const ids = new Set(recyclingOperations.value.map(op => op.id));
   selected.value = allRecyclingSelected.value ? selected.value.filter(id => !ids.has(id)) : [...new Set([...selected.value, ...ids])];
 }
-function bytes(value: number): string { return value >= 1024 ** 2 ? `${(value / 1024 ** 2).toFixed(1)} MB` : `${Math.ceil(value / 1024)} KB`; }
 async function preview(): Promise<void> {
   phase.value = "preview";
   busy.value = true; error.value = ""; results.value = []; plan.value = undefined; sourcesChecked.value = 0;
@@ -226,7 +226,7 @@ onBeforeUnmount(() => { dispose?.(); if (busy.value) void cancel(); });
             <label v-if="source.deviceRecordId" class="sync-operation"><input v-model="selected" type="checkbox" :value="source.deviceRecordId" :disabled="busy || source.upgradeRequired" /><span><b>{{ t('更新本机设备信息') }}</b><small>{{ t('仅在云端缺少当前设备或设备名称变更时执行。') }}</small><small v-if="resultsById.get(source.deviceRecordId)" role="status">{{ t(resultsById.get(source.deviceRecordId)?.error || '已完成') }}</small></span></label>
             <div v-for="group in source.groups" :key="group.id" class="sync-entry"><h4><button class="snapshot-control sync-disclosure" :aria-expanded="expandedArchives.has(archiveKey(source.sourceId, group.id))" :aria-controls="`sync-entry-${source.sourceId}-${group.id}`" @click="toggleArchive(source.sourceId, group.id)"><ChevronRight :size="15" class="sync-chevron" :class="{ expanded: expandedArchives.has(archiveKey(source.sourceId, group.id)) }" aria-hidden="true" /><span>{{ group.name }}</span><span v-if="group.changeCount" class="sync-change-count" :aria-label="t('待处理变更：{count}', { count: group.changeCount })" :title="t('待处理变更：{count}', { count: group.changeCount })">{{ group.changeCount }}</span></button></h4>
               <div v-if="expandedArchives.has(archiveKey(source.sourceId, group.id))" :id="`sync-entry-${source.sourceId}-${group.id}`">
-                <label v-for="op in group.ops" :key="op.id" class="sync-operation"><input v-model="selected" type="checkbox" :value="op.id" :disabled="busy || !executable(op) || source.upgradeRequired" /><span><b>{{ op.snapshot.title }}</b><small>{{ op.timeLabel }} · {{ bytes(op.snapshot.size_bytes) }} · {{ deviceLabel(op.snapshot.device_id, op.snapshot.device_name, source.devices) }}</small><small v-if="op.deletion">{{ t('删除设备') }}：{{ deviceLabel(op.deletion.device.id, op.deletion.device.name, source.devices) }}</small><small v-if="op.reason" class="sync-plan-warning">{{ t(op.reason) }}</small><small v-if="resultsById.get(op.id)" role="status">{{ t(resultsById.get(op.id)?.error || (resultsById.get(op.id)?.status === 'success' ? '已完成' : resultsById.get(op.id)?.status === 'cancelled' ? '已取消' : '同步失败')) }}</small></span><span class="sync-action" :class="{ conflict: op.action === 'conflict' }">{{ t(names[op.action]) }}</span></label>
+                <label v-for="op in group.ops" :key="op.id" class="sync-operation"><input v-model="selected" type="checkbox" :value="op.id" :disabled="busy || !executable(op) || source.upgradeRequired" /><span><b>{{ op.snapshot.title }}</b><small>{{ op.timeLabel }} · {{ formatBytes(op.snapshot.size_bytes) }} · {{ deviceLabel(op.snapshot.device_id, op.snapshot.device_name, source.devices) }}</small><small v-if="op.deletion">{{ t('删除设备') }}：{{ deviceLabel(op.deletion.device.id, op.deletion.device.name, source.devices) }}</small><small v-if="op.reason" class="sync-plan-warning">{{ t(op.reason) }}</small><small v-if="resultsById.get(op.id)" role="status">{{ t(resultsById.get(op.id)?.error || (resultsById.get(op.id)?.status === 'success' ? '已完成' : resultsById.get(op.id)?.status === 'cancelled' ? '已取消' : '同步失败')) }}</small></span><span class="sync-action" :class="{ conflict: op.action === 'conflict' }">{{ t(names[op.action]) }}</span></label>
               </div>
             </div>
             <p v-if="!source.operations.length && !source.indexRepairId && !source.deviceRecordId">{{ t('无需处理') }}</p>

@@ -637,15 +637,7 @@ fn read_diagnostics(path: &std::path::Path) -> Result<DiagnosticsDocument, Strin
 }
 
 fn write_diagnostics(path: &std::path::Path, document: &DiagnosticsDocument) -> Result<(), String> {
-    let parent = path.parent().ok_or_else(|| "错误记录路径无效".to_owned())?;
-    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let temporary = parent.join(format!(".diagnostics-{}.tmp", uuid::Uuid::new_v4()));
-    std::fs::write(
-        &temporary,
-        serde_json::to_vec_pretty(document).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    std::fs::rename(temporary, path).map_err(|error| error.to_string())
+    crate::atomic_file::write_json_pretty(path, document)
 }
 
 #[tauri::command(async)]

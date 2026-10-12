@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    io::{BufReader, Read, Write},
+    io::BufReader,
     path::{Component, Path, PathBuf},
 };
 
@@ -592,30 +592,11 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
 }
 
 fn write_json_atomic(path: &Path, value: &Value) -> Result<(), String> {
-    let parent = path.parent().ok_or_else(|| "目标路径无父目录".to_owned())?;
-    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let temporary = parent.join(format!(".chronicle-{}.tmp", Uuid::new_v4()));
-    let mut file = fs::File::create(&temporary).map_err(|error| error.to_string())?;
-    file.write_all(&serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())?;
-    file.sync_all().map_err(|error| error.to_string())?;
-    fs::rename(temporary, path).map_err(|error| error.to_string())
+    crate::atomic_file::write_json_pretty(path, value)
 }
 
 fn hash_file(path: &Path) -> Result<String, String> {
-    let mut reader = BufReader::new(fs::File::open(path).map_err(|error| error.to_string())?);
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let count = reader
-            .read(&mut buffer)
-            .map_err(|error| error.to_string())?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+    chronicle_storage::hash_file(path).map_err(|error| error.to_string())
 }
 
 fn snapshot_ids_from_timeline(timeline: &Value) -> Vec<String> {

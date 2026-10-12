@@ -47,23 +47,7 @@ fn read(root: &Path) -> Result<TutorialProgress, String> {
     serde_json::from_slice(&bytes).map_err(|error| error.to_string())
 }
 fn write(root: &Path, progress: &TutorialProgress) -> Result<(), String> {
-    use std::io::Write;
-    let directory = root.join("config");
-    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    let temporary = directory.join(format!(".onboarding-{}.tmp", uuid::Uuid::new_v4()));
-    let result = (|| {
-        let mut file = fs::File::create(&temporary).map_err(|error| error.to_string())?;
-        file.write_all(&serde_json::to_vec_pretty(progress).map_err(|error| error.to_string())?)
-            .map_err(|error| error.to_string())?;
-        file.sync_all().map_err(|error| error.to_string())?;
-        drop(file);
-        fs::rename(&temporary, directory.join("onboarding-local.json"))
-            .map_err(|error| error.to_string())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    crate::atomic_file::write_json_pretty(&root.join("config/onboarding-local.json"), progress)
 }
 
 #[tauri::command]

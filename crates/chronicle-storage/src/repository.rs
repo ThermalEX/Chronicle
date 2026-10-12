@@ -2554,12 +2554,7 @@ fn sources_match_manifest(
         if source.kind == EntryKind::Registry {
             let bytes =
                 registry::export_key(&source.path).map_err(StorageError::InvalidBackupOption)?;
-            let mut hash = String::with_capacity(64);
-            for byte in Sha256::digest(&bytes) {
-                hash.push(char::from(HEX[usize::from(byte >> 4)]));
-                hash.push(char::from(HEX[usize::from(byte & 0x0f)]));
-            }
-            current.insert(format!("{}/registry.json", source.id), hash);
+            current.insert(format!("{}/registry.json", source.id), hash_bytes(&bytes));
         } else {
             match crate::health::source_manifest(
                 source,
@@ -2959,17 +2954,24 @@ fn validate_snapshot_filename(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn hash_bytes(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
+fn hex(digest: &[u8]) -> String {
     let mut encoded = String::with_capacity(digest.len() * 2);
-    for byte in digest {
+    for &byte in digest {
         encoded.push(char::from(HEX[usize::from(byte >> 4)]));
         encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     encoded
 }
 
-fn hash_file(path: &Path) -> Result<String> {
+fn hash_bytes(bytes: &[u8]) -> String {
+    hex(&Sha256::digest(bytes))
+}
+
+/// Returns the lowercase hex SHA-256 of a file, streamed in 8 KiB chunks.
+///
+/// # Errors
+/// Returns an error when the file cannot be read.
+pub fn hash_file(path: &Path) -> Result<String> {
     let mut reader = BufReader::new(File::open(path)?);
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 8 * 1024];
@@ -2980,13 +2982,7 @@ fn hash_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buffer[..count]);
     }
-    let digest = hasher.finalize();
-    let mut encoded = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    Ok(encoded)
+    Ok(hex(&hasher.finalize()))
 }
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {

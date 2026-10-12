@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { t, locale } from "../services/i18n";
+import { errorMessage, formatBytes } from "../services/format";
 import { ChevronDown, CloudCog, Download, ExternalLink, Pause, Play, Plus, RefreshCw, Search, Server, Trash2, Upload, X } from "@lucide/vue";
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { cloudRepository, saveCloudConfiguration, uploadArchiveWithCategoryTree, type CloudDownloadProgress, type CloudPreview, type RemoteItem } from "../services/cloud";
@@ -86,13 +87,6 @@ const syncOptions = computed<ThemedSelectOption[]>(() => [
   { value: "automatic", label: t('自动上传') },
 ]);
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
-}
-
 function formatUpdatedAt(value?: number): string {
   if (!value) return t('未记录');
   return new Intl.DateTimeFormat(locale.value, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
@@ -167,7 +161,7 @@ async function loadPreview(): Promise<void> {
     const result = await Promise.race([cloudRepository.preview(source.id, backendRequestId), interrupted]);
     if (requestId === previewRequestId && result) preview.value = result;
   } catch (reason) {
-    if (requestId === previewRequestId) showToast("error", reason instanceof Error ? reason.message : String(reason));
+    if (requestId === previewRequestId) showToast("error", errorMessage(reason));
   } finally {
     window.clearTimeout(timeout);
     if (requestId === previewRequestId) {
@@ -200,7 +194,7 @@ async function testSource(source: CloudSource): Promise<void> {
     tutorialTests.set(source.id, tutorialKey);
     showToast("success", source.provider === "opendal" ? t('“{value1}”读写、列举和临时清理测试通过', { value1: source.name }) : t('“{value1}”连接与读写测试通过', { value1: source.name }));
   }
-  catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
+  catch (reason) { showToast("error", errorMessage(reason)); }
   finally { busy.value = ""; }
 }
 
@@ -213,7 +207,7 @@ async function createGitHubRepository(source: CloudSource): Promise<void> {
     source.branch = created.branch;
     await persist();
     showToast("success", t('已创建私有仓库“{value1}”，默认分支为 {value2}', { value1: created.repository, value2: created.branch }));
-  } catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
+  } catch (reason) { showToast("error", errorMessage(reason)); }
   finally { busy.value = ""; }
 }
 
@@ -221,7 +215,7 @@ async function openGitHubPatPage(): Promise<void> {
   try {
     await openExternalUrl(githubClassicPatUrl());
   } catch (reason) {
-    showToast("error", reason instanceof Error ? reason.message : String(reason));
+    showToast("error", errorMessage(reason));
   }
 }
 
@@ -242,7 +236,7 @@ async function runItemAction(item: RemoteItem, action: "sync" | "upload" | "down
     if (action === "download") { await downloadArchives([item]); return; }
     busy.value = "";
     await loadPreview();
-  } catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
+  } catch (reason) { showToast("error", errorMessage(reason)); }
   finally { busy.value = ""; }
 }
 
@@ -288,7 +282,7 @@ async function uploadApplicationSettings(): Promise<void> {
   if (!repositorySource.value) return;
   busy.value = "app-settings-upload";
   try { await cloudRepository.uploadApplicationSettings(repositorySource.value.id); showToast("success", t('本机应用设置已上传')); busy.value = ""; await loadPreview(); }
-  catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
+  catch (reason) { showToast("error", errorMessage(reason)); }
   finally { busy.value = ""; }
 }
 
@@ -297,7 +291,7 @@ async function confirmDownloadApplicationSettings(): Promise<void> {
   confirmingDownload.value = false;
   busy.value = "app-settings-download";
   try { await cloudRepository.downloadApplicationSettings(repositorySource.value.id); }
-  catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); return; }
+  catch (reason) { showToast("error", errorMessage(reason)); return; }
   finally { busy.value = ""; }
   confirmAction.value = {
     title: t('应用云端设置'),
@@ -331,7 +325,7 @@ async function changeSyncMode(item: RemoteItem, mode: string | null): Promise<vo
   if (!repositorySource.value || (mode !== "manual" && mode !== "automatic")) return;
   busy.value = `mode:${item.id}`;
   try { await cloudRepository.setSyncMode(repositorySource.value.id, item.id, mode); item.syncMode = mode; showToast("success", t('同步方案已保存')); }
-  catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
+  catch (reason) { showToast("error", errorMessage(reason)); }
   finally { busy.value = ""; }
 }
 
@@ -361,7 +355,7 @@ async function runConfirmed(): Promise<void> {
   if (!action) return;
   busy.value = "confirmed";
   try { await action.run(); }
-  catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
+  catch (reason) { showToast("error", errorMessage(reason)); }
   finally { busy.value = ""; }
 }
 
@@ -369,7 +363,7 @@ async function saveAndClose(): Promise<void> {
   stopPreview();
   busy.value = "save";
   try { await persist(); emit("close"); }
-  catch (reason) { showToast("error", reason instanceof Error ? reason.message : String(reason)); }
+  catch (reason) { showToast("error", errorMessage(reason)); }
   finally { busy.value = ""; }
 }
 

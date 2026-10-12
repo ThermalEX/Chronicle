@@ -1,12 +1,10 @@
+import { errorMessage } from "./format";
+
 export type CloudHealthCheckSource = { id: string; name: string };
 export type CloudHealthCheckItem = CloudHealthCheckSource & {
   status: "checking" | "passed" | "failed";
   reason?: string;
 };
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 export async function runCloudHealthCheck<T extends CloudHealthCheckSource>(
   sources: readonly T[],

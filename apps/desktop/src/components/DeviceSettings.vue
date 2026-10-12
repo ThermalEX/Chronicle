@@ -3,6 +3,7 @@ import { onMounted, ref } from "vue";
 import { ClipboardCopy, RefreshCw } from "@lucide/vue";
 import { deviceRepository, readKnownDevices, deviceLabel, type DeviceIdentity, type KnownSourceDevices } from "../services/devices";
 import { t } from "../services/i18n";
+import { errorMessage } from "../services/format";
 import ConfirmDialog from "./ConfirmDialog.vue";
 
 const props = defineProps<{ device?: DeviceIdentity; name: string; saving?: boolean }>();
@@ -19,7 +20,7 @@ async function resetIdentity(): Promise<void> {
   busy.value = true; error.value = ""; resetting.value = false;
   try {
     emit("identity-reset", await deviceRepository.reset());
-  } catch (cause) { error.value = t(cause instanceof Error ? cause.message : String(cause)); }
+  } catch (cause) { error.value = t(errorMessage(cause)); }
   finally { busy.value = false; }
 }
 async function copyId(): Promise<void> {

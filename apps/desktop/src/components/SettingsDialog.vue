@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { t, locale, setLocale } from "../services/i18n";
+import { errorMessage, formatBytes } from "../services/format";
 import { BellRing, ClipboardCopy, FolderOpen, HardDrive, Info, Keyboard, Monitor, Palette, RefreshCw, RotateCcw, Settings2, Trash2, Undo2, X } from "@lucide/vue";
 import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -86,18 +87,11 @@ const sections = computed(() => [
   { id: "about" as const, label: t('关于'), icon: Info },
 ]);
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
-}
-
 async function loadDiagnostics(): Promise<boolean> {
   diagnosticsBusy.value = true;
   diagnosticsError.value = "";
   try { diagnostics.value = await diagnosticsRepository.list(); return true; }
-  catch (error) { diagnosticsError.value = error instanceof Error ? error.message : String(error); return false; }
+  catch (error) { diagnosticsError.value = errorMessage(error); return false; }
   finally { diagnosticsBusy.value = false; }
 }
 
@@ -113,7 +107,7 @@ async function clearDiagnostics(): Promise<void> {
   if (!diagnostics.value.length || !window.confirm(t('清空全部错误记录？此操作不会影响存档和同步设置。'))) return;
   diagnosticsBusy.value = true;
   try { await diagnosticsRepository.clear(); diagnostics.value = []; }
-  catch (error) { diagnosticsError.value = error instanceof Error ? error.message : String(error); }
+  catch (error) { diagnosticsError.value = errorMessage(error); }
   finally { diagnosticsBusy.value = false; }
 }
 
@@ -121,7 +115,7 @@ async function loadRecycleItems(): Promise<boolean> {
   recycleBusy.value = true;
   recycleError.value = "";
   try { recycleItems.value = await archiveRepository.listRecycleItems(); return true; }
-  catch (error) { recycleError.value = error instanceof Error ? error.message : String(error); return false; }
+  catch (error) { recycleError.value = errorMessage(error); return false; }
   finally { recycleBusy.value = false; }
 }
 
@@ -131,7 +125,7 @@ async function runRecycleAction(): Promise<void> {
   if (!action) return;
   recycleBusy.value = true;
   try { await action.run(); await loadRecycleItems(); emit("saved"); }
-  catch (error) { recycleError.value = error instanceof Error ? error.message : String(error); }
+  catch (error) { recycleError.value = errorMessage(error); }
   finally { recycleBusy.value = false; }
 }
 
@@ -160,7 +154,7 @@ async function loadDevice(): Promise<boolean> {
     localDevice.value = await deviceRepository.read();
     deviceName.value = localDevice.value.name;
     return true;
-  } catch (error) { saveError.value = error instanceof Error ? error.message : String(error); return false; }
+  } catch (error) { saveError.value = errorMessage(error); return false; }
 }
 
 function identityReset(device: DeviceIdentity): void {
@@ -261,7 +255,7 @@ async function save(): Promise<void> {
     emit("saved", changes);
     finishClose();
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
+    const reason = errorMessage(error);
     saveError.value = committed ? `${t('部分设置已保存，剩余更改尚未保存，可重试。')} ${reason}` : reason;
     setLocale(draft.language);
     if (committed) emit("changed", changes);
@@ -308,7 +302,7 @@ async function openRecycleBin(): Promise<void> {
   try {
     await archiveRepository.openRecycleBin(draft.recycleBinPath || undefined);
   } catch (error) {
-    recycleLocationError.value = error instanceof Error ? error.message : String(error);
+    recycleLocationError.value = errorMessage(error);
   }
 }
 
@@ -327,7 +321,7 @@ async function loadAutomation(): Promise<boolean> {
     automationArchives.value = await archiveRepository.listArchives();
     savedAutomation.value = new Map(automationArchives.value.map((archive) => [archive.id, { backup: archive.autoBackupEnabled, upload: archive.automaticUploadEnabled }]));
     return true;
-  } catch (error) { saveError.value = error instanceof Error ? error.message : String(error); return false; }
+  } catch (error) { saveError.value = errorMessage(error); return false; }
   finally { automationBusy.value = false; }
 }
 

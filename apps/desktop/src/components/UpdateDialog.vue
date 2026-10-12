@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { t } from "../services/i18n";
+import { errorMessage, formatBytes } from "../services/format";
 import { ClipboardCopy, Download, ExternalLink, LoaderCircle, X } from "@lucide/vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -19,7 +20,6 @@ const progressLabel = computed(() => ({ download: t("正在下载安装包…"),
 let requestId = "";
 let stopProgress: UnlistenFn | undefined;
 let disposed = false;
-function formatBytes(bytes: number): string { return bytes < 1024 ** 2 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`; }
 
 async function copyDownloadLink(): Promise<void> {
   try {
@@ -58,7 +58,7 @@ async function downloadAndInstall(): Promise<void> {
       sha256SumsUrl: props.update.checksumUrl ?? null,
     });
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = errorMessage(error);
     message.value = detail === "update-install-cancelled" ? t("已取消安装") : detail;
     installing.value = false;
   } finally {

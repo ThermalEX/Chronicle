@@ -7,7 +7,9 @@ mod repository;
 
 use chronicle_core::Snapshot;
 
-pub use repository::{DeviceIdentity, LocalRepository, Result, SnapshotDeletion, StorageError};
+pub use repository::{
+    DeviceIdentity, LocalRepository, Result, SnapshotDeletion, StorageError, hash_file,
+};
 
 /// Automatic capture can safely skip or abandon work without creating a snapshot.
 #[derive(Debug)]

@@ -81,21 +81,7 @@ pub fn load_triggers(root: &Path) -> Result<TriggerDocument, String> {
     }
 }
 fn save_triggers(root: &Path, document: &TriggerDocument) -> Result<(), String> {
-    let directory = root.join("config");
-    fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
-    let temporary = directory.join(format!("backup-automation-{}.tmp", uuid::Uuid::new_v4()));
-    let result = (|| {
-        fs::write(
-            &temporary,
-            serde_json::to_vec_pretty(document).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        fs::rename(&temporary, directory.join("backup-automation.json")).map_err(|e| e.to_string())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    crate::atomic_file::write_json_pretty(&root.join("config/backup-automation.json"), document)
 }
 #[tauri::command]
 pub fn get_backup_trigger(

@@ -513,20 +513,10 @@ fn saved_games_root() -> Option<PathBuf> {
 }
 
 fn save_cache(path: &Path, result: &ScanResult) -> Result<(), String> {
-    fs::create_dir_all(path.parent().ok_or("galgame-invalid-cache")?).map_err(|e| e.to_string())?;
-    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    let saved = (|| {
-        fs::write(
-            &temporary,
-            serde_json::to_vec(result).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        fs::rename(&temporary, path).map_err(|e| e.to_string())
-    })();
-    if saved.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    saved
+    crate::atomic_file::write_atomic(
+        path,
+        &serde_json::to_vec(result).map_err(|e| e.to_string())?,
+    )
 }
 fn read_cache(path: &Path) -> Result<Option<ScanResult>, String> {
     match fs::read(path) {

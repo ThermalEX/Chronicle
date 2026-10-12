@@ -1,3 +1,4 @@
+mod atomic_file;
 mod auto_backup;
 mod backup_automation;
 mod backup_health;
