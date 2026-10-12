@@ -6,7 +6,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { invoke } from "@tauri-apps/api/core";
-import { applyWallpaper, currentWallpaper, loadLocalWallpaper, saveLocalWallpaper, loadWallpaperImageUrl, releaseWallpaperImageUrl } from "./wallpaper";
+import { applyWallpaper, currentWallpaper, loadWallpaperImageUrl, releaseWallpaperImageUrl } from "./wallpaper";
 import { defaultAppSettings } from "./settings";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -52,15 +52,5 @@ describe("local wallpaper", () => {
     applyWallpaper({ ...currentWallpaper.value, mode: "color" });
     expect(root.dataset.wallpaperMode).toBe("color");
     expect(currentWallpaper.value.imageDataUrl).toContain("data:image/png");
-  });
-
-  it("loads and saves through the local Tauri commands", async () => {
-    vi.stubGlobal("document", { documentElement: { dataset: {}, style: { setProperty: vi.fn(), removeProperty: vi.fn() } } });
-    const stored = { mode: "image" as const, transparency: 15, blurPx: 5, imageDataUrl: "data:image/png;base64,AA==" };
-    vi.mocked(invoke).mockResolvedValue(stored);
-    await loadLocalWallpaper();
-    expect(currentWallpaper.value).toEqual(stored);
-    await saveLocalWallpaper({ mode: "color", transparency: 15, blurPx: 5, removeImage: false });
-    expect(invoke).toHaveBeenCalledWith("save_local_wallpaper", { request: expect.objectContaining({ mode: "color" }) });
   });
 });

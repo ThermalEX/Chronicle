@@ -94,11 +94,7 @@ fn portable_appearance_does_not_load_installed_wallpaper() {
     let root =
         resolve_local_assets_root(&directory.path().join("Chronicle.exe"), &installed).unwrap();
     assert_eq!(root, directory.path().join("Chronicle-data"));
-    let view = crate::wallpaper::load_from(&root).unwrap();
-    let view = serde_json::to_value(view).unwrap();
-    assert_eq!(view["transparency"], 28);
-    assert_eq!(view["blurPx"], 12);
-    assert_eq!(view["mode"], "color");
+    assert!(!root.join("wallpaper/preferences.json").exists());
     assert!(installed.join("wallpaper/preferences.json").is_file());
 }
 

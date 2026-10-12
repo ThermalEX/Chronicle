@@ -34,7 +34,7 @@ import { advanceTutorial, createTutorialState, loadTutorialProgress, saveTutoria
 import ThemedSelect, { type ThemedSelectOption } from "./components/ThemedSelect.vue";
 import type { ArchiveRecord, ArchiveSource, CategoryRecord, CreateArchiveInput, RepositoryInfo, SnapshotRecord, SourceKind } from "./domain";
 import { archiveRepository, isTauriRuntime } from "./services/repository";
-import { cloudRepository, type CloudSyncResult } from "./services/cloud";
+import { cloudRepository } from "./services/cloud";
 import { runCloudHealthCheck, type CloudHealthCheckItem } from "./services/cloudHealthCheck";
 import { diagnosticsRepository } from "./services/diagnostics";
 import { diagnosticFromError, type DiagnosticContext } from "./services/diagnosticsCore";

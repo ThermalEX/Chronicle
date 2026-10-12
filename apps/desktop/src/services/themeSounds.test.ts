@@ -72,14 +72,3 @@ it("isolates playback failures from the operation that reported them", async () 
   expect(await sounds.playThemeSound("connected")).toBe(false);
   expect(players[0]?.paused).toBe(true);
 });
-
-it("only replaces saved sounds after persistence succeeds", async () => {
-  const sounds = await import("./themeSounds");
-  sounds.localSounds.value = configured;
-  vi.mocked(invoke).mockRejectedValueOnce(new Error("Disk full"));
-  await expect(sounds.saveLocalSounds({ enabled: false, volume: 60, sourcePaths: {} })).rejects.toThrow("Disk full");
-  expect(sounds.localSounds.value.enabled).toBe(true);
-  vi.mocked(invoke).mockResolvedValueOnce({ enabled: false, volume: 60, files: {} });
-  await sounds.saveLocalSounds({ enabled: false, volume: 60, sourcePaths: {} });
-  expect(sounds.localSounds.value.enabled).toBe(false);
-});

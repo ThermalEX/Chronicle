@@ -951,7 +951,7 @@ pub async fn save_opendal_credential(
         .map_err(|_| "无法保存系统凭据".to_owned())
 }
 
-pub fn validate_settings(settings: &Value, _previous: &Value) -> Result<(), String> {
+pub fn validate_settings(settings: &Value) -> Result<(), String> {
     let sources = settings.pointer("/cloud/sources").and_then(Value::as_array);
     let enabled = settings.pointer("/cloud/enabled").and_then(Value::as_bool) == Some(true);
     let mut ids = std::collections::HashSet::new();
@@ -1059,21 +1059,6 @@ pub async fn cloud_preview(
     .await;
     crate::snapshot_sync::end(&request_id);
     result
-}
-
-#[cfg(test)]
-async fn preview_store(client: &RemoteStore, name: String) -> Result<CloudPreviewDto, String> {
-    let library = match client.get_json("library.json").await {
-        Ok(value) => value,
-        Err(WebDavError::NotFound(_)) => Value::Null,
-        Err(error) => return Err(error.to_string()),
-    };
-    let catalog: Option<Catalog> = match client.get_json("catalog.json").await {
-        Ok(value) => Some(value),
-        Err(WebDavError::NotFound(_)) => None,
-        Err(error) => return Err(error.to_string()),
-    };
-    Ok(preview_from_catalog(name, &library, catalog))
 }
 
 fn preview_from_catalog(
@@ -4269,17 +4254,25 @@ mod tests {
     #[tokio::test]
     async fn preview_of_empty_store_does_not_initialize_remote_objects() {
         let operator = opendal::Operator::new(opendal::services::Memory::default()).unwrap();
-        let store = chronicle_sync::RemoteStore::OpenDal(
-            operator.clone(),
-            std::sync::Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now())),
-            std::time::Duration::ZERO,
+        let remote = chronicle_sync::snapshot_protocol::SnapshotRemote::Store(
+            chronicle_sync::RemoteStore::OpenDal(
+                operator.clone(),
+                std::sync::Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now())),
+                std::time::Duration::ZERO,
+            ),
         );
-        let result = super::preview_store(&store, "empty".into()).await.unwrap();
+        super::scan_download(&remote).await.unwrap();
         assert!(
-            result.library_id.is_none(),
+            remote
+                .optional_bytes("library.json")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            operator.list("").await.unwrap().is_empty(),
             "preview must not initialize a library"
         );
-        assert!(operator.list("").await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -4338,8 +4331,13 @@ mod tests {
         crate::snapshot_sync::begin(id).unwrap();
         let worker = tokio::spawn(async move {
             let store = chronicle_sync::RemoteStore::LegacyWebDav(client);
-            crate::snapshot_sync::cancellable_read(id, super::preview_store(&store, "test".into()))
-                .await
+            crate::snapshot_sync::cancellable_read(id, async {
+                store
+                    .get_json::<serde_json::Value>("library.json")
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+            .await
         });
         ready.await.unwrap();
         crate::snapshot_sync::cancel_snapshot_sync(id.into()).unwrap();
@@ -4459,9 +4457,9 @@ mod tests {
             "remotePath":"/Chronicle", "credentialRef":"ref", "scheme":"s3",
             "config":{"secret_access_key":"must-not-save"}
         }]}});
-        assert!(super::validate_settings(&settings, &json!({})).is_err());
+        assert!(super::validate_settings(&settings).is_err());
         assert!(
-            !super::validate_settings(&settings, &json!({}))
+            !super::validate_settings(&settings)
                 .unwrap_err()
                 .contains("must-not-save")
         );
@@ -4473,7 +4471,7 @@ mod tests {
             "id":"paused", "name":"Paused", "provider":"legacy_webdav", "endpoint":"", "username":"",
             "remotePath":"/Chronicle", "credentialRef":"ref", "syncEnabled":false
         }]}});
-        assert!(super::validate_settings(&settings, &json!({})).is_ok());
+        assert!(super::validate_settings(&settings).is_ok());
     }
 
     #[test]

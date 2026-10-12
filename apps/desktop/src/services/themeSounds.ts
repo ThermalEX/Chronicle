@@ -1,4 +1,4 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { ref } from "vue";
 
 export const soundEvents = ["connected", "disconnected", "connectionFailed", "notification", "default"] as const;
@@ -6,20 +6,11 @@ export type SoundEvent = typeof soundEvents[number];
 export interface SoundAsset { name: string; dataUrl: string }
 export interface SoundState { enabled: boolean; volume: number; files: Partial<Record<SoundEvent, SoundAsset>>; warning?: string | null }
 export interface SoundSaveRequest { enabled: boolean; volume: number; sourcePaths: Partial<Record<SoundEvent, string | null>> }
-export interface ThemeSoundPreview extends SoundState { sourcePaths: Partial<Record<SoundEvent, string>> }
 export const localSounds = ref<SoundState>({ enabled: false, volume: 60, files: {} });
 let activeAudio: HTMLAudioElement | undefined;
 let activePreview = false;
 let lastAutomatic = -Infinity;
 
-export async function loadLocalSounds(): Promise<void> {
-  if (isTauri()) localSounds.value = await invoke<SoundState>("load_local_sounds");
-}
-export async function saveLocalSounds(request: SoundSaveRequest): Promise<void> {
-  const saved = await invoke<SoundState>("save_local_sounds", { request });
-  stopThemeSounds();
-  localSounds.value = saved;
-}
 export async function previewLocalSound(path: string): Promise<SoundAsset> {
   return invoke<SoundAsset>("preview_local_sound", { path });
 }

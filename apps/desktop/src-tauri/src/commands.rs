@@ -610,11 +610,8 @@ pub fn save_settings(
     state: State<'_, AppState>,
     settings: Value,
 ) -> Result<(), String> {
+    crate::cloud::validate_settings(&settings)?;
     let repository = state.repository.lock().map_err(|_| state_error())?;
-    let previous = repository
-        .load_settings()
-        .map_err(|error| error.to_string())?;
-    crate::cloud::validate_settings(&settings, &previous)?;
     repository
         .save_settings(&settings)
         .map_err(|error| error.to_string())?;
@@ -853,14 +850,6 @@ pub fn set_snapshot_locked(
         .map_err(|_| state_error())?
         .set_snapshot_locked(&entry_id, &snapshot_id, locked)
         .map(snapshot_dto)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command(async)]
-pub fn verify_snapshot(state: State<'_, AppState>, snapshot_id: String) -> Result<bool, String> {
-    let repository = state.repository.lock().map_err(|_| state_error())?;
-    repository
-        .verify_snapshot(&snapshot_id)
         .map_err(|error| error.to_string())
 }
 

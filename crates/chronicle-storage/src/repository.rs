@@ -300,29 +300,6 @@ impl LocalRepository {
         Ok(self.health_inputs_for(Some(entry_id))?.into_iter().next())
     }
 
-    /// Returns the total number of bytes currently stored in the repository.
-    ///
-    /// # Errors
-    /// Returns an error when repository files cannot be inspected.
-    pub fn total_stored_bytes(&self) -> Result<u64> {
-        let mut total = 0_u64;
-        for item in WalkDir::new(&self.root) {
-            let item = item?;
-            if item.file_type().is_file() {
-                total = total.saturating_add(item.metadata()?.len());
-            }
-        }
-        Ok(total)
-    }
-
-    /// Returns repository bytes plus an external recycle directory without double counting.
-    ///
-    /// # Errors
-    /// Returns an error when either directory cannot be inspected.
-    pub fn total_stored_bytes_with_recycle(&self, recycle_root: Option<&Path>) -> Result<u64> {
-        Self::stored_bytes_at(&self.root, recycle_root)
-    }
-
     /// Scans copied paths without requiring a live repository handle or metadata writes.
     /// # Errors
     /// Returns an error when either directory cannot be inspected.
@@ -464,28 +441,6 @@ impl LocalRepository {
         });
         self.write_catalog(&mut catalog)?;
         Ok(entry)
-    }
-
-    /// Updates an entry's display name, sources, and storage policy.
-    ///
-    /// Existing source identifiers are preserved when their canonical paths are unchanged.
-    ///
-    /// # Errors
-    /// Returns an error for invalid values, missing sources, or metadata write failures.
-    pub fn update_entry(
-        &self,
-        entry_id: &str,
-        name: &str,
-        source_paths: &[String],
-        storage_policy: StoragePolicy,
-    ) -> Result<Entry> {
-        self.update_entry_with_sync(
-            entry_id,
-            name,
-            source_paths,
-            storage_policy,
-            SyncMode::Manual,
-        )
     }
 
     /// Updates an entry including its synchronization mode.
@@ -3876,10 +3831,8 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].entry_count, 1);
         assert!(
-            repository
-                .total_stored_bytes_with_recycle(Some(&recycle))
-                .unwrap()
-                > repository.total_stored_bytes().unwrap()
+            LocalRepository::stored_bytes_at(repository.root(), Some(&recycle)).unwrap()
+                > LocalRepository::stored_bytes_at(repository.root(), None).unwrap()
         );
         repository
             .restore_recycle_item(&recycle, &items[0].id)

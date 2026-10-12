@@ -246,13 +246,13 @@ pub fn build_theme_assets(theme: &ThemeDraft) -> Result<BTreeMap<String, Vec<u8>
         Ok(())
     };
     for (index, path) in theme.wallpaper_source_paths.iter().enumerate() {
-        let (bytes, ext) = crate::wallpaper::export_image(Path::new(""), Some(path))?;
+        let (bytes, ext) = crate::wallpaper::export_image(Path::new(path))?;
         let name = format!("wallpapers/{:03}.{ext}", index + 1);
         add(name.clone(), bytes)?;
         wallpapers.push(name);
     }
     let icon = if let Some(path) = &theme.icon_source_path {
-        let (bytes, ext) = crate::wallpaper::export_image(Path::new(""), Some(path))?;
+        let (bytes, ext) = crate::wallpaper::export_image(Path::new(path))?;
         let name = format!("icon.{ext}");
         add(name.clone(), bytes)?;
         Some(name)

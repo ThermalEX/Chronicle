@@ -7,7 +7,6 @@ import { createBackdropDismissal } from "../services/dialogDismissal";
 import { normalizeRegistryPath } from "../services/backupRules";
 import TutorialHint from "./TutorialHint.vue";
 import type { TutorialProgress, TutorialTip } from "../services/onboarding";
-import ThemedSelect, { type ThemedSelectOption } from "./ThemedSelect.vue";
 import BackupTriggerFields from "./BackupTriggerFields.vue";
 import { backupAutomationLabel, backupAutomationSupported, defaultBackupTrigger, getBackupTrigger, validateBackupTrigger } from "../services/backupAutomation";
 import type { SkippedDroppedPath } from "../services/droppedSources";
