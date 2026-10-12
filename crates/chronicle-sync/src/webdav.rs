@@ -317,9 +317,13 @@ pub struct WebDavClient {
     policy: RequestPolicy,
     ensured_collections: std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
     next_request: std::sync::Arc<tokio::sync::Mutex<tokio::time::Instant>>,
+    immutable: crate::remote::ImmutableCache,
 }
 
 impl WebDavClient {
+    pub(crate) fn immutable_cache(&self) -> &crate::remote::ImmutableCache {
+        &self.immutable
+    }
     pub(crate) async fn object_etag(&self, path: &str) -> Result<Option<String>> {
         crate::validate_relative_path(path)?;
         let response = self.request(Method::HEAD, path, None, None).await?;
@@ -350,6 +354,7 @@ impl WebDavClient {
             next_request: std::sync::Arc::new(tokio::sync::Mutex::new(
                 tokio::time::Instant::now() + Duration::from_millis(policy.request_delay_ms),
             )),
+            immutable: crate::remote::ImmutableCache::default(),
         })
     }
 
@@ -563,6 +568,27 @@ impl WebDavClient {
         parse_json_listing(&response.text().await?, &self.url(relative), relative)
     }
 
+    /// Lists JSON records with their `ETag` when the server reports one.
+    pub(crate) async fn list_json_versions(
+        &self,
+        relative: &str,
+    ) -> Result<Vec<(String, Option<String>)>> {
+        crate::validate_relative_path(relative)?;
+        let method = Method::from_bytes(b"PROPFIND")
+            .map_err(|error| WebDavError::InvalidMethod(error.to_string()))?;
+        let response = self.request(method, relative, None, None).await?;
+        let xml = response.text().await?;
+        let base = self.url(relative);
+        let mut etags = etags_by_path(&xml, &base, relative)?;
+        Ok(parse_json_listing(&xml, &base, relative)?
+            .into_iter()
+            .map(|path| {
+                let etag = etags.remove(&path);
+                (path, etag)
+            })
+            .collect())
+    }
+
     pub(crate) async fn operation_versions(&self, relative: &str) -> Result<(Vec<String>, bool)> {
         crate::validate_relative_path(relative)?;
         let response = self
@@ -579,15 +605,68 @@ impl WebDavClient {
     }
 }
 
+/// Maps each listed record to its non-empty `ETag`, which changes whenever its content does.
+fn etags_by_path(
+    xml: &str,
+    base: &str,
+    relative: &str,
+) -> Result<std::collections::HashMap<String, String>> {
+    let base_url = reqwest::Url::parse(&format!("{}/", base.trim_end_matches('/')))
+        .map_err(|e| WebDavError::Remote(e.to_string()))?;
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut etags = std::collections::HashMap::new();
+    let (mut href, mut etag) = (None::<String>, None::<String>);
+    loop {
+        match reader
+            .read_event()
+            .map_err(|e| WebDavError::Remote(e.to_string()))?
+        {
+            quick_xml::events::Event::Start(tag)
+                if matches!(tag.local_name().as_ref(), b"href" | b"getetag") =>
+            {
+                let is_href = tag.local_name().as_ref() == b"href";
+                let value = reader
+                    .read_text(tag.name())
+                    .map_err(|e| WebDavError::Remote(e.to_string()))?
+                    .decode()
+                    .map_err(|e| WebDavError::Remote(e.to_string()))?
+                    .into_owned();
+                if is_href {
+                    href = Some(value);
+                } else {
+                    etag = Some(value);
+                }
+            }
+            quick_xml::events::Event::End(tag) if tag.local_name().as_ref() == b"response" => {
+                if let (Some(href), Some(etag)) = (href.take(), etag.take())
+                    && !etag.trim().is_empty()
+                {
+                    let href = quick_xml::escape::unescape(&href)
+                        .map_err(|e| WebDavError::Remote(e.to_string()))?;
+                    let url = base_url
+                        .join(&href)
+                        .map_err(|e| WebDavError::Remote(e.to_string()))?;
+                    if let Some(suffix) = url.path().strip_prefix(base_url.path()) {
+                        let suffix = urlencoding::decode(suffix)
+                            .map_err(|e| WebDavError::Remote(e.to_string()))?;
+                        etags.insert(format!("{}/{suffix}", relative.trim_end_matches('/')), etag);
+                    }
+                }
+            }
+            quick_xml::events::Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(etags)
+}
+
 fn parse_operation_versions(xml: &str, base: &str, relative: &str) -> Result<(Vec<String>, bool)> {
     let files = parse_json_listing(xml, base, relative)?;
+    let versioned_files = etags_by_path(xml, base, relative)?;
     // Compare stable DAV properties, not response order or namespace prefixes.
     let mut reader = quick_xml::Reader::from_str(xml);
     let mut properties = Vec::new();
     let mut response = Vec::new();
-    let mut versioned_files = std::collections::HashSet::new();
-    let base_url = reqwest::Url::parse(&format!("{}/", base.trim_end_matches('/')))
-        .map_err(|e| WebDavError::Remote(e.to_string()))?;
     loop {
         match reader
             .read_event()
@@ -611,28 +690,6 @@ fn parse_operation_versions(xml: &str, base: &str, relative: &str) -> Result<(Ve
                 ));
             }
             quick_xml::events::Event::End(tag) if tag.local_name().as_ref() == b"response" => {
-                if response.iter().any(|property: &String| {
-                    property
-                        .strip_prefix("getetag:")
-                        .is_some_and(|tag| !tag.trim().is_empty())
-                }) {
-                    for href in response
-                        .iter()
-                        .filter_map(|property| property.strip_prefix("href:"))
-                    {
-                        let href = quick_xml::escape::unescape(href)
-                            .map_err(|e| WebDavError::Remote(e.to_string()))?;
-                        let url = base_url
-                            .join(&href)
-                            .map_err(|e| WebDavError::Remote(e.to_string()))?;
-                        if let Some(suffix) = url.path().strip_prefix(base_url.path()) {
-                            let suffix = urlencoding::decode(suffix)
-                                .map_err(|e| WebDavError::Remote(e.to_string()))?;
-                            versioned_files
-                                .insert(format!("{}/{suffix}", relative.trim_end_matches('/')));
-                        }
-                    }
-                }
                 response.sort();
                 properties.push(serde_json::to_string(&response)?);
                 response.clear();
@@ -642,7 +699,7 @@ fn parse_operation_versions(xml: &str, base: &str, relative: &str) -> Result<(Ve
         }
     }
     properties.sort();
-    let reliable = files.iter().all(|path| versioned_files.contains(path));
+    let reliable = files.iter().all(|path| versioned_files.contains_key(path));
     properties.extend(files);
     Ok((properties, reliable))
 }

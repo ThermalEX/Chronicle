@@ -147,6 +147,85 @@ mod record_validation_tests {
         assert_eq!(events[0].operation_id, "event-0");
         peak.load(Ordering::SeqCst)
     }
+    #[tokio::test]
+    async fn repeated_event_loads_only_fetch_records_not_yet_validated() {
+        use std::{
+            io::{Read, Write},
+            sync::{
+                Arc,
+                atomic::{AtomicUsize, Ordering},
+            },
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let record_reads = Arc::new(AtomicUsize::new(0));
+        let server_reads = record_reads.clone();
+        let server = std::thread::spawn(move || {
+            let mut listings = 0;
+            // First load: 1 listing + 3 records. Second load: 1 listing + the rewritten
+            // event-0 (new ETag) + the new event-3; event-1 and event-2 come from the cache.
+            for _ in 0..7 {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut bytes = [0; 4096];
+                let count = socket.read(&mut bytes).unwrap();
+                let request = String::from_utf8_lossy(&bytes[..count]);
+                let path = request.split_whitespace().nth(1).unwrap();
+                let (status, body) = if request.starts_with("PROPFIND") {
+                    use std::fmt::Write as _;
+                    listings += 1;
+                    let mut rows = String::new();
+                    for i in 0..(if listings == 1 { 3 } else { 4 }) {
+                        write!(rows, "<d:response><d:href>/Chronicle/sync-v2/operations/event-{i}.json</d:href><d:propstat><d:prop><d:getetag>\"{}\"</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>", if listings == 2 && i == 0 { "rewritten".to_owned() } else { format!("v{i}") }).unwrap();
+                    }
+                    (
+                        "207 Multi-Status",
+                        format!("<d:multistatus xmlns:d=\"DAV:\">{rows}</d:multistatus>"),
+                    )
+                } else {
+                    server_reads.fetch_add(1, Ordering::SeqCst);
+                    let id = path.rsplit('/').next().unwrap().trim_end_matches(".json");
+                    (
+                        "200 OK",
+                        format!(
+                            r#"{{"operationId":"{id}","device":{{"id":"pc","name":"PC","revision":0}},"kind":{{"type":"deviceNamed"}}}}"#
+                        ),
+                    )
+                };
+                write!(
+                    socket,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let client = crate::WebDavClient::new(
+            crate::WebDavSource {
+                endpoint: format!("http://{address}"),
+                username: String::new(),
+                password: String::new(),
+                remote_path: "Chronicle".into(),
+            },
+            crate::RequestPolicy {
+                request_delay_ms: 0,
+                retry_limit: 0,
+                ..crate::RequestPolicy::default()
+            },
+        )
+        .unwrap();
+        let remote = SnapshotRemote::Store(RemoteStore::LegacyWebDav(client));
+        assert_eq!(remote.load_events().await.unwrap().len(), 3);
+        assert_eq!(record_reads.load(Ordering::SeqCst), 3);
+        let again = remote.clone().load_events().await.unwrap();
+        server.join().unwrap();
+        assert_eq!(again.len(), 4, "a newly listed record must still be read");
+        assert_eq!(again[0].operation_id, "event-0");
+        assert_eq!(
+            record_reads.load(Ordering::SeqCst),
+            5,
+            "a changed ETag must be re-read"
+        );
+    }
     #[test]
     fn snapshot_objects_cannot_target_protocol_or_library_configuration() {
         assert!(validate_object_path("catalog.json").is_err());
@@ -275,13 +354,13 @@ impl SnapshotRemote {
     /// Returns an error if listing, reading, parsing, or validation fails.
     pub async fn load_events(&self) -> Result<Vec<Event>, String> {
         let files = match self {
-            Self::Store(store) => match store.list_json_files(OPERATIONS).await {
+            Self::Store(store) => match store.list_json_versions(OPERATIONS).await {
                 Ok(files) => files,
                 Err(WebDavError::NotFound(_)) => Vec::new(),
                 Err(error) => return Err(error.to_string()),
             },
             Self::GitHub(client) => client
-                .list_json_files(OPERATIONS)
+                .list_json_versions(OPERATIONS)
                 .await
                 .map_err(|error| error.to_string())?,
         };
@@ -300,21 +379,34 @@ impl SnapshotRemote {
         let mut records = BTreeMap::new();
         loop {
             while reads.len() < concurrency {
-                let Some((index, file)) = files.next() else {
+                let Some((index, (file, version))) = files.next() else {
                     break;
                 };
                 let remote = self.clone();
                 reads.spawn(async move {
-                    let bytes = remote
-                        .optional_bytes(&file)
-                        .await?
-                        .ok_or_else(|| "操作记录在列举后丢失，请重新预览".to_owned())?;
+                    // Reuse a validated record only while the listing reports the same content
+                    // version; a rewrite under the same ID changes the version and is re-read.
+                    let key = version.map(|version| format!("{file}\n{version}"));
+                    let cached = key
+                        .as_deref()
+                        .and_then(|key| remote.immutable_cache().get(key));
+                    let fetched = cached.is_none();
+                    let bytes = match cached {
+                        Some(bytes) => bytes,
+                        None => remote
+                            .optional_bytes(&file)
+                            .await?
+                            .ok_or_else(|| "操作记录在列举后丢失，请重新预览".to_owned())?,
+                    };
                     let event: Event =
                         serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
                     if operation_path(&event.operation_id)? != file {
                         return Err("操作记录标识与文件名不一致".to_owned());
                     }
                     validate_event(&event)?;
+                    if let (true, Some(key)) = (fetched, key) {
+                        remote.immutable_cache().insert(key, bytes);
+                    }
                     Ok((index, event))
                 });
             }
@@ -364,6 +456,12 @@ impl SnapshotRemote {
             return Err("发布操作记录校验失败".into());
         }
         Ok(())
+    }
+    fn immutable_cache(&self) -> &crate::remote::ImmutableCache {
+        match self {
+            Self::Store(store) => store.immutable_cache(),
+            Self::GitHub(client) => client.immutable_cache(),
+        }
     }
 }
 fn operation_path(id: &str) -> Result<String, String> {

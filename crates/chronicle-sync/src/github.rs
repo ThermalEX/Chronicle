@@ -82,9 +82,13 @@ pub struct GitHubClient {
     source: GitHubSource,
     policy: RequestPolicy,
     next_request: std::sync::Arc<tokio::sync::Mutex<tokio::time::Instant>>,
+    immutable: crate::remote::ImmutableCache,
 }
 
 impl GitHubClient {
+    pub(crate) fn immutable_cache(&self) -> &crate::remote::ImmutableCache {
+        &self.immutable
+    }
     async fn pace(&self) {
         if self.policy.request_delay_ms == 0 {
             return;
@@ -196,6 +200,7 @@ impl GitHubClient {
             next_request: std::sync::Arc::new(tokio::sync::Mutex::new(
                 tokio::time::Instant::now() + Duration::from_millis(policy.request_delay_ms),
             )),
+            immutable: crate::remote::ImmutableCache::default(),
         })
     }
 
@@ -316,6 +321,19 @@ impl GitHubClient {
     /// # Errors
     /// Returns an error if the tree is truncated, a path is invalid, or the request fails.
     pub async fn list_json_files(&self, prefix: &str) -> Result<Vec<String>> {
+        Ok(self
+            .list_json_versions(prefix)
+            .await?
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect())
+    }
+
+    /// Lists JSON files with their git blob SHA, which identifies the content.
+    pub(crate) async fn list_json_versions(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<(String, Option<String>)>> {
         let scoped = format!("{}/", self.scoped_path(prefix.trim_end_matches('/'))?);
         let (_, tree) = self.head().await?;
         let value: Value = self
@@ -350,7 +368,12 @@ impl GitHubClient {
                     .is_some_and(|ext| ext == "json")
             {
                 crate::validate_relative_path(suffix).map_err(|_| GitHubError::InvalidPath)?;
-                result.push(format!("{prefix}{suffix}"));
+                let sha = entry
+                    .get("sha")
+                    .and_then(Value::as_str)
+                    .filter(|sha| !sha.is_empty())
+                    .map(str::to_owned);
+                result.push((format!("{prefix}{suffix}"), sha));
             }
         }
         result.sort();

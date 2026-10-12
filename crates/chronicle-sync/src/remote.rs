@@ -75,6 +75,24 @@ fn gcs_credential_as_base64(value: &str) -> Result<String> {
         .map_err(WebDavError::from)
 }
 
+/// Validated bytes of append-only protocol records, shared by clones of one adapter.
+///
+/// Records are never rewritten under the same path, so a cached copy stays valid for
+/// the adapter's lifetime; listings still decide which records currently exist.
+#[derive(Clone, Default)]
+pub struct ImmutableCache(std::sync::Arc<std::sync::Mutex<HashMap<String, Vec<u8>>>>);
+
+impl ImmutableCache {
+    pub(crate) fn get(&self, path: &str) -> Option<Vec<u8>> {
+        self.0.lock().ok()?.get(path).cloned()
+    }
+    pub(crate) fn insert(&self, path: String, bytes: Vec<u8>) {
+        if let Ok(mut cache) = self.0.lock() {
+            cache.insert(path, bytes);
+        }
+    }
+}
+
 /// Dispatches the shared catalog/archive protocol without changing legacy MOVE semantics.
 #[derive(Clone)]
 pub enum RemoteStore {
@@ -83,6 +101,7 @@ pub enum RemoteStore {
         Operator,
         std::sync::Arc<tokio::sync::Mutex<tokio::time::Instant>>,
         Duration,
+        ImmutableCache,
     ),
 }
 
@@ -182,13 +201,21 @@ impl RemoteStore {
             operator,
             std::sync::Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now())),
             Duration::from_millis(policy.request_delay_ms.min(5000)),
+            ImmutableCache::default(),
         );
         store.require_capabilities()?;
         Ok(store)
     }
 
+    pub(crate) fn immutable_cache(&self) -> &ImmutableCache {
+        match self {
+            Self::LegacyWebDav(client) => client.immutable_cache(),
+            Self::OpenDal(.., cache) => cache,
+        }
+    }
+
     async fn pace(&self) {
-        if let Self::OpenDal(_, next, delay) = self {
+        if let Self::OpenDal(_, next, delay, _) = self {
             let mut next = next.lock().await;
             tokio::time::sleep_until(*next).await;
             *next = tokio::time::Instant::now() + *delay;
@@ -250,10 +277,23 @@ impl RemoteStore {
     /// # Errors
     /// Returns an error if the path, remote listing, or returned entries are invalid.
     pub async fn list_json_files(&self, prefix: &str) -> Result<Vec<String>> {
+        Ok(self
+            .list_json_versions(prefix)
+            .await?
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect())
+    }
+    /// Lists JSON records with a strong content version (object version, `ETag` or MD5)
+    /// when the backend reports one.
+    pub(crate) async fn list_json_versions(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<(String, Option<String>)>> {
         validate_relative_path(prefix)?;
         self.pace().await;
         match self {
-            Self::LegacyWebDav(client) => client.list_json_files(prefix).await,
+            Self::LegacyWebDav(client) => client.list_json_versions(prefix).await,
             Self::OpenDal(op, ..) => {
                 let mut result = Vec::new();
                 for entry in op.list(prefix).await.map_err(remote_error)? {
@@ -267,11 +307,18 @@ impl RemoteStore {
                             .extension()
                             .is_some_and(|ext| ext == "json")
                     {
-                        result.push(path.into());
+                        let meta = entry.metadata();
+                        let version = meta
+                            .version()
+                            .or(meta.etag())
+                            .or(meta.content_md5())
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_owned);
+                        result.push((path.to_owned(), version));
                     }
                 }
                 result.sort();
-                result.dedup();
+                result.dedup_by(|left, right| left.0 == right.0);
                 Ok(result)
             }
         }
@@ -441,6 +488,7 @@ mod tests {
             op,
             std::sync::Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now())),
             std::time::Duration::ZERO,
+            crate::remote::ImmutableCache::default(),
         );
         store
             .put_atomic("sync-v2/operations/a.json", b"{}".to_vec())
@@ -464,6 +512,7 @@ mod tests {
             op,
             std::sync::Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now())),
             std::time::Duration::ZERO,
+            crate::remote::ImmutableCache::default(),
         );
         let remote = SnapshotRemote::Store(store);
         let mut event = Event {
@@ -522,6 +571,7 @@ mod tests {
             op.clone(),
             std::sync::Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now())),
             Duration::ZERO,
+            crate::remote::ImmutableCache::default(),
         );
         store
             .put_atomic("catalog.json", b"unchanged".to_vec())

@@ -3400,6 +3400,7 @@ mod tests {
             opendal::Operator::new(opendal::services::Memory::default()).unwrap(),
             Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now())),
             std::time::Duration::ZERO,
+            Default::default(),
         ));
         let (catalog, bytes) = {
             let repo = repo.lock().unwrap();
@@ -4017,7 +4018,7 @@ mod tests {
         let (_temp, repo, entry, snapshot) = overwrite_fixture();
         let remote = overwrite_remote(&repo, &snapshot).await;
         let root = repo.lock().unwrap().root().to_owned();
-        let SnapshotRemote::Store(chronicle_sync::RemoteStore::OpenDal(_, pacing, _)) = &remote
+        let SnapshotRemote::Store(chronicle_sync::RemoteStore::OpenDal(_, pacing, ..)) = &remote
         else {
             panic!("memory remote");
         };
@@ -4240,6 +4241,7 @@ mod tests {
                 operator.clone(),
                 std::sync::Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now())),
                 std::time::Duration::ZERO,
+                Default::default(),
             ),
         );
         super::scan_download(&remote).await.unwrap();
