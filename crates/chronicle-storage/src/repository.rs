@@ -1364,7 +1364,7 @@ impl LocalRepository {
             )?),
         };
         self.write_snapshot_deletion(&deletion)?;
-        self.recover_snapshot_operations()?;
+        self.recover_snapshot_operations_after(Some(&deletion.operation_id))?;
         Ok(())
     }
 
@@ -1691,6 +1691,12 @@ impl LocalRepository {
     }
 
     fn recover_snapshot_operations(&self) -> Result<()> {
+        self.recover_snapshot_operations_after(None)
+    }
+
+    /// `verified` names a deletion whose archive was hashed earlier in the same lock hold;
+    /// its fresh same-volume move skips re-hashing. Resumed operations are always re-verified.
+    fn recover_snapshot_operations_after(&self, verified: Option<&str>) -> Result<()> {
         for mut deletion in self.read_snapshot_operations()? {
             for snapshot in
                 std::iter::once(&deletion.snapshot).chain(deletion.restored_snapshot.iter())
@@ -1702,14 +1708,17 @@ impl LocalRepository {
                 let archive = self
                     .entry_dir(&deletion.snapshot.entry_id)?
                     .join(&deletion.snapshot.archive_name);
+                let just_verified = verified == Some(deletion.operation_id.as_str());
+                let mut moved_verified = false;
                 if !recycled.exists() {
-                    if hash_file(&archive)? != deletion.snapshot.object_hash {
+                    if !just_verified && hash_file(&archive)? != deletion.snapshot.object_hash {
                         return Err(StorageError::IntegrityMismatch);
                     }
                     fs::create_dir_all(recycled.parent().unwrap())?;
                     fs::rename(&archive, &recycled)?;
+                    moved_verified = just_verified;
                 }
-                if hash_file(&recycled)? != deletion.snapshot.object_hash {
+                if !moved_verified && hash_file(&recycled)? != deletion.snapshot.object_hash {
                     return Err(StorageError::IntegrityMismatch);
                 }
                 let remaining = self
@@ -2972,6 +2981,8 @@ fn hash_bytes(bytes: &[u8]) -> String {
 /// # Errors
 /// Returns an error when the file cannot be read.
 pub fn hash_file(path: &Path) -> Result<String> {
+    #[cfg(test)]
+    tests::FILE_HASHES.with(|count| count.set(count.get() + 1));
     let mut reader = BufReader::new(File::open(path)?);
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 8 * 1024];
@@ -3058,6 +3069,7 @@ mod tests {
         pub(super) static SOURCE_STAGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         pub(super) static HEALTH_INPUTS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         pub(super) static FAIL_CATALOG_CLEANUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        pub(super) static FILE_HASHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
     #[test]
@@ -3914,6 +3926,29 @@ mod tests {
         repository.delete_snapshot(&entry.id, &snapshot.id).unwrap();
         assert!(repository.list_snapshots(&entry.id).unwrap().is_empty());
         assert!(!archive.exists());
+    }
+
+    #[test]
+    fn deleting_a_snapshot_hashes_its_archive_once_and_keeps_it_recoverable() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("save.dat");
+        fs::write(&source, b"save").unwrap();
+        let repository = LocalRepository::open(workspace.path().join("Chronicle")).unwrap();
+        let entry = repository.add_entry(&source, Some("Save"), None).unwrap();
+        let snapshot = repository
+            .create_snapshot(&entry.id, "初始", "test", false)
+            .unwrap();
+
+        FILE_HASHES.with(|count| count.set(0));
+        repository.delete_snapshot(&entry.id, &snapshot.id).unwrap();
+        assert_eq!(FILE_HASHES.with(std::cell::Cell::get), 1);
+
+        let deletion = &repository.list_snapshot_deletions().unwrap()[0];
+        assert!(deletion.committed);
+        let recycled = repository
+            .snapshot_recycle_path(&deletion.operation_id)
+            .unwrap();
+        assert_eq!(super::hash_file(&recycled).unwrap(), snapshot.object_hash);
     }
 
     #[test]
