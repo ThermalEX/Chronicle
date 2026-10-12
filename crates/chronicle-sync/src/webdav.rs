@@ -317,7 +317,7 @@ pub struct WebDavClient {
     policy: RequestPolicy,
     ensured_collections: std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
     next_request: std::sync::Arc<tokio::sync::Mutex<tokio::time::Instant>>,
-    immutable: crate::remote::ImmutableCache,
+    pub(crate) immutable: crate::remote::ImmutableCache,
 }
 
 impl WebDavClient {

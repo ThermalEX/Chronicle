@@ -703,7 +703,20 @@ pub(crate) fn snapshot_remote(
     } else {
         SnapshotRemote::Store(client(&source, credential(&source)?, request_policy)?)
     };
+    let remote = remote.with_immutable_cache(record_cache(&signature));
     Ok((remote, root, name, signature))
+}
+
+/// One validated-record cache per source configuration, reused by later previews and syncs.
+fn record_cache(signature: &[u8]) -> chronicle_sync::ImmutableCache {
+    static CACHES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<Vec<u8>, chronicle_sync::ImmutableCache>>,
+    > = std::sync::OnceLock::new();
+    CACHES
+        .get_or_init(Default::default)
+        .lock()
+        .map(|mut caches| caches.entry(signature.to_vec()).or_default().clone())
+        .unwrap_or_default()
 }
 
 #[tauri::command(async)]

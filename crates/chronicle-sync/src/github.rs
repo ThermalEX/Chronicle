@@ -82,7 +82,7 @@ pub struct GitHubClient {
     source: GitHubSource,
     policy: RequestPolicy,
     next_request: std::sync::Arc<tokio::sync::Mutex<tokio::time::Instant>>,
-    immutable: crate::remote::ImmutableCache,
+    pub(crate) immutable: crate::remote::ImmutableCache,
 }
 
 impl GitHubClient {

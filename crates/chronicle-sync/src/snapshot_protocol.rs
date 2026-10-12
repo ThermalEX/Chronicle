@@ -463,6 +463,17 @@ impl SnapshotRemote {
             Self::GitHub(client) => client.immutable_cache(),
         }
     }
+    /// Shares a record cache with earlier adapters for the same source, so new commands
+    /// reuse records that were already validated at the same content version.
+    #[must_use]
+    pub fn with_immutable_cache(mut self, cache: crate::remote::ImmutableCache) -> Self {
+        match &mut self {
+            Self::Store(RemoteStore::LegacyWebDav(client)) => client.immutable = cache,
+            Self::Store(RemoteStore::OpenDal(.., shared)) => *shared = cache,
+            Self::GitHub(client) => client.immutable = cache,
+        }
+        self
+    }
 }
 fn operation_path(id: &str) -> Result<String, String> {
     if id.is_empty()
