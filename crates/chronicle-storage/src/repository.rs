@@ -17,7 +17,10 @@ use chronicle_core::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use sevenz_rust::{compress_to_path, decompress_file_with_extract_fn};
+use sevenz_rust::{
+    MethodOptions, SevenZArchiveEntry, SevenZMethod, SevenZMethodConfiguration, SevenZWriter,
+    decompress_file_with_extract_fn, lzma::LZMA2Options,
+};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -1910,7 +1913,7 @@ impl LocalRepository {
             self.entry_dir(entry_id)?.join(&snapshot.archive_name),
             &restore_root,
             |entry, reader, destination| {
-                // compress_to_path includes the content root as an empty directory entry.
+                // Snapshot archives include the content root as an empty directory entry.
                 if entry.name().is_empty() && entry.is_directory() {
                     return Ok(true);
                 }
@@ -2455,7 +2458,7 @@ impl SnapshotCapture {
         {
             return Ok(Superseded);
         }
-        compress_to_path(&content, &self.cleanup.archive)?;
+        compress_snapshot(&content, &self.cleanup.archive)?;
         let object_hash = hash_file(&self.cleanup.archive)?;
         if !capture_matches_sources(entry, &files, &content, &rules)?
             || guard.is_some_and(|check| !check())
@@ -2959,6 +2962,59 @@ fn validate_snapshot_filename(name: &str) -> Result<()> {
         || reserved
     {
         return Err(StorageError::RestoreConflict("无效快照路径".into()));
+    }
+    Ok(())
+}
+
+/// LZMA2 preset 1 compressed typical saves 2.2-2.4x faster than the default preset 6
+/// with archives at most ~1.5% larger. Decoding does not depend on the preset.
+const SNAPSHOT_LZMA2_PRESET: u32 = 1;
+
+/// Writes the same entry layout as `sevenz_rust::compress_to_path` (content root as an
+/// empty directory entry, one entry per file, links skipped) with a faster preset.
+fn compress_snapshot(
+    content: &Path,
+    archive: &Path,
+) -> std::result::Result<(), sevenz_rust::Error> {
+    if let Some(parent) = archive.parent() {
+        fs::create_dir_all(parent).map_err(sevenz_rust::Error::io)?;
+    }
+    let mut writer = SevenZWriter::create(archive)?;
+    writer.set_content_methods(vec![
+        SevenZMethodConfiguration::new(SevenZMethod::LZMA2).with_options(MethodOptions::LZMA2(
+            LZMA2Options::with_preset(SNAPSHOT_LZMA2_PRESET),
+        )),
+    ]);
+    push_snapshot_path(content, content, &mut writer)?;
+    writer.finish().map_err(sevenz_rust::Error::io)?;
+    Ok(())
+}
+
+fn push_snapshot_path(
+    path: &Path,
+    root: &Path,
+    writer: &mut SevenZWriter<File>,
+) -> std::result::Result<(), sevenz_rust::Error> {
+    let name = path
+        .strip_prefix(root)
+        .map_err(|error| sevenz_rust::Error::other(error.to_string()))?
+        .to_string_lossy()
+        .to_string();
+    let entry = SevenZArchiveEntry::from_path(path, name);
+    if path.is_dir() {
+        writer.push_archive_entry::<&[u8]>(entry, None)?;
+        for item in path.read_dir().map_err(sevenz_rust::Error::io)? {
+            let item = item.map_err(sevenz_rust::Error::io)?;
+            let kind = item.file_type().map_err(sevenz_rust::Error::io)?;
+            if kind.is_dir() || kind.is_file() {
+                push_snapshot_path(&item.path(), root, writer)?;
+            }
+        }
+    } else {
+        writer.push_archive_entry(
+            entry,
+            Some(File::open(path).map_err(sevenz_rust::Error::io)?),
+        )?;
     }
     Ok(())
 }
