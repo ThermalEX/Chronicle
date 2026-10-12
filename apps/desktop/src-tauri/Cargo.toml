@@ -47,6 +47,11 @@ tempfile = "3"
 opendal = { version = "=0.59.1", default-features = false, features = ["services-memory"] }
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread"] }
 
+# Dev builds still decode wallpapers, compress 7z and hash snapshots through dependencies;
+# unoptimized, a 4K thumbnail took 1.6-2.9 s. Optimize dependencies, keep our code debuggable.
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 codegen-units = 1
 lto = true
