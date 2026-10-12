@@ -57,13 +57,15 @@ export function watchSystemAppearance(currentAppearance: () => Appearance): () =
 
 let activeTransition: ViewTransition | undefined;
 
-export async function animateAppearance(value: AppearanceInput, origin?: { x: number; y: number }): Promise<void> {
+/** `onApplied` runs right after the new appearance is applied, while the reveal may still play. */
+export async function animateAppearance(value: AppearanceInput, origin?: { x: number; y: number }, onApplied?: () => void): Promise<void> {
   const appearance = normalizeAppearance(value);
   const root = document.documentElement;
   activeTransition?.skipTransition();
   if (!document.startViewTransition || window.matchMedia("(prefers-reduced-motion: reduce)").matches
     || (root.dataset.colorMode === resolveColorMode(appearance.colorMode) && root.dataset.colorTheme === appearance.colorTheme)) {
     applyAppearance(appearance);
+    onApplied?.();
     return;
   }
 
@@ -81,6 +83,7 @@ export async function animateAppearance(value: AppearanceInput, origin?: { x: nu
   try {
     transition = document.startViewTransition(async () => {
       applyAppearance(appearance);
+      onApplied?.();
       await nextTick();
     });
     activeTransition = transition;

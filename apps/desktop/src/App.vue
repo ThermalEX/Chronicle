@@ -1125,8 +1125,13 @@ async function toggleColorMode(event: MouseEvent): Promise<void> {
   const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
   changingColorMode.value = true;
   try {
-    await animateAppearance(appearance, { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-    await persistActiveAppearance(appearance);
+    // Save while the reveal plays, but only once the new colors are applied so the
+    // saved-state refresh cannot land before the transition captures the old frame.
+    let saving: Promise<void> | undefined;
+    const save = () => { saving = persistActiveAppearance(appearance); saving.catch(() => {}); };
+    await animateAppearance(appearance, { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }, save);
+    if (!saving) save();
+    await saving;
   } catch (error) {
     applyAppearance(activeAppearance());
     showNotice(readableError(error), "error");

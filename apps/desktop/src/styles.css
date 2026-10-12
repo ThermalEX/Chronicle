@@ -45,12 +45,12 @@
 :root[data-theme-transition]::view-transition-old(root) { z-index: 1; }
 :root[data-theme-transition]::view-transition-new(root) {
   z-index: 2;
-  animation: theme-reveal .7s cubic-bezier(.22, 1, .36, 1) both;
+  animation: theme-reveal .45s cubic-bezier(.22, 1, .36, 1) both;
 }
 :root[data-theme-transition="dark"]::view-transition-new(root) { z-index: 1; animation: none; }
 :root[data-theme-transition="dark"]::view-transition-old(root) {
   z-index: 2;
-  animation: theme-conceal .7s cubic-bezier(.22, 1, .36, 1) both;
+  animation: theme-conceal .45s cubic-bezier(.22, 1, .36, 1) both;
 }
 @keyframes theme-reveal {
   from { clip-path: circle(0 at var(--theme-reveal-x) var(--theme-reveal-y)); }
