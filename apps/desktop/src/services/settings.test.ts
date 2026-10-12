@@ -31,7 +31,7 @@ describe("cloudLibraryIndicator", () => {
     remotePath: "/Chronicle", credentialRef: "chronicle-github:github-1", repository: "owner/chronicle", branch: "main",
   };
   const base: Omit<CloudSettings, "enabled" | "sources"> = {
-    maxConcurrentMetadataReads: 2, maxConcurrentTransfers: 2, requestDelayMs: 150, retryLimit: 5,
+    maxConcurrentMetadataReads: 2, maxConcurrentTransfers: 2, requestDelayMs: 150, retryLimit: 5, verifyUploads: false,
   };
 
   it("reports an untested configured cloud library as pending", () => {

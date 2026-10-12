@@ -161,6 +161,13 @@ impl RemoteStore {
             return Err(invalid("缺少 OpenDAL 机密字段"));
         }
         let scheme = source.scheme;
+        // Object stores take high request rates and OpenDAL retries their 429/503 responses;
+        // only the WebDAV and GitHub services keep the configured request spacing.
+        let request_delay = if matches!(scheme.as_str(), "webdav" | "github") {
+            Duration::from_millis(policy.request_delay_ms.min(5000))
+        } else {
+            Duration::ZERO
+        };
         let mut config = source.config;
         for key in source.secret_keys {
             if is_local_credential_key(&key) {
@@ -200,7 +207,7 @@ impl RemoteStore {
         let store = Self::OpenDal(
             operator,
             std::sync::Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now())),
-            Duration::from_millis(policy.request_delay_ms.min(5000)),
+            request_delay,
             ImmutableCache::default(),
         );
         store.require_capabilities()?;

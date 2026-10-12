@@ -63,6 +63,8 @@ export interface CloudSettings {
   maxConcurrentTransfers: number;
   requestDelayMs: number;
   retryLimit: number;
+  /** Re-download each uploaded object to compare its SHA-256; doubles upload traffic. */
+  verifyUploads: boolean;
 }
 
 export function cloudLibraryIndicator(
@@ -115,6 +117,7 @@ const defaultCloudSettings: CloudSettings = {
   maxConcurrentTransfers: 2,
   requestDelayMs: 150,
   retryLimit: 5,
+  verifyUploads: false,
 };
 
 type LegacyCloudSettings = Partial<CloudSettings> & {
@@ -177,6 +180,7 @@ export function normalizedCloud(value?: LegacyCloudSettings): CloudSettings {
     maxConcurrentTransfers: Math.max(1, Math.min(4, Number(raw.maxConcurrentTransfers) || 2)),
     requestDelayMs: Math.max(0, Math.min(5000, Number.isFinite(requestedDelay) ? requestedDelay : 150)),
     retryLimit: Math.max(1, Math.min(10, Number(raw.retryLimit) || 5)),
+    verifyUploads: raw.verifyUploads === true,
   };
 }
 

@@ -299,6 +299,16 @@ fn baseline(catalog: &Value) -> Result<Vec<Event>, String> {
     }
     Ok(events)
 }
+/// Optional read-back of each uploaded object (off by default: it doubles upload traffic).
+/// The local archive is always verified against its SHA-256 before it is uploaded.
+fn verify_uploads(repository: &Mutex<LocalRepository>) -> bool {
+    repository
+        .lock()
+        .ok()
+        .and_then(|repo| repo.load_settings().ok())
+        .and_then(|settings| settings.pointer("/cloud/verifyUploads")?.as_bool())
+        .unwrap_or(false)
+}
 async fn remote_events(remote: &SnapshotRemote) -> Result<(Vec<Event>, bool), String> {
     let marker = remote.optional_bytes("sync-v2/protocol.json").await?;
     if let Some(marker) = &marker {
@@ -1117,11 +1127,13 @@ async fn execute_operation(
                 snapshot.id, snapshot.object_hash
             );
             remote.put(&path, bytes).await?;
-            let bytes = cancellable_read(request_id, remote.optional_bytes(&path))
-                .await?
-                .ok_or("上传后文件无法读取")?;
-            if digest(&bytes) != snapshot.object_hash {
-                return Err("上传后校验失败，尚未发布节点".into());
+            if verify_uploads(repository) {
+                let bytes = cancellable_read(request_id, remote.optional_bytes(&path))
+                    .await?
+                    .ok_or("上传后文件无法读取")?;
+                if digest(&bytes) != snapshot.object_hash {
+                    return Err("上传后校验失败，尚未发布节点".into());
+                }
             }
             if serialize(&cancellable_read(request_id, remote_events(remote)).await?.0)?
                 != serialize(events)?
@@ -1214,11 +1226,13 @@ async fn execute_operation(
                 return Err("回收快照校验失败，不发布删除".into());
             }
             remote.put(object_path, bytes).await?;
-            let bytes = cancellable_read(request_id, remote.optional_bytes(object_path))
-                .await?
-                .ok_or("回收文件不可读取")?;
-            if digest(&bytes) != snapshot.object_hash {
-                return Err("云端回收快照校验失败".into());
+            if verify_uploads(repository) {
+                let bytes = cancellable_read(request_id, remote.optional_bytes(object_path))
+                    .await?
+                    .ok_or("回收文件不可读取")?;
+                if digest(&bytes) != snapshot.object_hash {
+                    return Err("云端回收快照校验失败".into());
+                }
             }
             if serialize(&cancellable_read(request_id, remote_events(remote)).await?.0)?
                 != serialize(events)?
