@@ -749,125 +749,76 @@ pub async fn purge_snapshot_recovery(
 #[tauri::command(async)]
 pub async fn preview_snapshot_sync(
     app: AppHandle,
-    state: State<'_, AppState>,
     request_id: String,
     source_ids: Vec<String>,
     entry_ids: Vec<String>,
     snapshot_id: Option<String>,
 ) -> Result<SyncPlan, String> {
     begin(&request_id)?;
+    if cancelled(&request_id).is_err() {
+        end(&request_id);
+        return Err("预览已取消".into());
+    }
+    // Sources are independent, so one slow drive must not hold up the others.
+    let checked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let entry_ids = Arc::new(entry_ids);
+    let workers = source_ids
+        .into_iter()
+        .map(|source_id| {
+            let (app, request_id, entry_ids, snapshot_id, checked) = (
+                app.clone(),
+                request_id.clone(),
+                entry_ids.clone(),
+                snapshot_id.clone(),
+                checked.clone(),
+            );
+            tauri::async_runtime::spawn(async move {
+                let state = app.state::<AppState>();
+                let source = preview_source(
+                    &state,
+                    &request_id,
+                    &source_id,
+                    &entry_ids,
+                    snapshot_id.as_ref(),
+                )
+                .await
+                .unwrap_or_else(|error| SourcePlan {
+                    source_id: source_id.clone(),
+                    source_name: source_id,
+                    upgrade_required: false,
+                    error: Some(error),
+                    token: String::new(),
+                    operations: Vec::new(),
+                    index_repair_id: None,
+                    device_record_id: None,
+                    archive_names: HashMap::new(),
+                    devices: Vec::new(),
+                });
+                let done = checked.fetch_add(1, Ordering::SeqCst) + 1;
+                let _ = app.emit(
+                    "snapshot-sync-progress",
+                    json!({"requestId":request_id,"sourcesChecked":done}),
+                );
+                source
+            })
+        })
+        .collect::<Vec<_>>();
     let mut plan = SyncPlan {
         id: request_id.clone(),
         sources: Vec::new(),
     };
-    for source_id in source_ids {
-        if cancelled(&request_id).is_err() {
-            end(&request_id);
-            return Err("预览已取消".into());
-        }
-        let result = async {
-            let (remote, root, name, signature) = cloud::snapshot_remote(&state, &source_id)?;
-            let (events, remote_upgrade) =
-                cancellable_read(&request_id, remote_events(&remote)).await?;
-            let index_repair_id =
-                if index_repair_needed(&remote, &events, Some(&request_id)).await? {
-                    Some(Uuid::new_v4().to_string())
-                } else {
-                    None
-                };
-            cancelled(&request_id)?;
-            let repository = state.repository.lock().map_err(|_| "资料库状态不可用")?;
-            let entries = repository
-                .list_entries_with_snapshots()
-                .map_err(|error| error.to_string())?;
-            let mut archive_names = entries
-                .iter()
-                .map(|(entry, _)| (entry.id.clone(), entry.name.clone()))
-                .collect::<HashMap<_, _>>();
-            for event in &events {
-                if let EventKind::Published {
-                    snapshot, entry, ..
-                } = &event.kind
-                {
-                    archive_names
-                        .entry(snapshot.entry_id.clone())
-                        .or_insert_with(|| {
-                            entry["name"]
-                                .as_str()
-                                .unwrap_or(&snapshot.entry_id)
-                                .to_owned()
-                        });
-                }
+    for worker in workers {
+        match worker.await {
+            Ok(source) => plan.sources.push(source),
+            Err(error) => {
+                end(&request_id);
+                return Err(error.to_string());
             }
-            let mut snapshots = Vec::new();
-            let local_only = entries
-                .iter()
-                .filter(|(entry, _)| {
-                    entry.storage_policy != chronicle_core::StoragePolicy::LocalAndRemote
-                })
-                .map(|(entry, _)| entry.id.clone())
-                .collect::<BTreeSet<_>>();
-            for (entry, timeline) in entries {
-                if entry_ids.contains(&entry.id)
-                    || entry_ids.is_empty()
-                        && entry.storage_policy == chronicle_core::StoragePolicy::LocalAndRemote
-                {
-                    snapshots.extend(timeline);
-                }
-            }
-            let pending = pending(&repository)?;
-            let device_record_id = device_record_needed(&device(&repository)?, &events)
-                .then(|| Uuid::new_v4().to_string());
-            let operations = plan_sync(&snapshots, &events, &pending, false)
-                .into_iter()
-                .filter(|item| {
-                    (if entry_ids.is_empty() {
-                        !local_only.contains(&item.snapshot.entry_id)
-                    } else {
-                        entry_ids.contains(&item.snapshot.entry_id)
-                    }) && snapshot_id
-                        .as_ref()
-                        .is_none_or(|id| *id == item.snapshot.id)
-                })
-                .map(|item| SyncOperation {
-                    id: Uuid::new_v4().to_string(),
-                    item,
-                })
-                .collect();
-            Ok::<_, String>(SourcePlan {
-                source_id: source_id.clone(),
-                source_name: name,
-                upgrade_required: remote_upgrade || !enabled(&root, &source_id),
-                error: None,
-                token: source_token(&root, &repository, &events, &signature)?,
-                operations,
-                index_repair_id,
-                device_record_id,
-                archive_names,
-                devices: known_devices(&events),
-            })
         }
-        .await;
-        if let Err(error) = cancelled(&request_id) {
-            end(&request_id);
-            return Err(error);
-        }
-        plan.sources.push(result.unwrap_or_else(|error| SourcePlan {
-            source_id: source_id.clone(),
-            source_name: source_id,
-            upgrade_required: false,
-            error: Some(error),
-            token: String::new(),
-            operations: Vec::new(),
-            index_repair_id: None,
-            device_record_id: None,
-            archive_names: HashMap::new(),
-            devices: Vec::new(),
-        }));
-        let _ = app.emit(
-            "snapshot-sync-progress",
-            json!({"requestId":request_id,"sourcesChecked":plan.sources.len()}),
-        );
+    }
+    if let Err(error) = cancelled(&request_id) {
+        end(&request_id);
+        return Err(error);
     }
     end(&request_id);
     let mut saved = plans().lock().map_err(|_| "预览状态不可用")?;
@@ -877,6 +828,98 @@ pub async fn preview_snapshot_sync(
     }
     saved.insert(plan.id.clone(), plan.clone());
     Ok(plan)
+}
+
+async fn preview_source(
+    state: &State<'_, AppState>,
+    request_id: &str,
+    source_id: &str,
+    entry_ids: &[String],
+    snapshot_id: Option<&String>,
+) -> Result<SourcePlan, String> {
+    let source_id = source_id.to_owned();
+    let request_id = request_id.to_owned();
+    let (remote, root, name, signature) = cloud::snapshot_remote(state, &source_id)?;
+    // The remote index check only needs catalog.json; read it alongside the log.
+    let catalog = tauri::async_runtime::spawn({
+        let (remote, request_id) = (remote.clone(), request_id.clone());
+        async move { cancellable_read(&request_id, remote.optional_bytes("catalog.json")).await }
+    });
+    let events = cancellable_read(&request_id, remote_events(&remote)).await;
+    let catalog = catalog.await.map_err(|error| error.to_string())?;
+    let (events, remote_upgrade) = events?;
+    let index_repair_id = if index_repair_needed_for(catalog?, &events)? {
+        Some(Uuid::new_v4().to_string())
+    } else {
+        None
+    };
+    cancelled(&request_id)?;
+    let repository = state.repository.lock().map_err(|_| "资料库状态不可用")?;
+    let entries = repository
+        .list_entries_with_snapshots()
+        .map_err(|error| error.to_string())?;
+    let mut archive_names = entries
+        .iter()
+        .map(|(entry, _)| (entry.id.clone(), entry.name.clone()))
+        .collect::<HashMap<_, _>>();
+    for event in &events {
+        if let EventKind::Published {
+            snapshot, entry, ..
+        } = &event.kind
+        {
+            archive_names
+                .entry(snapshot.entry_id.clone())
+                .or_insert_with(|| {
+                    entry["name"]
+                        .as_str()
+                        .unwrap_or(&snapshot.entry_id)
+                        .to_owned()
+                });
+        }
+    }
+    let mut snapshots = Vec::new();
+    let local_only = entries
+        .iter()
+        .filter(|(entry, _)| entry.storage_policy != chronicle_core::StoragePolicy::LocalAndRemote)
+        .map(|(entry, _)| entry.id.clone())
+        .collect::<BTreeSet<_>>();
+    for (entry, timeline) in entries {
+        if entry_ids.contains(&entry.id)
+            || entry_ids.is_empty()
+                && entry.storage_policy == chronicle_core::StoragePolicy::LocalAndRemote
+        {
+            snapshots.extend(timeline);
+        }
+    }
+    let pending = pending(&repository)?;
+    let device_record_id =
+        device_record_needed(&device(&repository)?, &events).then(|| Uuid::new_v4().to_string());
+    let operations = plan_sync(&snapshots, &events, &pending, false)
+        .into_iter()
+        .filter(|item| {
+            (if entry_ids.is_empty() {
+                !local_only.contains(&item.snapshot.entry_id)
+            } else {
+                entry_ids.contains(&item.snapshot.entry_id)
+            }) && snapshot_id.is_none_or(|id| *id == item.snapshot.id)
+        })
+        .map(|item| SyncOperation {
+            id: Uuid::new_v4().to_string(),
+            item,
+        })
+        .collect();
+    Ok(SourcePlan {
+        source_id: source_id.clone(),
+        source_name: name,
+        upgrade_required: remote_upgrade || !enabled(&root, &source_id),
+        error: None,
+        token: source_token(&root, &repository, &events, &signature)?,
+        operations,
+        index_repair_id,
+        device_record_id,
+        archive_names,
+        devices: known_devices(&events),
+    })
 }
 
 #[tauri::command(async)]
@@ -1356,6 +1399,7 @@ async fn refresh_remote_index(remote: &SnapshotRemote) -> Result<(), String> {
     let (events, _) = remote_events(remote).await?;
     refresh_remote_index_from_events(remote, &events, None).await
 }
+#[cfg(test)]
 async fn index_repair_needed(
     remote: &SnapshotRemote,
     events: &[Event],
@@ -1366,6 +1410,9 @@ async fn index_repair_needed(
         remote.optional_bytes("catalog.json"),
     )
     .await?;
+    index_repair_needed_for(bytes, events)
+}
+fn index_repair_needed_for(bytes: Option<Vec<u8>>, events: &[Event]) -> Result<bool, String> {
     let Some(bytes) = bytes else {
         return Ok(events
             .iter()
